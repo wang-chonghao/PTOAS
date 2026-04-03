@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import re
 import textwrap
 import ast
 from dataclasses import dataclass, field
@@ -20,10 +19,46 @@ from .types import (
     TypeVariable,
     WildcardType,
 )
+from .frontend_ast import build_frontend_kernel_node
+from .lowering import lower_semantic_kernel
+from .semantic import analyze_frontend_kernel
 
 
 _UNSET = object()
 _MATCHER_FOLLOW_UP_CHANGE = "extend-tilelang-dsl-matcher-and-advanced-surface"
+_V1_ALLOWED_TOPLEVEL_PTO_CALLS = {
+    "strict_vecscope",
+    "dma_load",
+    "dma_store",
+    "set_flag",
+    "wait_flag",
+    "pipe_barrier",
+    "barrier",
+}
+_V1_ALLOWED_VECSCOPE_PTO_CALLS = {
+    "make_mask",
+    "vlds",
+    "vsts",
+    "vabs",
+    "vrelu",
+    "vexp",
+    "vnot",
+    "vadd",
+    "vsub",
+    "vmul",
+    "vdiv",
+    "vmax",
+    "vmin",
+    "vand",
+    "vor",
+    "vxor",
+    "vadds",
+    "vsubs",
+    "vmuls",
+    "vdivs",
+    "vmaxs",
+    "vmins",
+}
 
 
 def _unsupported_feature_message(feature: str) -> str:
@@ -86,6 +121,7 @@ class _FunctionSourceInfo:
 class _KernelBodyValidator(ast.NodeVisitor):
     def __init__(self, source_info: _FunctionSourceInfo):
         self.source_info = source_info
+        self._vecscope_depth = 0
 
     def validate(self) -> None:
         for stmt in self.source_info.function_def.body:
@@ -114,8 +150,65 @@ class _KernelBodyValidator(ast.NodeVisitor):
             node, "unsupported Python syntax `generator expression` in TileLang DSL v1"
         )
 
+    def visit_For(self, node: ast.For) -> None:
+        if not isinstance(node.target, ast.Name):
+            raise self.source_info.error(node.target, "for target must be a single name")
+        if not isinstance(node.iter, ast.Call) or not isinstance(node.iter.func, ast.Name):
+            raise self.source_info.error(node.iter, "only Python range(lb, ub, step) loops are supported")
+        if node.iter.func.id != "range":
+            raise self.source_info.error(node.iter, "only Python range(lb, ub, step) loops are supported")
+        if len(node.iter.args) != 3:
+            raise self.source_info.error(node.iter, "range() expects exactly 3 arguments in TileLang DSL v1")
+        for stmt in node.body:
+            self.visit(stmt)
+        for stmt in node.orelse:
+            self.visit(stmt)
+
+    def visit_If(self, node: ast.If) -> None:
+        for stmt in node.body:
+            self.visit(stmt)
+        for stmt in node.orelse:
+            self.visit(stmt)
+
+    def visit_With(self, node: ast.With) -> None:
+        if len(node.items) != 1:
+            raise self.source_info.error(node, "only single with item is supported in TileLang DSL v1")
+        item = node.items[0]
+        if not isinstance(item.context_expr, ast.Call):
+            raise self.source_info.error(item.context_expr, "with context must be a call in TileLang DSL v1")
+        if not (
+            isinstance(item.context_expr.func, ast.Attribute)
+            and isinstance(item.context_expr.func.value, ast.Name)
+            and item.context_expr.func.value.id == "pto"
+            and item.context_expr.func.attr == "strict_vecscope"
+        ):
+            raise self.source_info.error(
+                item.context_expr,
+                "only pto.strict_vecscope is supported as a with-context in TileLang DSL v1",
+            )
+        if not isinstance(item.optional_vars, ast.Tuple):
+            raise self.source_info.error(item, "pto.strict_vecscope requires tuple binding in 'as'")
+        for elt in item.optional_vars.elts:
+            if not isinstance(elt, ast.Name):
+                raise self.source_info.error(elt, "pto.strict_vecscope bindings must be names")
+        self._vecscope_depth += 1
+        try:
+            for stmt in node.body:
+                self.visit(stmt)
+        finally:
+            self._vecscope_depth -= 1
+
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            if node.func.value.id == "pto" and node.func.attr in _V1_ALLOWED_TOPLEVEL_PTO_CALLS:
+                return
+            if node.func.value.id == "pto" and node.func.attr in _V1_ALLOWED_VECSCOPE_PTO_CALLS:
+                if self._vecscope_depth <= 0:
+                    raise self.source_info.error(
+                        node,
+                        f"vector op surface `pto.{node.func.attr}` requires explicit pto.strict_vecscope in TileLang DSL v1",
+                    )
+                return
             if node.func.value.id == "pto":
                 raise self.source_info.error(
                     node,
@@ -128,6 +221,8 @@ class _KernelBodyValidator(ast.NodeVisitor):
             )
 
         if isinstance(node.func, ast.Name):
+            if node.func.id == "range":
+                return
             raise self.source_info.error(
                 node,
                 f"arbitrary external call `{node.func.id}` is not supported in TileLang DSL v1",
@@ -302,38 +397,14 @@ class VKernelDescriptor:
                 f"{missing_names}",
             )
 
-    def _format_symbol_name(self) -> str:
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$.]*", self.name):
-            return f"@{self.name}"
-        escaped = self.name.replace("\\", "\\\\").replace('"', '\\"')
-        return f'@"{escaped}"'
+    def _build_authoring_module(self):
+        frontend_kernel = build_frontend_kernel_node(self)
+        semantic_kernel = analyze_frontend_kernel(frontend_kernel)
+        return lower_semantic_kernel(semantic_kernel)
 
     def mlir_text(self) -> str:
         self._require_specialized_tiles("mlir_text")
-
-        lines = [
-            f"// tilelang.target = {self.target}",
-            f"// tilelang.op = {self.op}",
-            f"// tilelang.dtypes = {self.dtypes}",
-            f"// tilelang.verify = {self.verify_enabled}",
-        ]
-        for name, spec in self.specializations:
-            lines.append(
-                "// tilelang.specialize "
-                f"{name} shape={spec.shape} memory_space={spec.memory_space.value} "
-                f"config={spec.config}"
-            )
-        lines.extend(
-            [
-                "module {",
-                f"  func.func {self._format_symbol_name()}() {{",
-                "    return",
-                "  }",
-                "}",
-                "",
-            ]
-        )
-        return "\n".join(lines)
+        return self._build_authoring_module().render()
 
     def mlir_module(self) -> "MaterializedMLIRModule":
         self._require_specialized_tiles("mlir_module")

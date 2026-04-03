@@ -101,6 +101,11 @@ include_directories(${PROJECT_BINARY_DIR}/include)
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 
+# =========================================================
+# 3.1 Testing option setup
+# =========================================================
+include(CTest)
+
 # 开启 Python 绑定选项
 option(PTO_ENABLE_PYTHON_BINDING "Enable Python bindings" ON)
 
@@ -112,6 +117,7 @@ if(PTO_ENABLE_PYTHON_BINDING)
   set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python/pto)
 
   add_subdirectory(python)
+  add_subdirectory(tilelang-dsl)
 endif()
 
 # =========================================================
@@ -124,9 +130,27 @@ add_subdirectory(tools)
 # =========================================================
 # 4.1 Tests (ctest)
 # =========================================================
-include(CTest)
 if(BUILD_TESTING)
   enable_testing()
+  if(PTO_ENABLE_PYTHON_BINDING)
+    add_test(
+      NAME tilelang_dsl_import
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/tilelang-dsl/tests/import_tilelang_dsl.py"
+    )
+    set_tests_properties(tilelang_dsl_import PROPERTIES
+      ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    )
+    add_test(
+      NAME tilelang_dsl_unittest
+      COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+              -s "${CMAKE_CURRENT_SOURCE_DIR}/tilelang-dsl/tests"
+              -p "test_*.py"
+    )
+    set_tests_properties(tilelang_dsl_unittest PROPERTIES
+      ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    )
+  endif()
   add_subdirectory(tools/ptobc/tests)
 endif()
 
