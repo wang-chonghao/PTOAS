@@ -5,7 +5,14 @@ TBinOps_2D_NoPostUpdate` flow from `pto/npu/a5/TAdd.hpp`, but spells the final
 2D row-major vector body directly in Python:
 
 - top-level interface uses `dst, src0, src1` Tile parameters like `TADD`
-- `advanced=True` enables implicit `pto.vecscope` inference
+- Tile specializations keep a static physical tile shape while exposing a
+  dynamic `valid_shape` input at materialization time; the demo can model
+  fully dynamic or partially dynamic `(valid_rows, valid_cols)` profiles
+- the kernel surface is dtype-polymorphic and can be selected for any supported
+  vector dtype with `pto.select_kernel(...)`
+- implicit `pto.vecscope` inference and tile indexing sugar cover the base
+  vector authoring path; this demo also keeps `advanced=True` enabled because it
+  lives alongside the matcher/advanced-surface examples
 - `pto.vlds(tile[row, col:])` / `pto.vsts(vec, tile[row, col:], mask)` use
   tile indexing sugar instead of manual offset arithmetic
 """
@@ -29,11 +36,22 @@ def _import_tilelang_dsl():
 
 
 pto = _import_tilelang_dsl()
+T = pto.TypeVar("T")
+SUPPORTED_DTYPES = {
+    "i8": pto.i8,
+    "i16": pto.i16,
+    "i32": pto.i32,
+    "f16": pto.f16,
+    "bf16": pto.bf16,
+    "f32": pto.f32,
+}
+VALID_SHAPE_MODES = ("both", "rows", "cols", "static")
+TILE_SHAPE = (8, 64)
 
 
 @pto.vkernel(
     op="tadd",
-    dtypes=[(pto.f32, pto.f32, pto.f32)],
+    dtypes=[(T, T, T)],
     advanced=True,
     name="tilelang_advanced_tadd_demo",
 )
@@ -53,23 +71,76 @@ def kernel(dst: pto.Tile, src0: pto.Tile, src1: pto.Tile):
     return None
 
 
-def build_specialized_kernel():
-    return kernel.specialize(
-        dst=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
-        src0=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
-        src1=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
+def _resolve_valid_shape_profile(mode: str) -> tuple[object, object]:
+    rows, cols = TILE_SHAPE
+    if mode == "both":
+        return ("valid_rows", "valid_cols")
+    if mode == "rows":
+        return ("valid_rows", cols)
+    if mode == "cols":
+        return (rows, "valid_cols")
+    if mode == "static":
+        return TILE_SHAPE
+    raise ValueError(f"unsupported valid_shape mode '{mode}'")
+
+
+def build_specialized_kernel(dtype=pto.f32, valid_shape_mode="both"):
+    selected = pto.select_kernel("a5", "tadd", (dtype, dtype, dtype))
+    valid_shape = _resolve_valid_shape_profile(valid_shape_mode)
+    return selected.specialize(
+        src0=pto.TileSpecialization(
+            shape=TILE_SHAPE,
+            memory_space=pto.MemorySpace.UB,
+            valid_shape=valid_shape,
+        ),
+        src1=pto.TileSpecialization(
+            shape=TILE_SHAPE,
+            memory_space=pto.MemorySpace.UB,
+            valid_shape=valid_shape,
+        ),
+        dst=pto.TileSpecialization(
+            shape=TILE_SHAPE,
+            memory_space=pto.MemorySpace.UB,
+            valid_shape=valid_shape,
+        ),
     )
 
 
+def _parse_cli(argv):
+    if len(argv) > 4:
+        return None, None, None
+
+    dtype = pto.f32
+    valid_shape_mode = "both"
+    output_path = None
+    args = list(argv[1:])
+    for arg in args:
+        if arg in SUPPORTED_DTYPES:
+            dtype = SUPPORTED_DTYPES[arg]
+            continue
+        if arg in VALID_SHAPE_MODES:
+            valid_shape_mode = arg
+            continue
+        if output_path is None:
+            output_path = Path(arg)
+            continue
+        return None, None, None
+    return dtype, valid_shape_mode, output_path
+
+
 def main(argv) -> int:
-    specialized = build_specialized_kernel()
-
-    if len(argv) > 2:
-        print(f"usage: {Path(argv[0]).name} [output.mlir]", file=sys.stderr)
+    dtype, valid_shape_mode, output_path = _parse_cli(argv)
+    if dtype is None:
+        supported = ", ".join(SUPPORTED_DTYPES)
+        valid_shape_modes = ", ".join(VALID_SHAPE_MODES)
+        print(
+            f"usage: {Path(argv[0]).name} [{supported}] [{valid_shape_modes}] [output.mlir]",
+            file=sys.stderr,
+        )
         return 2
+    specialized = build_specialized_kernel(dtype=dtype, valid_shape_mode=valid_shape_mode)
 
-    if len(argv) == 2:
-        output_path = Path(argv[1])
+    if output_path is not None:
         specialized.emit(output_path)
         print(f"wrote MLIR to {output_path}")
         return 0

@@ -15,6 +15,8 @@ add_mlir_dialect_library(PTOTransforms
   HIVMIntrinsicNaming.cpp
   VPTOLLVMEmitter.cpp
   VPTOLLVMEmitterHelper.cpp
+  VPTOPtrNormalize.cpp
+  VPTOPtrCastCleanup.cpp
   PTOVPTOExpandBridgeOps.cpp
   PTOVPTOPtrBoundary.cpp
   PTOToVPTO.cpp
@@ -29,6 +31,7 @@ add_mlir_dialect_library(PTOTransforms
   MemrefToTileBuf.cpp
   ExpandTileOp.cpp
   FoldTileBufIntrinsics.cpp
+  PTOLowerToOpLibCalls.cpp
   PTOInstantiateAndInlineOpLib.cpp
   PTOToEmitC.cpp
   Utils.cpp

@@ -226,21 +226,30 @@ static llvm::cl::opt<int> graphSyncSolverEventIdMax(
         "Lower values exercise the PIPE_ALL coloring fallback sooner."),
     llvm::cl::init(kDefaultGraphSyncSolverEventIdMax));
 
-static llvm::cl::opt<bool> enableTileToVector(
-    "enable-tile-to-vector",
+static llvm::cl::opt<bool> enableTileOpExpand(
+    "enable-tile-op-expand",
     llvm::cl::desc(
         "Enable Tile-to-Vector lowering path (memref->tile_buf recovery)"),
     llvm::cl::init(false));
 
+#ifndef PTOAS_DEFAULT_TILELANG_PATH
+#define PTOAS_DEFAULT_TILELANG_PATH ""
+#endif
+#ifndef PTOAS_DEFAULT_TILELANG_PKG_PATH
+#define PTOAS_DEFAULT_TILELANG_PKG_PATH ""
+#endif
+
 static llvm::cl::opt<std::string> tilelangPath(
     "tilelang-path",
-    llvm::cl::desc("Path to directory of .py tilelang DSL template files"),
-    llvm::cl::init(""));
+    llvm::cl::desc("Path to directory of .py tilelang DSL template files "
+                   "(default: <source>/lib/TileOps, baked in at build time)"),
+    llvm::cl::init(PTOAS_DEFAULT_TILELANG_PATH));
 
 static llvm::cl::opt<std::string> tilelangPkgPath(
     "tilelang-pkg-path",
-    llvm::cl::desc("PYTHONPATH for tilelang_dsl package"),
-    llvm::cl::init(""));
+    llvm::cl::desc("PYTHONPATH for tilelang_dsl package "
+                   "(default: <source>/tilelang-dsl/python, baked in at build time)"),
+    llvm::cl::init(PTOAS_DEFAULT_TILELANG_PKG_PATH));
 
 static llvm::cl::opt<bool> disableInferLayout(
     "disable-infer-layout",
@@ -1355,8 +1364,22 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
 }
 
 static LogicalResult prepareVPTOForEmission(ModuleOp module) {
-  if (failed(convertVPTOEmissionBoundaryToPtr(module, &llvm::errs()))) {
-    llvm::errs() << "Error: VPTO emission boundary canonicalization failed.\n";
+  PassManager cleanupPM(module->getContext());
+  cleanupPM.enableVerifier();
+  cleanupPM.addPass(createCanonicalizerPass());
+  cleanupPM.addPass(createCSEPass());
+  if (failed(cleanupPM.run(module))) {
+    llvm::errs() << "Error: VPTO pre-emission cleanup failed.\n";
+    return failure();
+  }
+
+  PassManager boundaryPM(module->getContext());
+  boundaryPM.enableVerifier();
+  boundaryPM.addPass(pto::createVPTOPtrNormalizePass());
+  boundaryPM.addPass(pto::createVPTOPtrCastCleanupPass());
+  boundaryPM.addPass(createReconcileUnrealizedCastsPass());
+  if (failed(boundaryPM.run(module))) {
+    llvm::errs() << "Error: VPTO ptr normalization failed.\n";
     return failure();
   }
 
@@ -1375,8 +1398,25 @@ static LogicalResult prepareVPTOForEmission(ModuleOp module) {
 
 static LogicalResult lowerPTOToVPTOBackend(ModuleOp module) {
   PassManager backendPM(module.getContext());
-  backendPM.addPass(pto::createLowerPTOToVPTOPass());
-  backendPM.addPass(mlir::createCSEPass());
+  if (enableTileOpExpand) {
+    // TileOp Expand path:
+    //   1. MemrefToTileBuf: recover tile_buf from memref
+    //   2. ExpandTileOp: instantiate TileLang DSL templates, replace tile ops
+    //      with func.call to template functions (tile_buf params)
+    //   3. InlineLibCall: inline template function bodies
+    //   4. FoldTileBufIntrinsics: fold tile_buf_addr / tile_valid_rows /
+    //      tile_valid_cols to concrete memref/constant values
+    backendPM.addPass(pto::createMemrefToTileBufPass());
+
+    pto::ExpandTileOpOptions expandOpts;
+    expandOpts.tilelangPath = tilelangPath;
+    expandOpts.tilelangPkgPath = tilelangPkgPath;
+    backendPM.addPass(pto::createExpandTileOpPass(expandOpts));
+  
+    backendPM.addPass(pto::createPTOInlineLibCallPass());
+    backendPM.addNestedPass<mlir::func::FuncOp>(
+        pto::createFoldTileBufIntrinsicsPass());
+  }
   if (failed(backendPM.run(module))) {
     llvm::errs() << "Error: backend lowering pass execution failed.\n";
     return failure();
@@ -1800,37 +1840,9 @@ int main(int argc, char **argv) {
   pm.addPass(emitc::createFormExpressionsPass());
   pm.addPass(mlir::createCSEPass());
 
-  if (enableTileToVector) {
-    // Tile→Vector path:
-    //   1. MemrefToTileBuf: recover tile_buf from memref
-    //   2. ExpandTileOp: instantiate TileLang DSL templates, replace tile ops
-    //      with func.call to template functions (tile_buf params)
-    //   3. InlineLibCall: inline template function bodies
-    //   4. FoldTileBufIntrinsics: fold tile_buf_addr / tile_valid_rows /
-    //      tile_valid_cols to concrete memref/constant values
-    pm.addPass(pto::createMemrefToTileBufPass());
-
-    pto::ExpandTileOpOptions expandOpts;
-    expandOpts.tilelangPath = tilelangPath;
-    expandOpts.tilelangPkgPath = tilelangPkgPath;
-    pm.addPass(pto::createExpandTileOpPass(expandOpts));
-
-    pm.addPass(pto::createPTOInlineLibCallPass());
-    pm.addNestedPass<mlir::func::FuncOp>(
-        pto::createFoldTileBufIntrinsicsPass());
-  }
-
   if (failed(pm.run(*module))) {
     llvm::errs() << "Error: Pass execution failed.\n";
     return 1;
-  }
-
-  // Tile→Vector path: print MLIR IR and exit (no C++ emission).
-  if (enableTileToVector) {
-    module->print(outputFile.os());
-    outputFile.os() << "\n";
-    outputFile.keep();
-    return 0;
   }
 
   dropEmptyEmitCExpressions(module.get());

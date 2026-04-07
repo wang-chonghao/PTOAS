@@ -1,0 +1,28 @@
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - | FileCheck %s
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @kernel(%arg0: i32) attributes { pto.tilelang.instance } {
+    %0 = func.call @__tl_inline_add1_i32(%arg0) : (i32) -> i32
+    func.call @__tl_inline_sink_i32(%0) : (i32) -> ()
+    return
+  }
+
+  func.func private @__tl_inline_add1_i32(%x: i32) -> i32 attributes { pto.tilelang.inline_proc } {
+    %c1 = arith.constant 1 : i32
+    %v = arith.addi %x, %c1 : i32
+    return %v : i32
+  }
+
+  func.func private @__tl_inline_sink_i32(%x: i32) attributes { pto.tilelang.inline_proc } {
+    %c2 = arith.constant 2 : i32
+    %t = arith.addi %x, %c2 : i32
+    return
+  }
+}
+
+// CHECK-LABEL: func.func @kernel
+// CHECK: return
+// CHECK-NOT: func.call @__tl_inline_
+// CHECK-NOT: call @__tl_inline_
+// CHECK-NOT: pto.tilelang.inline_proc
+// CHECK-NOT: func.func private @__tl_inline_

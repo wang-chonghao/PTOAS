@@ -1,8 +1,8 @@
 """TileLang DSL v1 demo: pto.tadd (element-wise add) using Tile parameters.
 
-Note: v1 surface only supports 1D vectorized iteration within strict_vecscope.
-The canonical 2D row×col loop with dynamic masking requires v2 features.
-This demo demonstrates a 1D inner-loop pattern over the tile's column extent.
+This example intentionally enables `advanced=True` because it demonstrates
+explicit `strict_vecscope`. Stable kernels can rely on inferred `pto.vecscope`
+and `tile[row, col:]` indexing sugar without opting into advanced mode.
 """
 
 import sys
@@ -27,6 +27,7 @@ pto = _import_tilelang_dsl()
     op="pto.tadd",
     dtypes=[(pto.f32, pto.f32, pto.f32)],
     name="template_tadd",
+    advanced=True,
 )
 def template_tadd(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
     # v1 strict_vecscope: all referenced values must be passed in explicitly,

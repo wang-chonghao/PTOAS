@@ -1,3 +1,11 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 """Public type markers for the TileLang DSL v1 surface."""
 
 from __future__ import annotations
@@ -19,6 +27,10 @@ class TensorView:
     """Bare TensorView annotation marker for TileLang DSL v1."""
 
 
+class PartitionTensorView:
+    """Bare PartitionTensorView annotation marker for TileLang DSL v1."""
+
+
 class Tile:
     """Bare Tile annotation marker for TileLang DSL v1."""
 
@@ -30,6 +42,23 @@ class PointerType:
 
     def __repr__(self) -> str:
         return f"ptr({self.element_dtype!r}, {self.memory_space!r})"
+
+
+@dataclass(frozen=True)
+class VRegType:
+    element_dtype: ScalarType
+    lanes: int
+
+    def __repr__(self) -> str:
+        return f"vreg({self.element_dtype!r})"
+
+
+@dataclass(frozen=True)
+class MaskType:
+    granularity: str
+
+    def __repr__(self) -> str:
+        return f"mask_{self.granularity}"
 
 
 @dataclass(frozen=True)
@@ -81,6 +110,20 @@ class MaskPattern(str, Enum):
     VL32 = "PAT_VL32"
 
 
+class PadMode(str, Enum):
+    PadNull = "PadNull"
+    PadFirstElem = "PadFirstElem"
+    PadValue = "PadValue"
+
+
+class PositionMode(str, Enum):
+    LOWEST = "POS_LOWEST"
+
+
+class OrderMode(str, Enum):
+    ASC = "ORDER_ASC"
+
+
 @dataclass(frozen=True)
 class TileConfig:
     fields: tuple[tuple[str, Any], ...] = ()
@@ -95,6 +138,7 @@ class TileSpecialization:
     shape: tuple[int, ...]
     memory_space: MemorySpace
     config: TileConfig | None = None
+    valid_shape: tuple[int | None, ...] | None = None
 
 
 i8 = ScalarType("i8")
@@ -112,6 +156,9 @@ AnyFloat = WildcardType("AnyFloat")
 AnyInt = WildcardType("AnyInt")
 AnyType = WildcardType("AnyType")
 AnyMask = WildcardType("AnyMask")
+mask_b8 = MaskType("b8")
+mask_b16 = MaskType("b16")
+mask_b32 = MaskType("b32")
 
 
 def TypeVar(name: str) -> TypeVariable:
@@ -128,9 +175,15 @@ def ptr(dtype: ScalarType, memory_space: MemorySpace) -> PointerType:
     return PointerType(element_dtype=dtype, memory_space=memory_space)
 
 
-def get_lanes(dtype: ScalarType) -> int:
+def vreg(dtype: ScalarType) -> VRegType:
     if not isinstance(dtype, ScalarType):
-        raise TypeError("get_lanes expects a TileLang scalar dtype")
+        raise TypeError("vreg() expects a TileLang scalar dtype")
+    return VRegType(element_dtype=dtype, lanes=get_lanes(dtype))
+
+
+def bytewidth(dtype: ScalarType) -> int:
+    if not isinstance(dtype, ScalarType):
+        raise TypeError("bytewidth expects a TileLang scalar dtype")
     byte_widths = {
         "i8": 1,
         "i16": 2,
@@ -141,8 +194,20 @@ def get_lanes(dtype: ScalarType) -> int:
     }
     width = byte_widths.get(dtype.name)
     if width is None:
-        raise TypeError(f"dtype `{dtype.name}` is not supported by get_lanes")
-    return 256 // width
+        raise TypeError(f"dtype `{dtype.name}` is not supported by bytewidth")
+    return width
+
+
+def get_lanes(dtype: ScalarType) -> int:
+    return 256 // bytewidth(dtype)
+
+
+def elements_per_vreg(dtype: ScalarType) -> int:
+    return get_lanes(dtype)
+
+
+def constexpr(value: bool) -> bool:
+    return value
 
 
 __all__ = [
@@ -151,9 +216,13 @@ __all__ = [
     "TypeVariable",
     "TypeVar",
     "TensorView",
+    "PartitionTensorView",
     "Tile",
     "PointerType",
+    "VRegType",
+    "MaskType",
     "ptr",
+    "vreg",
     "MemorySpace",
     "Pipe",
     "Event",
@@ -161,6 +230,9 @@ __all__ = [
     "EVENT",
     "MaskPattern",
     "PAT",
+    "PadMode",
+    "PositionMode",
+    "OrderMode",
     "TileConfig",
     "TileSpecialization",
     "i1",
@@ -175,5 +247,11 @@ __all__ = [
     "AnyInt",
     "AnyType",
     "AnyMask",
+    "mask_b8",
+    "mask_b16",
+    "mask_b32",
+    "constexpr",
+    "bytewidth",
     "get_lanes",
+    "elements_per_vreg",
 ]

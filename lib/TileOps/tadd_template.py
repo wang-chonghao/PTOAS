@@ -1,23 +1,15 @@
-"""TileLang DSL template for pto.tadd — used by ExpandTileOp tests."""
+"""TileLang DSL template for pto.tadd"""
 
 import sys
 from pathlib import Path
-
-_repo = Path(__file__).resolve().parents[2]
-_pkg = _repo / "tilelang-dsl" / "python"
-if str(_pkg) not in sys.path:
-    sys.path.insert(0, str(_pkg))
-
 import tilelang_dsl as pto
 
 
 @pto.vkernel(
-    op="pto.tadd",
-    dtypes=[(pto.f32, pto.f32, pto.f32)],
-    advanced=True,
-    name="template_tadd",
+    target="a5",
+    op="pto.tadd"
 )
-def template_tadd(dst: pto.Tile, src0: pto.Tile, src1: pto.Tile):
+def template_tadd(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
     dtype = dst.element_type
     valid_rows, valid_cols = dst.valid_shape
 
@@ -29,4 +21,4 @@ def template_tadd(dst: pto.Tile, src0: pto.Tile, src1: pto.Tile):
             rhs = pto.vlds(src1[row, col:])
             summed = pto.vadd(lhs, rhs, mask)
             pto.vsts(summed, dst[row, col:], mask)
-    return None
+    return

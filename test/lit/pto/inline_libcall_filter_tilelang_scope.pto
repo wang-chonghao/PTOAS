@@ -1,0 +1,38 @@
+// RUN: ptoas --pto-arch=a5 --pass-pipeline="builtin.module(pto-inline-libcall)" %s | FileCheck %s
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @kernel(%arg0: i32) {
+    %v0 = func.call @__tl_inline_add1_i32(%arg0) : (i32) -> i32
+    %v1 = func.call @__tilelang_template_passthrough_i32(%v0) : (i32) -> i32
+    %v2 = func.call @__regular_passthrough_i32(%v1) : (i32) -> i32
+    return
+  }
+
+  func.func private @__tl_inline_add1_i32(%x: i32) -> i32 attributes { pto.tilelang.inline_proc } {
+    %c1 = arith.constant 1 : i32
+    %y = arith.addi %x, %c1 : i32
+    return %y : i32
+  }
+
+  // This is intentionally NOT an inline_proc helper. The inline pass should
+  // still inline it because template helper inlining is enabled in VPTO
+  // mainline regardless of --enable-tile-op-expand.
+  func.func private @__tilelang_template_passthrough_i32(%x: i32) -> i32 attributes { pto.tilelang.instance } {
+    return %x : i32
+  }
+
+  // Regular private helper without TileLang/OP-Lib attrs must not be inlined
+  // by pto-inline-libcall.
+  func.func private @__regular_passthrough_i32(%x: i32) -> i32 {
+    return %x : i32
+  }
+}
+
+// CHECK-LABEL: func.func @kernel
+// CHECK: arith.constant 1 : i32
+// CHECK-NOT: func.call @__tl_inline_add1_i32
+// CHECK-NOT: call @__tilelang_template_passthrough_i32
+// CHECK: call @__regular_passthrough_i32
+// CHECK-NOT: func.func private @__tilelang_template_passthrough_i32
+// CHECK: func.func private @__regular_passthrough_i32
+// CHECK-NOT: func.func private @__tl_inline_add1_i32

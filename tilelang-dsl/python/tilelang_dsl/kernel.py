@@ -1,3 +1,11 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 """Kernel descriptor surface for TileLang DSL v1."""
 
 from __future__ import annotations
@@ -13,7 +21,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .types import (
+    AnyMask,
+    AnyType,
+    MaskType,
     MemorySpace,
+    PartitionTensorView,
     PointerType,
     ScalarType,
     TensorView,
@@ -23,7 +35,7 @@ from .types import (
     TypeVariable,
     WildcardType,
 )
-from .frontend_ast import build_frontend_kernel_node
+from .frontend_ast import _DMA_CALL_KEYWORDS, build_frontend_kernel_node
 from .lowering import lower_semantic_kernel
 from .semantic import analyze_frontend_kernel
 from .support_matrix import (
@@ -40,10 +52,152 @@ from .support_matrix import (
 
 _UNSET = object()
 _PTOAS_BIN_ENV = "PTOAS_BIN"
+_SUPPORTED_TEMPLATE_PTO_CALLS = frozenset(
+    SUPPORTED_TOPLEVEL_PTO_CALLS
+    | SUPPORTED_VECSCOPE_PTO_CALLS
+    | ADVANCED_VECSCOPE_PTO_CALLS
+    | ADVANCED_EXPR_PTO_CALLS
+    | ADVANCED_TOPLEVEL_PTO_CALLS
+)
 
 
-def _validate_dtype_pattern(dtype: Any) -> ScalarType | WildcardType | TypeVariable:
-    if isinstance(dtype, (ScalarType, WildcardType, TypeVariable)):
+_INLINE_PROC_REGISTRY: dict[tuple[str, str], "InlineProcDescriptor"] = {}
+
+
+@dataclass(frozen=True)
+class InlineProcDescriptor:
+    """Descriptor returned by @tilelang_dsl.inline_proc."""
+
+    name: str
+    py_fn: Callable[..., Any] = field(repr=False)
+    signature: inspect.Signature = field(repr=False)
+    source_info: "_FunctionSourceInfo | None" = field(repr=False, default=None)
+
+
+class _InlineProcValidator(ast.NodeVisitor):
+    def __init__(self, source_info: "_FunctionSourceInfo"):
+        self.source_info = source_info
+
+    def validate(self) -> None:
+        fn = self.source_info.function_def
+        args = fn.args
+        if args.posonlyargs:
+            raise self.source_info.error(args.posonlyargs[0], "inline_proc does not support positional-only parameters in TileLang DSL v1")
+        if args.vararg is not None:
+            raise self.source_info.error(args.vararg, "inline_proc does not support *args in TileLang DSL v1")
+        if args.kwarg is not None:
+            raise self.source_info.error(args.kwarg, "inline_proc does not support **kwargs in TileLang DSL v1")
+        if args.kwonlyargs:
+            raise self.source_info.error(args.kwonlyargs[0], "inline_proc does not support keyword-only parameters in TileLang DSL v1")
+        tail_return: ast.Return | None = fn.body[-1] if fn.body and isinstance(fn.body[-1], ast.Return) else None
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Return):
+                continue
+            if node is tail_return:
+                continue
+            raise self.source_info.error(
+                node,
+                "inline_proc only supports an optional trailing `return` in TileLang DSL v1",
+            )
+
+        for stmt in fn.body:
+            self.visit(stmt)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        if node is self.source_info.function_def:
+            for stmt in node.body:
+                self.visit(stmt)
+            return
+        raise self.source_info.error(node, "nested function definitions are not supported inside inline_proc in TileLang DSL v1")
+
+
+def _inline_proc_registry_key(fn: Callable[..., Any]) -> tuple[str, str]:
+    return (fn.__module__, fn.__name__)
+
+
+def _find_inline_proc(name: str, *, module_name: str | None) -> InlineProcDescriptor | None:
+    if module_name is None:
+        return None
+    return _INLINE_PROC_REGISTRY.get((module_name, name))
+
+
+def _validate_inline_proc_call_surface(
+    source_info: _FunctionSourceInfo,
+    node: ast.Call,
+    inline_proc: InlineProcDescriptor,
+) -> None:
+    if any(keyword.arg is None for keyword in node.keywords):
+        keyword = next(keyword for keyword in node.keywords if keyword.arg is None)
+        raise source_info.error(
+            keyword.value,
+            "keyword unpacking via `**` is not supported in TileLang DSL v1",
+        )
+    seen_keywords: set[str] = set()
+    for keyword in node.keywords:
+        assert keyword.arg is not None
+        if keyword.arg in seen_keywords:
+            raise source_info.error(
+                keyword.value,
+                f"duplicate keyword `{keyword.arg}` for inline_proc `{inline_proc.name}` in TileLang DSL v1",
+            )
+        seen_keywords.add(keyword.arg)
+    positional_placeholders = [object() for _ in node.args]
+    keyword_placeholders = {keyword.arg: object() for keyword in node.keywords if keyword.arg is not None}
+    try:
+        inline_proc.signature.bind(*positional_placeholders, **keyword_placeholders)
+    except TypeError as exc:
+        raise source_info.error(
+            node,
+            f"invalid inline_proc call `{inline_proc.name}` in TileLang DSL v1: {exc}",
+        ) from exc
+
+
+def _collect_inline_procs(module_name: str) -> tuple[tuple[str, InlineProcDescriptor], ...]:
+    return tuple(
+        sorted(
+            (
+                (symbol, descriptor)
+                for (registered_module, symbol), descriptor in _INLINE_PROC_REGISTRY.items()
+                if registered_module == module_name
+            ),
+            key=lambda item: item[0],
+        )
+    )
+
+
+def _register_inline_proc(descriptor: InlineProcDescriptor) -> InlineProcDescriptor:
+    _INLINE_PROC_REGISTRY[_inline_proc_registry_key(descriptor.py_fn)] = descriptor
+    return descriptor
+
+
+def inline_proc(
+    py_fn: Callable[..., Any] | None = None,
+) -> InlineProcDescriptor | Callable[[Callable[..., Any]], InlineProcDescriptor]:
+    """Register a top-level compile-time inline procedure for TileLang DSL kernels."""
+
+    def wrap(fn: Callable[..., Any]) -> InlineProcDescriptor:
+        if not callable(fn):
+            raise TypeError("@inline_proc can only decorate callables")
+        source_info = _load_function_source_info(fn)
+        if source_info is None:
+            raise TypeError("@inline_proc requires source-visible Python functions")
+        _InlineProcValidator(source_info).validate()
+        return _register_inline_proc(
+            InlineProcDescriptor(
+                name=fn.__name__,
+                py_fn=fn,
+                source_info=source_info,
+                signature=inspect.signature(fn),
+            )
+        )
+
+    if py_fn is None:
+        return wrap
+    return wrap(py_fn)
+
+
+def _validate_dtype_pattern(dtype: Any) -> ScalarType | MaskType | WildcardType | TypeVariable:
+    if isinstance(dtype, (ScalarType, MaskType, WildcardType, TypeVariable)):
         return dtype
     raise TypeError(f"unsupported dtype pattern {dtype!r}")
 
@@ -82,9 +236,10 @@ class _FunctionSourceInfo:
 
 
 class _KernelBodyValidator(ast.NodeVisitor):
-    def __init__(self, source_info: _FunctionSourceInfo, *, advanced_enabled: bool):
+    def __init__(self, source_info: _FunctionSourceInfo, *, advanced_enabled: bool, module_name: str | None):
         self.source_info = source_info
         self.advanced_enabled = advanced_enabled
+        self.module_name = module_name
         self._vecscope_depth = 0
 
     def validate(self) -> None:
@@ -121,6 +276,11 @@ class _KernelBodyValidator(ast.NodeVisitor):
             raise self.source_info.error(node.iter, "only Python range(lb, ub, step) loops are supported")
         if node.iter.func.id != "range":
             raise self.source_info.error(node.iter, "only Python range(lb, ub, step) loops are supported")
+        if node.iter.keywords:
+            raise self.source_info.error(
+                node.iter,
+                "range() does not support keyword arguments in TileLang DSL v1",
+            )
         if len(node.iter.args) != 3:
             raise self.source_info.error(node.iter, "range() expects exactly 3 arguments in TileLang DSL v1")
         for stmt in node.body:
@@ -144,17 +304,39 @@ class _KernelBodyValidator(ast.NodeVisitor):
             isinstance(item.context_expr.func, ast.Attribute)
             and isinstance(item.context_expr.func.value, ast.Name)
             and item.context_expr.func.value.id == "pto"
-            and item.context_expr.func.attr == "strict_vecscope"
         ):
             raise self.source_info.error(
                 item.context_expr,
-                "only pto.strict_vecscope is supported as a with-context in TileLang DSL v1",
+                "only pto.vecscope/pto.strict_vecscope are supported as with-contexts in TileLang DSL v1",
             )
-        if not isinstance(item.optional_vars, ast.Tuple):
-            raise self.source_info.error(item, "pto.strict_vecscope requires tuple binding in 'as'")
-        for elt in item.optional_vars.elts:
-            if not isinstance(elt, ast.Name):
-                raise self.source_info.error(elt, "pto.strict_vecscope bindings must be names")
+        with_name = item.context_expr.func.attr
+        if with_name == "vecscope":
+            if item.context_expr.args or item.context_expr.keywords:
+                raise self.source_info.error(
+                    item.context_expr,
+                    "pto.vecscope() does not accept positional or keyword arguments in TileLang DSL v1",
+                )
+            if item.optional_vars is not None:
+                raise self.source_info.error(
+                    item,
+                    "pto.vecscope() does not support `as` bindings in TileLang DSL v1",
+                )
+        elif with_name == "strict_vecscope":
+            if not self.advanced_enabled:
+                raise self.source_info.error(
+                    item.context_expr,
+                    advanced_mode_message("strict_vecscope"),
+                )
+            if not isinstance(item.optional_vars, ast.Tuple):
+                raise self.source_info.error(item, "pto.strict_vecscope requires tuple binding in 'as'")
+            for elt in item.optional_vars.elts:
+                if not isinstance(elt, ast.Name):
+                    raise self.source_info.error(elt, "pto.strict_vecscope bindings must be names")
+        else:
+            raise self.source_info.error(
+                item.context_expr,
+                "only pto.vecscope/pto.strict_vecscope are supported as with-contexts in TileLang DSL v1",
+            )
         self._vecscope_depth += 1
         try:
             for stmt in node.body:
@@ -162,21 +344,83 @@ class _KernelBodyValidator(ast.NodeVisitor):
         finally:
             self._vecscope_depth -= 1
 
+    def _validate_call_keywords(self, node: ast.Call) -> None:
+        if not node.keywords:
+            return
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                raise self.source_info.error(
+                    keyword.value,
+                    "keyword unpacking via `**` is not supported in TileLang DSL v1",
+                )
+
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            namespace = node.func.value.id
+            name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            namespace = None
+            name = node.func.id
+        else:
+            raise self.source_info.error(
+                node,
+                "unsupported call surface in TileLang DSL v1",
+            )
+
+        allowed_keywords = _DMA_CALL_KEYWORDS.get(name) if namespace == "pto" else None
+        if allowed_keywords is None:
+            call_name = f"{namespace + '.' if namespace else ''}{name}"
+            raise self.source_info.error(
+                node,
+                f"`{call_name}` does not support keyword arguments in TileLang DSL v1; "
+                "no public call surface currently accepts them",
+            )
+
+        seen: set[str] = set()
+        for keyword in node.keywords:
+            assert keyword.arg is not None
+            if keyword.arg in seen:
+                raise self.source_info.error(
+                    keyword.value,
+                    f"duplicate keyword `{keyword.arg}` for `pto.{name}` in TileLang DSL v1",
+                )
+            if keyword.arg not in allowed_keywords:
+                raise self.source_info.error(
+                    keyword.value,
+                    f"unsupported keyword `{keyword.arg}` for `pto.{name}` in TileLang DSL v1",
+                )
+            seen.add(keyword.arg)
+
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-            if node.func.value.id == "pto" and node.func.attr in SUPPORTED_TOPLEVEL_PTO_CALLS:
-                return
-            if node.func.value.id == "pto" and node.func.attr in SUPPORTED_VECSCOPE_PTO_CALLS:
-                if self.advanced_enabled:
-                    return
-                if self._vecscope_depth <= 0:
+            if node.func.attr == "as_ptr":
+                if node.keywords:
                     raise self.source_info.error(
                         node,
-                        f"vector op surface `pto.{node.func.attr}` requires explicit pto.strict_vecscope in TileLang DSL v1",
+                        "`as_ptr` does not support keyword arguments in TileLang DSL v1",
                     )
+                if node.args:
+                    raise self.source_info.error(
+                        node,
+                        "`as_ptr()` does not accept positional arguments in TileLang DSL v1",
+                    )
+                if self.advanced_enabled:
+                    return
+                raise self.source_info.error(
+                    node,
+                    "surface `as_ptr` requires advanced=True in TileLang DSL v1",
+                )
+            if node.func.value.id == "pto" and node.func.attr == "tpl":
+                self._validate_call_keywords(node)
+                return
+            if node.func.value.id == "pto" and node.func.attr in SUPPORTED_TOPLEVEL_PTO_CALLS:
+                self._validate_call_keywords(node)
+                return
+            if node.func.value.id == "pto" and node.func.attr in SUPPORTED_VECSCOPE_PTO_CALLS:
+                self._validate_call_keywords(node)
                 return
             if node.func.value.id == "pto" and node.func.attr in ADVANCED_VECSCOPE_PTO_CALLS:
                 if self.advanced_enabled:
+                    self._validate_call_keywords(node)
                     return
                 raise self.source_info.error(
                     node,
@@ -187,6 +431,7 @@ class _KernelBodyValidator(ast.NodeVisitor):
                 or node.func.attr in ADVANCED_TOPLEVEL_PTO_CALLS
             ):
                 if self.advanced_enabled:
+                    self._validate_call_keywords(node)
                     return
                 raise self.source_info.error(
                     node,
@@ -210,6 +455,11 @@ class _KernelBodyValidator(ast.NodeVisitor):
 
         if isinstance(node.func, ast.Name):
             if node.func.id == "range":
+                self._validate_call_keywords(node)
+                return
+            inline_proc = _find_inline_proc(node.func.id, module_name=self.module_name)
+            if inline_proc is not None:
+                _validate_inline_proc_call_surface(self.source_info, node, inline_proc)
                 return
             raise self.source_info.error(
                 node,
@@ -241,12 +491,14 @@ def _validate_function_body(
     source_info: _FunctionSourceInfo | None,
     *,
     advanced_enabled: bool,
+    module_name: str | None,
 ) -> None:
     if source_info is None:
         return
     _KernelBodyValidator(
         source_info,
         advanced_enabled=advanced_enabled,
+        module_name=module_name,
     ).validate()
 
 
@@ -289,11 +541,11 @@ class BoundKernelParameter:
     name: str
     kind: str
     annotation: Any
-    dtype: ScalarType
+    dtype: Any
 
     @property
     def element_dtype(self) -> ScalarType | None:
-        if self.kind in ("tensorview", "tile", "ptr"):
+        if self.kind in ("tensorview", "partition_tensor_view", "tile", "ptr"):
             return self.dtype
         return None
 
@@ -308,11 +560,149 @@ class KernelParameterSpec:
 
 
 @dataclass(frozen=True)
+class _ConstraintValue:
+    value: Any | None
+
+    def _coerce_other(self, other: Any) -> Any | None:
+        if isinstance(other, _ConstraintValue):
+            return other.value
+        return other
+
+    def _arith(self, other: Any, fn: Callable[[Any, Any], Any]) -> "_ConstraintValue":
+        other_value = self._coerce_other(other)
+        if self.value is None or other_value is None:
+            return _ConstraintValue(None)
+        return _ConstraintValue(fn(self.value, other_value))
+
+    def _compare(self, other: Any, fn: Callable[[Any, Any], bool]) -> bool:
+        other_value = self._coerce_other(other)
+        if self.value is None or other_value is None:
+            return True
+        return fn(self.value, other_value)
+
+    def __add__(self, other: Any) -> "_ConstraintValue":
+        return self._arith(other, lambda lhs, rhs: lhs + rhs)
+
+    def __radd__(self, other: Any) -> "_ConstraintValue":
+        return _ConstraintValue(self._coerce_other(other)).__add__(self)
+
+    def __sub__(self, other: Any) -> "_ConstraintValue":
+        return self._arith(other, lambda lhs, rhs: lhs - rhs)
+
+    def __rsub__(self, other: Any) -> "_ConstraintValue":
+        return _ConstraintValue(self._coerce_other(other)).__sub__(self)
+
+    def __mul__(self, other: Any) -> "_ConstraintValue":
+        return self._arith(other, lambda lhs, rhs: lhs * rhs)
+
+    def __rmul__(self, other: Any) -> "_ConstraintValue":
+        return _ConstraintValue(self._coerce_other(other)).__mul__(self)
+
+    def __floordiv__(self, other: Any) -> "_ConstraintValue":
+        return self._arith(other, lambda lhs, rhs: lhs // rhs)
+
+    def __rfloordiv__(self, other: Any) -> "_ConstraintValue":
+        return _ConstraintValue(self._coerce_other(other)).__floordiv__(self)
+
+    def __eq__(self, other: Any) -> bool:  # type: ignore[override]
+        return self._compare(other, lambda lhs, rhs: lhs == rhs)
+
+    def __ne__(self, other: Any) -> bool:  # type: ignore[override]
+        return self._compare(other, lambda lhs, rhs: lhs != rhs)
+
+    def __le__(self, other: Any) -> bool:
+        return self._compare(other, lambda lhs, rhs: lhs <= rhs)
+
+    def __lt__(self, other: Any) -> bool:
+        return self._compare(other, lambda lhs, rhs: lhs < rhs)
+
+    def __ge__(self, other: Any) -> bool:
+        return self._compare(other, lambda lhs, rhs: lhs >= rhs)
+
+    def __gt__(self, other: Any) -> bool:
+        return self._compare(other, lambda lhs, rhs: lhs > rhs)
+
+    def __bool__(self) -> bool:
+        if self.value is None:
+            return True
+        return bool(self.value)
+
+    def __repr__(self) -> str:
+        return "?" if self.value is None else repr(self.value)
+
+
+class _ConstraintSequenceView:
+    def __init__(self, values: tuple[Any | None, ...]):
+        self._values = tuple(_ConstraintValue(value) for value in values)
+
+    def __getitem__(self, index: int) -> _ConstraintValue:
+        if -len(self._values) <= index < len(self._values):
+            return self._values[index]
+        return _ConstraintValue(None)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __repr__(self) -> str:
+        return repr(tuple(self._values))
+
+
+class _ConstraintParamView:
+    def __init__(self, name: str, attrs: Mapping[str, Any]):
+        self._name = name
+        self._attrs = dict(attrs)
+
+    def _sequence_attr(self, attr_name: str) -> _ConstraintSequenceView:
+        values = self._attrs.get(attr_name)
+        if values is None:
+            rank = self._attrs.get("rank")
+            if isinstance(rank, int) and rank > 0:
+                values = (None,) * rank
+            else:
+                values = ()
+        return _ConstraintSequenceView(tuple(values))
+
+    @property
+    def shape(self) -> _ConstraintSequenceView:
+        return self._sequence_attr("shape")
+
+    @property
+    def valid_shape(self) -> _ConstraintSequenceView:
+        return self._sequence_attr("valid_shape")
+
+    @property
+    def strides(self) -> _ConstraintSequenceView:
+        return self._sequence_attr("strides")
+
+    @property
+    def rank(self) -> _ConstraintValue:
+        return _ConstraintValue(self._attrs.get("rank"))
+
+    @property
+    def dtype(self) -> Any:
+        return self._attrs.get("dtype")
+
+    @property
+    def memory_space(self) -> Any:
+        return self._attrs.get("memory_space")
+
+    @property
+    def config(self) -> Any:
+        return self._attrs.get("config")
+
+    def __repr__(self) -> str:
+        return f"{self._name}<{self._attrs!r}>"
+
+
+@dataclass(frozen=True)
 class VKernelDescriptor:
     """Descriptor returned by `@tilelang_dsl.vkernel`."""
 
     target: str
-    op: str
+    match_ops: tuple[str, ...]
     dtypes: tuple[tuple[Any, ...], ...]
     name: str
     verify_enabled: bool
@@ -323,15 +713,43 @@ class VKernelDescriptor:
     specializations: tuple[tuple[str, TileSpecialization], ...] = ()
     constraints: tuple[Callable[[Mapping[str, Any]], Any], ...] = field(default=(), repr=False)
     priority: int = 0
-    _selected_dtype_signature: tuple[ScalarType, ...] | None = None
+    _templates: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = field(default=(), repr=False)
+    _inline_procs: tuple[tuple[str, InlineProcDescriptor], ...] = field(default=(), repr=False)
+    _selected_op: str | None = None
+    _selected_dtype_signature: tuple[ScalarType | MaskType, ...] | None = None
     _parameters: tuple[BoundKernelParameter, ...] | None = field(default=None, repr=False)
+    _constraint_context_attrs: tuple[tuple[str, Any], ...] = field(default=(), repr=False)
 
     @property
     def py_fn(self) -> Callable[..., Any]:
         return self._py_fn
 
     @property
-    def dtype_signature(self) -> tuple[ScalarType, ...]:
+    def op(self) -> str:
+        if self._selected_op is None:
+            raise ValueError(
+                "descriptor requires pto.select_kernel(...) to bind a concrete op "
+                "before reading descriptor.op"
+            )
+        return self._selected_op
+
+    @property
+    def selected_op(self) -> str | None:
+        return self._selected_op
+
+    @property
+    def templates(self) -> dict[str, dict[str, str]]:
+        return {
+            slot: dict(op_bindings)
+            for slot, op_bindings in self._templates
+        }
+
+    @property
+    def inline_procs(self) -> dict[str, InlineProcDescriptor]:
+        return {name: descriptor for name, descriptor in self._inline_procs}
+
+    @property
+    def dtype_signature(self) -> tuple[ScalarType | MaskType, ...]:
         if self._selected_dtype_signature is None:
             raise ValueError(
                 "descriptor requires pto.select_kernel(...) to choose a concrete dtype signature "
@@ -352,13 +770,17 @@ class VKernelDescriptor:
     def metadata(self) -> dict[str, Any]:
         return {
             "target": self.target,
-            "op": self.op,
+            "op": self._selected_op,
+            "match_ops": self.match_ops,
+            "selected_op": self._selected_op,
             "dtypes": self.dtypes,
             "name": self.name,
             "verify": self.verify_enabled,
             "advanced": self.advanced_enabled,
             "constraints": self.constraints,
             "priority": self.priority,
+            "templates": self.templates,
+            "inline_procs": tuple(sorted(self.inline_procs.keys())),
         }
 
     @property
@@ -369,17 +791,25 @@ class VKernelDescriptor:
     def specializations_by_name(self) -> dict[str, TileSpecialization]:
         return dict(self.specializations)
 
+    @property
+    def constraint_context_attrs(self) -> dict[str, Any]:
+        return dict(self._constraint_context_attrs)
+
     def _tile_parameter_names(self) -> tuple[str, ...]:
         return tuple(param.name for param in self._parameter_specs if param.kind == "tile")
 
-    def _bind_selected_dtype_signature(
+    def _bind_constraint_context_attrs(
         self,
-        dtype_signature: tuple[ScalarType, ...],
+        context_attrs: Mapping[str, Any],
     ) -> "VKernelDescriptor":
-        bound_parameters = _bind_parameters(self._parameter_specs, dtype_signature)
+        frozen_context_attrs = tuple(
+            sorted(dict(context_attrs).items(), key=lambda item: item[0])
+        )
+        if self._constraint_context_attrs == frozen_context_attrs:
+            return self
         return VKernelDescriptor(
             target=self.target,
-            op=self.op,
+            match_ops=self.match_ops,
             dtypes=self.dtypes,
             name=self.name,
             verify_enabled=self.verify_enabled,
@@ -390,8 +820,67 @@ class VKernelDescriptor:
             specializations=self.specializations,
             constraints=self.constraints,
             priority=self.priority,
+            _templates=self._templates,
+            _inline_procs=self._inline_procs,
+            _selected_op=self._selected_op,
+            _selected_dtype_signature=self._selected_dtype_signature,
+            _parameters=self._parameters,
+            _constraint_context_attrs=frozen_context_attrs,
+        )
+
+    def _bind_selected_dtype_signature(
+        self,
+        dtype_signature: tuple[ScalarType | MaskType, ...],
+    ) -> "VKernelDescriptor":
+        bound_parameters = _bind_parameters(self._parameter_specs, dtype_signature)
+        return VKernelDescriptor(
+            target=self.target,
+            match_ops=self.match_ops,
+            dtypes=self.dtypes,
+            name=self.name,
+            verify_enabled=self.verify_enabled,
+            advanced_enabled=self.advanced_enabled,
+            _parameter_specs=self._parameter_specs,
+            _py_fn=self._py_fn,
+            _source_info=self._source_info,
+            specializations=self.specializations,
+            constraints=self.constraints,
+            priority=self.priority,
+            _templates=self._templates,
+            _inline_procs=self._inline_procs,
+            _selected_op=self._selected_op,
             _selected_dtype_signature=dtype_signature,
             _parameters=bound_parameters,
+            _constraint_context_attrs=self._constraint_context_attrs,
+        )
+
+    def _bind_selected_op(self, op: str) -> "VKernelDescriptor":
+        normalized_op = _validate_op(op)
+        if normalized_op not in self.match_ops:
+            raise ValueError(
+                f"selected op {normalized_op!r} is not in descriptor matcher set {self.match_ops!r}"
+            )
+        if self._selected_op == normalized_op:
+            return self
+        return VKernelDescriptor(
+            target=self.target,
+            match_ops=self.match_ops,
+            dtypes=self.dtypes,
+            name=self.name,
+            verify_enabled=self.verify_enabled,
+            advanced_enabled=self.advanced_enabled,
+            _parameter_specs=self._parameter_specs,
+            _py_fn=self._py_fn,
+            _source_info=self._source_info,
+            specializations=self.specializations,
+            constraints=self.constraints,
+            priority=self.priority,
+            _templates=self._templates,
+            _inline_procs=self._inline_procs,
+            _selected_op=normalized_op,
+            _selected_dtype_signature=self._selected_dtype_signature,
+            _parameters=self._parameters,
+            _constraint_context_attrs=self._constraint_context_attrs,
         )
 
     def specialize(self, **bindings: Any) -> "VKernelDescriptor":
@@ -417,7 +906,7 @@ class VKernelDescriptor:
 
         return VKernelDescriptor(
             target=self.target,
-            op=self.op,
+            match_ops=self.match_ops,
             dtypes=self.dtypes,
             name=self.name,
             verify_enabled=self.verify_enabled,
@@ -427,9 +916,13 @@ class VKernelDescriptor:
             specializations=tuple(sorted(updated.items())),
             constraints=self.constraints,
             priority=self.priority,
+            _templates=self._templates,
+            _inline_procs=self._inline_procs,
+            _selected_op=self._selected_op,
             _selected_dtype_signature=self._selected_dtype_signature,
             _parameters=self._parameters,
             _py_fn=self._py_fn,
+            _constraint_context_attrs=self._constraint_context_attrs,
         )
 
     def _require_specialized_tiles(self, api_name: str) -> None:
@@ -448,6 +941,100 @@ class VKernelDescriptor:
                 f"{missing_names}",
             )
 
+    def _require_materialization_binding(self, api_name: str) -> None:
+        self.parameters
+        if len(self.match_ops) > 1 and self._selected_op is None:
+            raise ValueError(
+                f"{api_name}() requires pto.select_kernel(...) to bind a concrete op "
+                "before materialization"
+            )
+
+    def _constraint_context_for_evaluation(
+        self,
+        extra_context_attrs: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        attrs = dict(self._constraint_context_attrs)
+        if extra_context_attrs is not None:
+            attrs.update(extra_context_attrs)
+        attrs.setdefault("target", self.target)
+        if self._selected_op is not None:
+            attrs.setdefault("op", self._selected_op)
+            attrs.setdefault("selected_op", self._selected_op)
+
+        for spec in self._parameter_specs:
+            existing = attrs.get(spec.name)
+            param_attrs = {} if not isinstance(existing, dict) else dict(existing)
+            param_attrs.setdefault("kind", spec.kind)
+            attrs.setdefault(f"{spec.name}_kind", spec.kind)
+            if f"{spec.name}_shape" in attrs:
+                param_attrs.setdefault("shape", tuple(attrs[f"{spec.name}_shape"]))
+            if f"{spec.name}_valid_shape" in attrs:
+                param_attrs.setdefault("valid_shape", tuple(attrs[f"{spec.name}_valid_shape"]))
+            if f"{spec.name}_strides" in attrs:
+                param_attrs.setdefault("strides", tuple(attrs[f"{spec.name}_strides"]))
+            if f"{spec.name}_rank" in attrs:
+                param_attrs.setdefault("rank", attrs[f"{spec.name}_rank"])
+            if f"{spec.name}_memory_space" in attrs:
+                param_attrs.setdefault("memory_space", attrs[f"{spec.name}_memory_space"])
+
+            if spec.kind in ("tensorview", "partition_tensor_view"):
+                # TensorView authoring form is normalized to 5D in the current DSL spec.
+                param_attrs.setdefault("rank", 5)
+                param_attrs.setdefault("memory_space", "gm")
+                attrs.setdefault(f"{spec.name}_rank", 5)
+                attrs.setdefault(f"{spec.name}_memory_space", "gm")
+            attrs[spec.name] = param_attrs
+
+        if self._parameters is not None:
+            for param in self._parameters:
+                param_attrs = attrs.get(param.name)
+                if not isinstance(param_attrs, dict):
+                    param_attrs = {"kind": param.kind}
+                param_attrs.setdefault("dtype", param.dtype)
+                attrs[param.name] = param_attrs
+                attrs.setdefault(f"{param.name}_dtype", param.dtype)
+
+        for name, spec in self.specializations_by_name.items():
+            effective_valid_shape = spec.shape if spec.valid_shape is None else spec.valid_shape
+            param_attrs = attrs.get(name)
+            if not isinstance(param_attrs, dict):
+                param_attrs = {"kind": "tile"}
+            config_mapping = None if spec.config is None else dict(spec.config.fields)
+            param_attrs.update(
+                {
+                    "shape": spec.shape,
+                    "rank": len(spec.shape),
+                    "memory_space": spec.memory_space.value,
+                    "valid_shape": effective_valid_shape,
+                    "config": config_mapping,
+                }
+            )
+            attrs[name] = param_attrs
+            attrs[f"{name}_shape"] = spec.shape
+            attrs[f"{name}_rank"] = len(spec.shape)
+            attrs[f"{name}_memory_space"] = spec.memory_space.value
+            attrs[f"{name}_valid_shape"] = effective_valid_shape
+            if len(spec.shape) == 1:
+                attrs[f"{name}_extent"] = spec.shape[0]
+                attrs[f"{name}_valid_extent"] = effective_valid_shape[0]
+            elif len(spec.shape) == 2:
+                attrs[f"{name}_rows"] = spec.shape[0]
+                attrs[f"{name}_cols"] = spec.shape[1]
+                attrs[f"{name}_valid_rows"] = effective_valid_shape[0]
+                attrs[f"{name}_valid_cols"] = effective_valid_shape[1]
+        return attrs
+
+    def _validate_materialization_constraints(self, api_name: str) -> None:
+        if not self.constraints:
+            return
+        context_attrs = self._constraint_context_for_evaluation()
+        if _evaluate_constraints(self, context_attrs):
+            return
+        raise LookupError(
+            f"{api_name}() constraint evaluation rejected kernel {self.name!r} "
+            "for the current specialization/context attributes"
+        )
+
     def _build_authoring_module(self):
         self.parameters
         frontend_kernel = build_frontend_kernel_node(self)
@@ -455,19 +1042,26 @@ class VKernelDescriptor:
         return lower_semantic_kernel(semantic_kernel)
 
     def mlir_text(self) -> str:
+        self._require_materialization_binding("mlir_text")
         self._require_specialized_tiles("mlir_text")
+        self._validate_materialization_constraints("mlir_text")
         return self._build_authoring_module().render()
 
     def mlir_module(self) -> "MaterializedMLIRModule":
+        self._require_materialization_binding("mlir_module")
         self._require_specialized_tiles("mlir_module")
         return MaterializedMLIRModule(text=self.mlir_text(), target=self.target)
 
     def verify(self, *, ptoas_bin: str | Path | None = None) -> "VerificationResult":
+        self._require_materialization_binding("verify")
         self._require_specialized_tiles("verify")
+        self._validate_materialization_constraints("verify")
         return self.mlir_module().verify(ptoas_bin=ptoas_bin)
 
     def emit(self, path: str | Path) -> None:
+        self._require_materialization_binding("emit")
         self._require_specialized_tiles("emit")
+        self._validate_materialization_constraints("emit")
         output_path = Path(path)
         output_path.write_text(self.mlir_text(), encoding="utf-8")
 
@@ -688,6 +1282,82 @@ def _validate_op(op: Any) -> str:
     return op
 
 
+def _freeze_match_ops(*, op: Any, ops: Any) -> tuple[str, ...]:
+    if op is not None and ops is not None:
+        raise ValueError("vkernel() accepts either op= or ops=, but not both")
+    if op is None and ops is None:
+        raise ValueError("vkernel() requires exactly one of op= or ops=")
+    if op is not None:
+        return (_validate_op(op),)
+    if not isinstance(ops, (list, tuple)):
+        raise TypeError("ops must be a sequence of non-empty strings")
+    if not ops:
+        raise ValueError("ops must contain at least one op")
+    normalized_ops = tuple(_validate_op(candidate) for candidate in ops)
+    if len(set(normalized_ops)) != len(normalized_ops):
+        raise ValueError("ops must not contain duplicates")
+    return normalized_ops
+
+
+def _validate_template_slot_name(slot: Any) -> str:
+    if not isinstance(slot, str) or not slot:
+        raise TypeError("template slot names must be non-empty strings")
+    return slot
+
+
+def _validate_template_value(slot: str, op_name: str, value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise TypeError(
+            f"templates[{slot!r}][{op_name!r}] must be a non-empty pto op name string"
+        )
+    if value not in _SUPPORTED_TEMPLATE_PTO_CALLS:
+        raise ValueError(
+            f"templates[{slot!r}][{op_name!r}] maps to unsupported pto op {value!r}"
+        )
+    return value
+
+
+def _freeze_templates(
+    templates: Any,
+    *,
+    match_ops: tuple[str, ...],
+) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+    if templates in (_UNSET, None):
+        return ()
+    if not isinstance(templates, Mapping):
+        raise TypeError("templates must be a mapping of slot names to per-op mappings")
+
+    frozen_templates = []
+    for slot, op_bindings in templates.items():
+        normalized_slot = _validate_template_slot_name(slot)
+        if not isinstance(op_bindings, Mapping):
+            raise TypeError(
+                f"templates[{normalized_slot!r}] must be a mapping of concrete ops to pto op names"
+            )
+        if not op_bindings:
+            raise ValueError(
+                f"templates[{normalized_slot!r}] must contain at least one concrete-op mapping"
+            )
+
+        frozen_bindings = []
+        for concrete_op, real_op in op_bindings.items():
+            normalized_concrete_op = _validate_op(concrete_op)
+            if normalized_concrete_op not in match_ops:
+                raise ValueError(
+                    f"templates[{normalized_slot!r}] references op {normalized_concrete_op!r} "
+                    f"outside descriptor matcher set {match_ops!r}"
+                )
+            frozen_bindings.append(
+                (
+                    normalized_concrete_op,
+                    _validate_template_value(normalized_slot, normalized_concrete_op, real_op),
+                )
+            )
+        frozen_templates.append((normalized_slot, tuple(frozen_bindings)))
+
+    return tuple(frozen_templates)
+
+
 def _validate_name(py_fn: Callable[..., Any], name: Any) -> str:
     if name is None:
         return py_fn.__name__
@@ -758,6 +1428,67 @@ def _coerce_tile_config(value: Any, param_name: str) -> TileConfig | None:
     )
 
 
+def _coerce_tile_valid_shape(
+    shape: tuple[int, ...],
+    value: Any,
+    param_name: str,
+    source_info: _FunctionSourceInfo | None,
+) -> tuple[int | None, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        _raise_tile_param_error(
+            source_info,
+            param_name,
+            f"specialization for '{param_name}' must provide valid_shape as a tuple/list",
+            TypeError,
+        )
+    valid_shape = tuple(value)
+    if len(valid_shape) != len(shape):
+        _raise_tile_param_error(
+            source_info,
+            param_name,
+            f"illegal Tile profile for '{param_name}': valid_shape rank must match shape rank",
+        )
+
+    normalized: list[int | None] = []
+    for axis, (valid_dim, shape_dim) in enumerate(zip(valid_shape, shape)):
+        if isinstance(valid_dim, bool):
+            _raise_tile_param_error(
+                source_info,
+                param_name,
+                f"illegal Tile profile for '{param_name}': valid_shape axis {axis} must not be bool",
+                TypeError,
+            )
+        if isinstance(valid_dim, int):
+            if valid_dim <= 0:
+                _raise_tile_param_error(
+                    source_info,
+                    param_name,
+                    f"illegal Tile profile for '{param_name}': valid_shape axis {axis} must be positive",
+                )
+            if valid_dim > shape_dim:
+                _raise_tile_param_error(
+                    source_info,
+                    param_name,
+                    f"illegal Tile profile for '{param_name}': valid_shape axis {axis}={valid_dim} "
+                    f"must be <= shape axis {axis}={shape_dim}",
+                )
+            normalized.append(valid_dim)
+            continue
+        if valid_dim is None or isinstance(valid_dim, str):
+            normalized.append(None)
+            continue
+        _raise_tile_param_error(
+            source_info,
+            param_name,
+            f"illegal Tile profile for '{param_name}': valid_shape axis {axis} must be "
+            "a positive int, string symbol, or None",
+            TypeError,
+        )
+    return tuple(normalized)
+
+
 def _coerce_tile_specialization(
     param_name: str,
     binding: Any,
@@ -784,6 +1515,7 @@ def _coerce_tile_specialization(
             shape=tuple(binding["shape"]),
             memory_space=_coerce_memory_space(binding["memory_space"], param_name),
             config=_coerce_tile_config(binding.get("config"), param_name),
+            valid_shape=binding.get("valid_shape"),
         )
     else:
         _raise_tile_param_error(
@@ -825,45 +1557,64 @@ def _coerce_tile_specialization(
             param_name,
             f"illegal Tile profile for '{param_name}': v1 only supports MemorySpace.UB",
         )
-    return spec
+    valid_shape = _coerce_tile_valid_shape(spec.shape, spec.valid_shape, param_name, source_info)
+    return TileSpecialization(
+        shape=spec.shape,
+        memory_space=spec.memory_space,
+        config=spec.config,
+        valid_shape=valid_shape,
+    )
 
 
-def _validate_scalar_dtype(dtype: Any, param_name: str) -> ScalarType:
-    if not isinstance(dtype, ScalarType):
+def _validate_leaf_dtype(dtype: Any, param_name: str) -> ScalarType | MaskType:
+    if not isinstance(dtype, (ScalarType, MaskType)):
         raise TypeError(
-            f"dtypes entry for parameter '{param_name}' must be a TileLang scalar dtype"
+            f"dtypes entry for parameter '{param_name}' must be a TileLang scalar or mask dtype"
         )
     return dtype
 
 
-def _freeze_operand_types(operand_types: Any) -> tuple[ScalarType, ...]:
+def _freeze_operand_types(operand_types: Any) -> tuple[ScalarType | MaskType, ...]:
     if not isinstance(operand_types, (list, tuple)):
-        raise TypeError("operand_types must be a sequence of TileLang scalar dtypes")
-    return tuple(_validate_scalar_dtype(dtype, f"operand_types[{index}]") for index, dtype in enumerate(operand_types))
+        raise TypeError("operand_types must be a sequence of TileLang scalar or mask dtypes")
+    return tuple(_validate_leaf_dtype(dtype, f"operand_types[{index}]") for index, dtype in enumerate(operand_types))
 
 
-def _matches_wildcard(pattern: WildcardType, actual: ScalarType) -> bool:
+def _matches_wildcard(pattern: WildcardType, actual: ScalarType | MaskType) -> bool:
     if pattern.name == "AnyType":
-        return True
+        return isinstance(actual, ScalarType)
     if pattern.name == "AnyFloat":
-        return actual.name in {"f16", "bf16", "f32"}
+        return isinstance(actual, ScalarType) and actual.name in {"f16", "bf16", "f32"}
     if pattern.name == "AnyInt":
-        return actual.name.startswith("i")
+        return isinstance(actual, ScalarType) and actual.name.startswith("i")
     if pattern.name == "AnyMask":
-        return actual.name == "i1"
+        return isinstance(actual, MaskType)
     raise TypeError(f"unsupported wildcard matcher {pattern.name!r}")
+
+
+def _matches_scalar_annotation(
+    annotation: ScalarType | MaskType | WildcardType | TypeVariable,
+    actual: ScalarType | MaskType,
+) -> bool:
+    if isinstance(annotation, (ScalarType, MaskType)):
+        return annotation == actual
+    if isinstance(annotation, WildcardType):
+        return _matches_wildcard(annotation, actual)
+    if isinstance(annotation, TypeVariable):
+        return True
+    raise TypeError(f"unsupported scalar annotation {annotation!r}")
 
 
 def _match_dtype_signature(
     dtype_signature: tuple[Any, ...],
-    operand_types: tuple[ScalarType, ...],
-) -> tuple[ScalarType, ...] | None:
+    operand_types: tuple[ScalarType | MaskType, ...],
+) -> tuple[ScalarType | MaskType, ...] | None:
     if len(dtype_signature) != len(operand_types):
         return None
 
-    typevar_bindings: dict[str, ScalarType] = {}
+    typevar_bindings: dict[str, ScalarType | MaskType] = {}
     for pattern, actual in zip(dtype_signature, operand_types):
-        if isinstance(pattern, ScalarType):
+        if isinstance(pattern, (ScalarType, MaskType)):
             if pattern != actual:
                 return None
             continue
@@ -885,8 +1636,8 @@ def _match_dtype_signature(
 
 def _match_descriptor_dtype_signature(
     descriptor: VKernelDescriptor,
-    operand_types: tuple[ScalarType, ...],
-) -> tuple[ScalarType, ...] | None:
+    operand_types: tuple[ScalarType | MaskType, ...],
+) -> tuple[ScalarType | MaskType, ...] | None:
     for dtype_signature in descriptor.dtypes:
         matched = _match_dtype_signature(dtype_signature, operand_types)
         if matched is not None:
@@ -918,6 +1669,12 @@ def _validate_parameter_spec(param: inspect.Parameter) -> KernelParameterSpec:
             kind="tensorview",
             annotation=annotation,
         )
+    if annotation is PartitionTensorView:
+        return KernelParameterSpec(
+            name=param.name,
+            kind="partition_tensor_view",
+            annotation=annotation,
+        )
     if annotation is Tile:
         return KernelParameterSpec(
             name=param.name,
@@ -930,7 +1687,19 @@ def _validate_parameter_spec(param: inspect.Parameter) -> KernelParameterSpec:
             kind="ptr",
             annotation=annotation,
         )
-    if isinstance(annotation, ScalarType):
+    if isinstance(annotation, MaskType):
+        return KernelParameterSpec(
+            name=param.name,
+            kind="mask",
+            annotation=annotation,
+        )
+    if isinstance(annotation, WildcardType) and annotation.name == "AnyMask":
+        return KernelParameterSpec(
+            name=param.name,
+            kind="mask",
+            annotation=annotation,
+        )
+    if isinstance(annotation, (ScalarType, WildcardType, TypeVariable)):
         return KernelParameterSpec(
             name=param.name,
             kind="scalar",
@@ -945,6 +1714,27 @@ def _validate_parameter_spec(param: inspect.Parameter) -> KernelParameterSpec:
 def _collect_parameter_specs(py_fn: Callable[..., Any]) -> tuple[KernelParameterSpec, ...]:
     signature = inspect.signature(py_fn)
     return tuple(_validate_parameter_spec(param) for param in signature.parameters.values())
+
+
+def _default_dtype_signature(
+    parameter_specs: tuple[KernelParameterSpec, ...],
+) -> tuple[Any, ...]:
+    defaults: list[Any] = []
+    for param_spec in parameter_specs:
+        if param_spec.kind in {"tensorview", "partition_tensor_view", "tile"}:
+            defaults.append(AnyType)
+            continue
+        if param_spec.kind == "ptr":
+            defaults.append(param_spec.annotation.element_dtype)
+            continue
+        if param_spec.kind == "mask":
+            defaults.append(param_spec.annotation if isinstance(param_spec.annotation, MaskType) else AnyMask)
+            continue
+        if isinstance(param_spec.annotation, (WildcardType, TypeVariable)):
+            defaults.append(AnyType)
+            continue
+        defaults.append(param_spec.annotation)
+    return tuple(defaults)
 
 
 def _validate_dtype_arity(
@@ -962,49 +1752,71 @@ def _bind_parameter(
     param_spec: KernelParameterSpec,
     dtype: Any,
 ) -> BoundKernelParameter:
-    scalar_dtype = _validate_scalar_dtype(dtype, param_spec.name)
-    if param_spec.kind == "tensorview":
+    bound_dtype = _validate_leaf_dtype(dtype, param_spec.name)
+    if param_spec.kind in {"tensorview", "partition_tensor_view"}:
         return BoundKernelParameter(
             name=param_spec.name,
             kind=param_spec.kind,
             annotation=param_spec.annotation,
-            dtype=scalar_dtype,
+            dtype=bound_dtype,
         )
     if param_spec.kind == "tile":
         return BoundKernelParameter(
             name=param_spec.name,
             kind=param_spec.kind,
             annotation=param_spec.annotation,
-            dtype=scalar_dtype,
+            dtype=bound_dtype,
         )
     if param_spec.kind == "ptr":
-        if param_spec.annotation.element_dtype != scalar_dtype:
+        if param_spec.annotation.element_dtype != bound_dtype:
             raise TypeError(
                 f"pointer parameter '{param_spec.name}' annotation {param_spec.annotation!r} "
-                f"does not match selected dtype {scalar_dtype!r}"
+                f"does not match selected dtype {bound_dtype!r}"
             )
         return BoundKernelParameter(
             name=param_spec.name,
             kind=param_spec.kind,
             annotation=param_spec.annotation,
-            dtype=scalar_dtype,
+            dtype=bound_dtype,
         )
-    if param_spec.annotation != scalar_dtype:
+    if param_spec.kind == "mask":
+        if not isinstance(bound_dtype, MaskType):
+            raise TypeError(
+                f"mask parameter '{param_spec.name}' annotation {param_spec.annotation!r} "
+                f"does not match selected dtype {bound_dtype!r}"
+            )
+        if isinstance(param_spec.annotation, MaskType) and param_spec.annotation != bound_dtype:
+            raise TypeError(
+                f"mask parameter '{param_spec.name}' annotation {param_spec.annotation!r} "
+                f"does not match selected dtype {bound_dtype!r}"
+            )
+        if isinstance(param_spec.annotation, WildcardType) and not _matches_wildcard(param_spec.annotation, bound_dtype):
+            raise TypeError(
+                f"mask parameter '{param_spec.name}' annotation {param_spec.annotation!r} "
+                f"does not match selected dtype {bound_dtype!r}"
+            )
+        return BoundKernelParameter(
+            name=param_spec.name,
+            kind=param_spec.kind,
+            annotation=param_spec.annotation,
+            dtype=bound_dtype,
+        )
+    if not _matches_scalar_annotation(param_spec.annotation, bound_dtype):
         raise TypeError(
             f"scalar parameter '{param_spec.name}' annotation {param_spec.annotation!r} "
-            f"does not match selected dtype {scalar_dtype!r}"
+            f"does not match selected dtype {bound_dtype!r}"
         )
     return BoundKernelParameter(
         name=param_spec.name,
         kind=param_spec.kind,
         annotation=param_spec.annotation,
-        dtype=scalar_dtype,
+        dtype=bound_dtype,
     )
 
 
 def _bind_parameters(
     parameter_specs: tuple[KernelParameterSpec, ...],
-    dtype_signature: tuple[ScalarType, ...],
+    dtype_signature: tuple[ScalarType | MaskType, ...],
 ) -> tuple[BoundKernelParameter, ...]:
     if len(dtype_signature) != len(parameter_specs):
         raise ValueError(
@@ -1021,6 +1833,8 @@ def _build_descriptor(
     *,
     target: str,
     op: Any,
+    ops: Any,
+    templates: Any,
     dtypes: Any,
     name: Any,
     verify: Any,
@@ -1033,20 +1847,32 @@ def _build_descriptor(
 
     source_info = _load_function_source_info(py_fn)
     advanced_enabled = _validate_advanced(advanced)
-    _validate_function_body(source_info, advanced_enabled=advanced_enabled)
-    frozen_dtypes = _freeze_dtypes(dtypes)
+    inline_procs = _collect_inline_procs(py_fn.__module__)
+    _validate_function_body(
+        source_info,
+        advanced_enabled=advanced_enabled,
+        module_name=py_fn.__module__,
+    )
+    match_ops = _freeze_match_ops(op=op, ops=ops)
+    frozen_templates = _freeze_templates(templates, match_ops=match_ops)
     parameter_specs = _collect_parameter_specs(py_fn)
+    if dtypes is None:
+        dtypes = (_default_dtype_signature(parameter_specs),)
+    frozen_dtypes = _freeze_dtypes(dtypes)
     _validate_dtype_arity(parameter_specs, frozen_dtypes)
 
-    selected_dtype_signature: tuple[ScalarType, ...] | None = None
+    selected_op: str | None = None
+    selected_dtype_signature: tuple[ScalarType | MaskType, ...] | None = None
     bound_parameters: tuple[BoundKernelParameter, ...] | None = None
-    if len(frozen_dtypes) == 1 and all(isinstance(dtype, ScalarType) for dtype in frozen_dtypes[0]):
+    if len(match_ops) == 1:
+        selected_op = match_ops[0]
+    if len(frozen_dtypes) == 1 and all(isinstance(dtype, (ScalarType, MaskType)) for dtype in frozen_dtypes[0]):
         selected_dtype_signature = tuple(frozen_dtypes[0])
         bound_parameters = _bind_parameters(parameter_specs, selected_dtype_signature)
 
     return VKernelDescriptor(
         target=_validate_target(target),
-        op=_validate_op(op),
+        match_ops=match_ops,
         dtypes=frozen_dtypes,
         name=_validate_name(py_fn, name),
         verify_enabled=_validate_verify(verify),
@@ -1056,8 +1882,12 @@ def _build_descriptor(
         _source_info=source_info,
         constraints=_validate_constraints(constraints),
         priority=_validate_priority(priority),
+        _templates=frozen_templates,
+        _inline_procs=inline_procs,
+        _selected_op=selected_op,
         _selected_dtype_signature=selected_dtype_signature,
         _parameters=bound_parameters,
+        _constraint_context_attrs=(),
     )
 
 
@@ -1065,9 +1895,44 @@ def _evaluate_constraints(
     descriptor: VKernelDescriptor,
     context_attrs: Mapping[str, Any],
 ) -> bool:
+    named_context: dict[str, Any] = {
+        "target": context_attrs.get("target"),
+        "op": context_attrs.get("op"),
+        "selected_op": context_attrs.get("selected_op"),
+    }
+    for spec in descriptor._parameter_specs:
+        param_attrs = context_attrs.get(spec.name)
+        if not isinstance(param_attrs, Mapping):
+            param_attrs = {}
+        named_context[spec.name] = _ConstraintParamView(spec.name, param_attrs)
+
     for index, constraint in enumerate(descriptor.constraints):
         try:
-            result = constraint(context_attrs)
+            signature = inspect.signature(constraint)
+            parameters = list(signature.parameters.values())
+            kwargs: dict[str, Any] = {}
+            for parameter in parameters:
+                if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                    raise TypeError("constraint callables with *args are not supported")
+                if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                    for key, value in named_context.items():
+                        kwargs.setdefault(key, value)
+                    for key, value in context_attrs.items():
+                        kwargs.setdefault(key, value)
+                    continue
+                if parameter.name in named_context:
+                    kwargs[parameter.name] = named_context[parameter.name]
+                    continue
+                if parameter.name in context_attrs:
+                    kwargs[parameter.name] = context_attrs[parameter.name]
+                    continue
+                if parameter.default is not inspect._empty:
+                    continue
+                raise TypeError(
+                    f"constraint {index} for kernel {descriptor.name!r} requires unsupported parameter "
+                    f"{parameter.name!r}"
+                )
+            result = constraint(**kwargs)
         except Exception as exc:
             raise TypeError(
                 f"constraint {index} for kernel {descriptor.name!r} raised {type(exc).__name__}: {exc}"
@@ -1082,6 +1947,27 @@ def _format_descriptor_identity(descriptor: VKernelDescriptor) -> str:
     if dtype_signature is None:
         dtype_signature = tuple("?" for _ in descriptor.dtypes[0]) if descriptor.dtypes else ()
     return f"{descriptor.name}(priority={descriptor.priority}, dtypes={dtype_signature!r})"
+
+
+def _match_descriptor_query(
+    descriptor: VKernelDescriptor,
+    *,
+    target: str,
+    op: str,
+    operand_types: tuple[ScalarType | MaskType, ...],
+) -> VKernelDescriptor | None:
+    if descriptor.target != target:
+        return None
+    if op not in descriptor.match_ops:
+        return None
+
+    op_bound_descriptor = descriptor._bind_selected_op(op)
+    matched_signature = _match_descriptor_dtype_signature(op_bound_descriptor, operand_types)
+    if matched_signature is None:
+        return None
+    if op_bound_descriptor._selected_dtype_signature == matched_signature:
+        return op_bound_descriptor
+    return op_bound_descriptor._bind_selected_dtype_signature(matched_signature)
 
 
 def select_kernel(
@@ -1109,14 +1995,17 @@ def select_kernel(
         raise TypeError("registry must be a KernelRegistry or None")
 
     type_matched_candidates = [
-        descriptor._bind_selected_dtype_signature(matched_signature)
-        if descriptor._selected_dtype_signature != matched_signature
-        else descriptor
+        matched_descriptor
         for descriptor in active_registry
-        if descriptor.target == normalized_target
-        and descriptor.op == normalized_op
-        for matched_signature in (_match_descriptor_dtype_signature(descriptor, normalized_operand_types),)
-        if matched_signature is not None
+        for matched_descriptor in (
+            _match_descriptor_query(
+                descriptor,
+                target=normalized_target,
+                op=normalized_op,
+                operand_types=normalized_operand_types,
+            ),
+        )
+        if matched_descriptor is not None
     ]
 
     if not type_matched_candidates:
@@ -1128,7 +2017,10 @@ def select_kernel(
     constrained_candidates = [
         descriptor
         for descriptor in type_matched_candidates
-        if _evaluate_constraints(descriptor, normalized_context_attrs)
+        if _evaluate_constraints(
+            descriptor,
+            descriptor._constraint_context_for_evaluation(normalized_context_attrs),
+        )
     ]
     if not constrained_candidates:
         raise LookupError(
@@ -1149,7 +2041,7 @@ def select_kernel(
             f"target={normalized_target!r}, op={normalized_op!r}, operand_types={normalized_operand_types!r}: "
             f"{winner_set}"
         )
-    return winners[0]
+    return winners[0]._bind_constraint_context_attrs(normalized_context_attrs)
 
 
 def vkernel(
@@ -1157,6 +2049,8 @@ def vkernel(
     *,
     target: str = "a5",
     op: str | None = None,
+    ops: tuple[str, ...] | list[str] | None = None,
+    templates: Any = _UNSET,
     dtypes: Any = None,
     name: str | None = None,
     verify: bool = True,
@@ -1167,8 +2061,8 @@ def vkernel(
     """Create a TileLang DSL v1 kernel descriptor.
 
     v1 keeps only the minimal descriptor metadata surface:
-    `target`, `op`, `dtypes`, `constraints`, `priority`, `name`, `verify`,
-    and opt-in `advanced`.
+    `target`, `op`/`ops`, `templates`, `dtypes`, `constraints`, `priority`, `name`,
+    `verify`, and opt-in `advanced`.
     """
 
     def wrap(fn: Callable[..., Any]) -> VKernelDescriptor:
@@ -1176,6 +2070,8 @@ def vkernel(
             fn,
             target=target,
             op=op,
+            ops=ops,
+            templates=templates,
             dtypes=dtypes,
             name=name,
             verify=verify,
@@ -1192,10 +2088,12 @@ def vkernel(
 
 __all__ = [
     "BoundKernelParameter",
+    "InlineProcDescriptor",
     "KernelRegistry",
     "MaterializedMLIRModule",
     "TileLangFrontendError",
     "VKernelDescriptor",
+    "inline_proc",
     "select_kernel",
     "vkernel",
 ]

@@ -333,8 +333,8 @@ def FoldTileBufIntrinsics : Pass<"pto-fold-tile-buf-intrinsics", "mlir::func::Fu
     whose tile_buf operands are now bound to concrete values.
 
     This pass resolves them:
-    - pto.tile_buf_addr → replaced by pto.simd.tile_to_memref (extracts
-      memref address from tile_buf)
+    - pto.tile_buf_addr → replaced by the underlying pto.bind_tile source
+      memref, or pto.castptr when the requested result type is !pto.ptr
     - pto.tile_valid_rows → folded to arith.constant if v_row is static,
       or replaced with the dynamic index value from tile_buf
     - pto.tile_valid_cols → same as above for v_col
@@ -500,6 +500,38 @@ def PTOVPTOPtrBoundary
   let constructor = "mlir::pto::createPTOVPTOPtrBoundaryPass()";
   let dependentDialects = ["mlir::func::FuncDialect",
                            "mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect"];
+}
+
+def VPTOPtrNormalize
+    : Pass<"vpto-ptr-normalize", "ModuleOp"> {
+  let summary =
+      "Normalize VPTO ptr-like values and users into a uniform !pto.ptr form";
+  let description = [{
+    Uses MLIR's conversion framework to normalize VPTO ptr-related forms before
+    the existing VPTO ptr-boundary canonicalization runs. This pass rewrites
+    supported tile-buffer and memref view producers such as `pto.tile_buf_addr`
+    and `memref.subview`, and updates VPTO memory ops to consume the normalized
+    ptr-form consistently.
+  }];
+  let constructor = "mlir::pto::createVPTOPtrNormalizePass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::arith::ArithDialect"];
+}
+
+def VPTOPtrCastCleanup
+    : Pass<"vpto-ptr-cast-cleanup", "ModuleOp"> {
+  let summary = "Collapse transient ptr-memref-ptr bridge casts after VPTO ptr normalization";
+  let description = [{
+    Eliminates bridge chains such as
+    `!pto.ptr -> builtin.unrealized_conversion_cast -> memref.cast ->
+     builtin.unrealized_conversion_cast -> !pto.ptr`
+    when the outer ptr types already match.
+  }];
+  let constructor = "mlir::pto::createVPTOPtrCastCleanupPass()";
+  let dependentDialects = ["mlir::pto::PTODialect",
                            "mlir::memref::MemRefDialect"];
 }
 

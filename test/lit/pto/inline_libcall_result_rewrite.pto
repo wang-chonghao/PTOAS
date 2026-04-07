@@ -1,0 +1,36 @@
+// RUN: ptoas --pto-arch=a5 --pass-pipeline="builtin.module(pto-inline-libcall)" %s | FileCheck %s
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @kernel(%x: i32) {
+    %a, %b = func.call @__tl_inline_pair_i32(%x) : (i32) -> (i32, i32)
+    %sum = arith.addi %a, %b : i32
+    func.call @__tl_inline_sink_i32(%sum) : (i32) -> ()
+    return
+  }
+
+  func.func private @__tl_inline_pair_i32(%arg0: i32) -> (i32, i32) attributes { pto.tilelang.inline_proc } {
+    %c1 = arith.constant 1 : i32
+    %c2 = arith.constant 2 : i32
+    %v1 = arith.addi %arg0, %c1 : i32
+    %v2 = arith.addi %arg0, %c2 : i32
+    return %v1, %v2 : i32, i32
+  }
+
+  func.func private @__tl_inline_sink_i32(%arg0: i32) attributes { pto.tilelang.inline_proc } {
+    %c0 = arith.constant 0 : i32
+    %_ = arith.addi %arg0, %c0 : i32
+    return
+  }
+}
+
+// CHECK-LABEL: func.func @kernel(
+// CHECK: %[[C1:.+]] = arith.constant 1 : i32
+// CHECK: %[[C2:.+]] = arith.constant 2 : i32
+// CHECK: %[[V1:.+]] = arith.addi %{{[^,]+}}, %[[C1]] : i32
+// CHECK: %[[V2:.+]] = arith.addi %{{[^,]+}}, %[[C2]] : i32
+// CHECK: %[[SUM:.+]] = arith.addi %[[V1]], %[[V2]] : i32
+// CHECK: arith.constant 0 : i32
+// CHECK: arith.addi %[[SUM]]
+// CHECK-NOT: func.call @__tl_inline_
+// CHECK-NOT: func.func private @__tl_inline_pair_i32
+// CHECK-NOT: func.func private @__tl_inline_sink_i32

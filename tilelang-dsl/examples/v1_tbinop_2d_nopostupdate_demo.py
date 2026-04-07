@@ -36,6 +36,7 @@ pto = _import_tilelang_dsl()
     op="eltwise",
     dtypes=[(pto.f32, pto.f32, pto.f32, pto.f32, pto.f32, pto.f32)],
     name="tilelang_v1_tbinop_2d_nopostupdate_demo",
+    advanced=True,
 )
 def kernel(
     lhs_gm: pto.TensorView,

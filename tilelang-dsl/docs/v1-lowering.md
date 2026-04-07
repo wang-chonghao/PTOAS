@@ -13,7 +13,6 @@ It covers:
 
 It does not define:
 - matcher-driven dispatch
-- implicit vecscope inference
 - raw pointer authoring surface
 - advanced vector-family lowering beyond the fixed v1 matrix
 
@@ -35,7 +34,7 @@ OpenSpec source of truth for this capability:
 ## Implemented v1 Support Matrix
 
 The current v1 lowering contract supports:
-- 2D `TensorView`
+- fixed-rank 5D `TensorView` descriptors
 - 1D/2D `Tile`
 - `dma_load`
 - `dma_store`
@@ -52,15 +51,23 @@ The current v1 lowering contract supports:
 
 Current lowering shape:
 - emits stable `func.func + arith/scf + pto.*` authoring-form VPTO modules
-- requires explicit `pto.strict_vecscope`
+- defaults to memref-first function/tile authoring when the target VPTO family supports memref operands
+- keeps `copy_*` family on typed `!pto.ptr`
+- infers dedicated `pto.vecscope` for stable vector-active runs
+- lowers `pto.strict_vecscope` buffer captures through ptr-form region ABI so the current emission-boundary ptr rewrite stays legal
+- only accepts explicit `pto.strict_vecscope` in `advanced=True` kernels
 - rejects support-matrix-external surface in the frontend
 
 ## Dynamic-Bound Profile
 
 The implemented shape profile is:
 - Tile physical shape must stay static
-- TensorView shape access may lower through hidden shape arguments
+- TensorView parameters stay in authoring IR as `!pto.tensor_view<...>`
+- TensorView shape access lowers through `pto.get_tensor_view_dim`
+- TensorView stride access lowers through `pto.get_tensor_view_stride`
 - TensorView slice bounds may be dynamic
+- TensorView slice spelling may omit leading axes; written axes are right-aligned
+  onto the trailing physical axes of the 5D descriptor
 - loop bounds may be dynamic
 - tail `remaining` values may be dynamic
 
@@ -69,12 +76,15 @@ TensorView slice extent is dynamic. This keeps v1 inside the current
 authoring-form contract without introducing fully dynamic Tile allocation or
 tail-DMA semantics.
 
+Although the descriptor rank is 5D, the current DMA-oriented slicing/lowering
+path still only supports rank-2 TensorView slices.
+
 ## Examples
 
 Examples aligned with the implemented surface:
 - `tilelang-dsl/examples/v1_elementwise_tail_demo.py`
   - emits a guide-style elementwise authoring kernel
-  - covers DMA, explicit `strict_vecscope`, dynamic loop bound, and typed tail mask
+  - covers DMA, advanced-only explicit `strict_vecscope`, dynamic loop bound, and typed tail mask
 - `tilelang-dsl/examples/v1_verify_smoke.py`
   - emits a minimal module that is expected to pass the current repo
     `ptoas --pto-backend=vpto` legality path

@@ -72,18 +72,26 @@ namespace {
 // ============================================================================
 // OperandTypeInfo: captures the tile_buf type info for one operand.
 // ============================================================================
+enum class OperandKind {
+  Tile,
+  Scalar,
+};
+
 struct OperandTypeInfo {
+  OperandKind kind = OperandKind::Tile;
   std::string dtype;
   SmallVector<int64_t, 2> shape;
   int32_t blayout = 0;
   int32_t slayout = 0;
   int32_t fractal = 0;
   int32_t pad = 0;
+  std::string memorySpace;
 
   bool operator==(const OperandTypeInfo &rhs) const {
-    return dtype == rhs.dtype && shape == rhs.shape &&
+    return kind == rhs.kind && dtype == rhs.dtype && shape == rhs.shape &&
            blayout == rhs.blayout && slayout == rhs.slayout &&
-           fractal == rhs.fractal && pad == rhs.pad;
+           fractal == rhs.fractal && pad == rhs.pad &&
+           memorySpace == rhs.memorySpace;
   }
 };
 
@@ -105,8 +113,10 @@ struct SpecKeyInfo : public llvm::DenseMapInfo<SpecKey> {
   static unsigned getHashValue(const SpecKey &key) {
     unsigned h = llvm::hash_value(key.opName);
     for (const auto &op : key.operands) {
-      h = llvm::hash_combine(h, op.dtype, op.blayout, op.slayout,
+      h = llvm::hash_combine(h, static_cast<int>(op.kind), op.dtype,
+                              op.blayout, op.slayout,
                               op.fractal, op.pad);
+      h = llvm::hash_combine(h, op.memorySpace);
       for (int64_t d : op.shape)
         h = llvm::hash_combine(h, d);
     }
@@ -121,9 +131,11 @@ struct SpecKeyInfo : public llvm::DenseMapInfo<SpecKey> {
 // Helpers
 // ============================================================================
 static std::string getDtypeString(Type elemTy) {
+  if (elemTy.isInteger(1)) return "i1";
   if (elemTy.isF32()) return "f32";
   if (elemTy.isF16()) return "f16";
   if (elemTy.isBF16()) return "bf16";
+  if (elemTy.isSignlessInteger(64)) return "i64";
   if (elemTy.isSignlessInteger(32)) return "i32";
   if (elemTy.isSignlessInteger(16)) return "i16";
   if (elemTy.isSignlessInteger(8)) return "i8";
@@ -144,10 +156,12 @@ static std::string getMemorySpaceString(pto::TileBufType tbTy) {
 static std::optional<OperandTypeInfo>
 buildOperandTypeInfo(pto::TileBufType tbTy) {
   OperandTypeInfo info;
+  info.kind = OperandKind::Tile;
   info.dtype = getDtypeString(tbTy.getElementType());
   if (info.dtype.empty())
     return std::nullopt;
   info.shape.assign(tbTy.getShape().begin(), tbTy.getShape().end());
+  info.memorySpace = getMemorySpaceString(tbTy);
   if (auto config = tbTy.getConfigAttr()) {
     info.blayout = static_cast<int32_t>(config.getBLayout().getValue());
     info.slayout = static_cast<int32_t>(config.getSLayout().getValue());
@@ -159,15 +173,24 @@ buildOperandTypeInfo(pto::TileBufType tbTy) {
   return info;
 }
 
+static std::optional<OperandTypeInfo> buildOperandTypeInfo(Type ty) {
+  if (auto tbTy = dyn_cast<pto::TileBufType>(ty))
+    return buildOperandTypeInfo(tbTy);
+
+  OperandTypeInfo info;
+  info.kind = OperandKind::Scalar;
+  info.dtype = getDtypeString(ty);
+  if (info.dtype.empty())
+    return std::nullopt;
+  return info;
+}
+
 static std::optional<SpecKey> buildSpecKey(Operation *op) {
   SpecKey key;
   key.opName = getTileOpName(op).str();
 
   for (unsigned i = 0; i < op->getNumOperands(); ++i) {
-    auto tbTy = dyn_cast<pto::TileBufType>(op->getOperand(i).getType());
-    if (!tbTy)
-      return std::nullopt;
-    auto info = buildOperandTypeInfo(tbTy);
+    auto info = buildOperandTypeInfo(op->getOperand(i).getType());
     if (!info)
       return std::nullopt;
     key.operands.push_back(*info);
@@ -206,6 +229,34 @@ struct ExpandTileOpPass
   void runOnOperation() override;
 };
 
+static std::string buildOperandSpecsJson(const SpecKey &key) {
+  std::string json = "[";
+  for (size_t i = 0; i < key.operands.size(); ++i) {
+    const auto &op = key.operands[i];
+    if (i > 0)
+      json += ",";
+    if (op.kind == OperandKind::Tile) {
+      json += "{\"kind\":\"tile\",\"dtype\":\"";
+      json += op.dtype;
+      json += "\",\"shape\":[";
+      for (size_t dim = 0; dim < op.shape.size(); ++dim) {
+        if (dim > 0)
+          json += ",";
+        json += std::to_string(op.shape[dim]);
+      }
+      json += "],\"memory_space\":\"";
+      json += op.memorySpace;
+      json += "\"}";
+      continue;
+    }
+    json += "{\"kind\":\"scalar\",\"dtype\":\"";
+    json += op.dtype;
+    json += "\"}";
+  }
+  json += "]";
+  return json;
+}
+
 // ============================================================================
 // Invoke Python DSL helper to generate a specialized template function.
 // ============================================================================
@@ -224,18 +275,8 @@ func::FuncOp ExpandState::invokeTilelangDSL(const SpecKey &key,
     return nullptr;
   }
 
-  // 2. Build shape string from the first operand (e.g. "16,64").
-  //    TODO: extend expand_helper to accept per-operand shapes if needed.
-  const auto &firstOp = key.operands[0];
-  std::string shapeStr;
-  for (unsigned i = 0; i < firstOp.shape.size(); ++i) {
-    if (i > 0) shapeStr += ",";
-    shapeStr += std::to_string(firstOp.shape[i]);
-  }
-
-  // Get memory space from the first tile_buf operand.
-  auto firstTbTy = dyn_cast<pto::TileBufType>(tileOp->getOperand(0).getType());
-  std::string memSpace = firstTbTy ? getMemorySpaceString(firstTbTy) : "ub";
+  // 2. Build operand schema JSON for mixed tile/scalar specialization.
+  std::string operandSpecsJson = buildOperandSpecsJson(key);
 
   // 3. Create temp file for stdout redirect.
   SmallString<128> tmpPath;
@@ -254,9 +295,7 @@ func::FuncOp ExpandState::invokeTilelangDSL(const SpecKey &key,
       *pythonPath, "-m", "tilelang_dsl.expand_helper",
       "--template-dir", tilelangPath,
       "--op",           opName,
-      "--dtype",        firstOp.dtype,
-      "--shape",        shapeStr,
-      "--memory-space", memSpace,
+      "--operand-specs", operandSpecsJson,
   };
 
   // 5. Set up environment with PYTHONPATH.
@@ -293,8 +332,26 @@ func::FuncOp ExpandState::invokeTilelangDSL(const SpecKey &key,
       redirects, /*secondsToWait=*/30, /*memoryLimit=*/0, &errMsg);
 
   if (rc != 0) {
+    std::string cmd;
+    llvm::raw_string_ostream os(cmd);
+    bool first = true;
+    auto appendToken = [&](StringRef token) {
+      if (!first)
+        os << ' ';
+      first = false;
+      llvm::sys::printArg(os, token, /*Quote=*/true);
+    };
+    if (hasPythonPath) {
+      appendToken("env");
+      appendToken(pythonPathEnv);
+    }
+    for (StringRef arg : args)
+      appendToken(arg);
+    os.flush();
+
     llvm::errs() << "ExpandTileOp: tilelang DSL helper failed (rc=" << rc
                  << "): " << errMsg << "\n";
+    llvm::errs() << "ExpandTileOp: run: " << cmd << "\n";
     llvm::sys::fs::remove(tmpPath);
     return nullptr;
   }
@@ -338,6 +395,7 @@ func::FuncOp ExpandState::invokeTilelangDSL(const SpecKey &key,
   // Build a unique name from all operand types.
   std::string uniqueName = "__pto_tilelang_" + key.opName;
   for (const auto &op : key.operands) {
+    uniqueName += op.kind == OperandKind::Tile ? "_tile" : "_scalar";
     uniqueName += "_" + op.dtype;
     for (int64_t d : op.shape)
       uniqueName += "_" + std::to_string(d);
@@ -377,17 +435,18 @@ LogicalResult ExpandState::expandTileOpsInFunction(func::FuncOp func,
   for (auto *op : tileOps) {
     auto specKeyOpt = buildSpecKey(op);
     if (!specKeyOpt) {
-      op->emitWarning("ExpandTileOp: cannot build specialization key, skipping");
-      continue;
+      op->emitError(
+          "ExpandTileOp: cannot build specialization key for this operand schema");
+      return failure();
     }
 
     // Invoke tilelang DSL (with caching).
     func::FuncOp dslFn = invokeTilelangDSL(*specKeyOpt, op, mod, ctx);
     if (!dslFn) {
       StringRef opName = getTileOpName(op);
-      op->emitWarning("ExpandTileOp: no tilelang template for " + opName +
-                       ", skipping");
-      continue;
+      op->emitError("ExpandTileOp: failed to instantiate tilelang template for " +
+                    opName);
+      return failure();
     }
 
     // Replace tile op with func.call, passing tile_buf operands directly.
@@ -408,6 +467,10 @@ void ExpandTileOpPass::runOnOperation() {
   MLIRContext *ctx = &getContext();
 
   if (tilelangPath.empty()) {
+    mod.emitError(
+        "ExpandTileOp requires a non-empty tilelang-path when "
+        "--enable-tile-op-expand is set");
+    signalPassFailure();
     return;
   }
 

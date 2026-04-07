@@ -55,8 +55,13 @@ The package currently exports:
 - `TileLangFrontendError`
 - `TensorView`
 - `Tile`
+- `VRegType`
+- `MaskType`
 - scalar dtypes such as `f16`, `bf16`, `f32`, `i8`, `i16`, `i32`, `i64`
-- Tile specialization helpers: `MemorySpace`, `TileConfig`, `TileSpecialization`
+- type helpers such as `vreg(...)`, `ptr(...)`, `mask_b8`, `mask_b16`, `mask_b32`, `MemorySpace`, `TileConfig`, `TileSpecialization`
+
+The package does not expose a DSL-level `pto.memref(...)` constructor. MemRef
+only appears in generated/lowered IR, not in the public authoring type surface.
 
 ## v1 Decorator Surface
 
@@ -93,16 +98,22 @@ The descriptor keeps these metadata fields:
 v1 accepts these parameter categories:
 - bare `TensorView`
 - bare `Tile`
-- explicit scalar annotations such as `pto.i32`, `pto.f16`, `pto.f32`
+- scalar annotations such as `pto.i32`, `pto.f16`, `pto.f32`, `pto.AnyType`, or `pto.TypeVar("T")`
 
 Binding rules:
 - the single `dtypes` signature binds parameter element types positionally
 - `TensorView` parameters get their element dtype from the same position in
   `dtypes`
 - `Tile` parameters get their element dtype from the same position in `dtypes`
-- scalar parameters must use an explicit scalar annotation
-- scalar annotations must exactly match the dtype at the same position in
+- scalar parameters must use a TileLang scalar-style annotation
+- scalar annotations may be concrete scalar dtypes, wildcard dtypes, or
+  `TypeVar(...)`
+- concrete scalar annotations must exactly match the dtype at the same position
+  in `dtypes`
+- wildcard scalar annotations must accept the dtype at the same position in
   `dtypes`
+- `TypeVar(...)` scalar annotations bind to the selected dtype at the same
+  position in `dtypes`
 
 Example:
 

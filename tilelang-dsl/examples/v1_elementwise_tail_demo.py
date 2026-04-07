@@ -25,6 +25,7 @@ pto = _import_tilelang_dsl()
     op="eltwise",
     dtypes=[(pto.f32, pto.f32, pto.f32, pto.i32)],
     name="tilelang_v1_elementwise_tail_demo",
+    advanced=True,
 )
 def kernel(inp: pto.TensorView, out: pto.TensorView, tile: pto.Tile, remaining: pto.i32):
     rows = inp.shape[0]

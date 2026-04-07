@@ -38,59 +38,30 @@ namespace pto {
 
 namespace {
 
-/// Compute the row-major strided memref type for a tile_buf.
-static MemRefType computeBridgeMemrefType(pto::TileBufType tbTy,
-                                          MLIRContext *ctx) {
-  ArrayRef<int64_t> shape = tbTy.getShape();
-  ArrayRef<int64_t> validShape = tbTy.getValidShape();
-
-  SmallVector<int64_t, 2> memrefDims;
-  for (unsigned d = 0; d < shape.size(); ++d) {
-    if (d < validShape.size() && validShape[d] != ShapedType::kDynamic)
-      memrefDims.push_back(validShape[d]);
-    else
-      memrefDims.push_back(ShapedType::kDynamic);
+/// Locate the `pto.bind_tile` op that produced `tileBuf`, expecting the
+/// strict pattern emitted by MemrefToTileBuf:
+///
+///   %bound  = pto.bind_tile %src, %vrow, %vcol : memref -> memref
+///   %tile   = builtin.unrealized_conversion_cast %bound : memref -> !pto.tile_buf
+///
+/// Returns nullptr (with an error emitted on `loc`) if the pattern does not
+/// hold — the caller is expected to signal pass failure.
+static pto::BindTileOp findBindTileForTileBuf(Value tileBuf, Operation *user) {
+  auto cast = tileBuf.getDefiningOp<UnrealizedConversionCastOp>();
+  if (!cast || cast.getNumOperands() != 1) {
+    user->emitError(
+        "FoldTileBufIntrinsics: expected tile_buf to be defined by a "
+        "single-operand builtin.unrealized_conversion_cast");
+    return nullptr;
   }
-
-  SmallVector<int64_t, 2> strides(shape.size(), 1);
-  for (int s = static_cast<int>(shape.size()) - 2; s >= 0; --s)
-    strides[s] = strides[s + 1] * shape[s + 1];
-
-  auto stridedLayout = StridedLayoutAttr::get(ctx, /*offset=*/0, strides);
-  return MemRefType::get(memrefDims, tbTy.getElementType(), stridedLayout,
-                         tbTy.getMemorySpace());
-}
-
-/// Try to find the dynamic valid_row index from the tile_buf's defining op
-/// chain (e.g. pto.bind_tile carries optional valid_row/valid_col operands).
-static Value findDynamicValidRow(Value tileBuf) {
-  Value cur = tileBuf;
-  while (cur) {
-    if (auto bindOp = cur.getDefiningOp<pto::BindTileOp>()) {
-      if (bindOp.getValidRow())
-        return bindOp.getValidRow();
-      // bind_tile may chain — trace further through its source.
-      cur = bindOp.getSource();
-      continue;
-    }
-    break;
+  auto bindOp = cast.getOperand(0).getDefiningOp<pto::BindTileOp>();
+  if (!bindOp) {
+    user->emitError(
+        "FoldTileBufIntrinsics: expected unrealized_conversion_cast operand "
+        "to be defined by pto.bind_tile");
+    return nullptr;
   }
-  return nullptr;
-}
-
-/// Try to find the dynamic valid_col index from the tile_buf's defining op.
-static Value findDynamicValidCol(Value tileBuf) {
-  Value cur = tileBuf;
-  while (cur) {
-    if (auto bindOp = cur.getDefiningOp<pto::BindTileOp>()) {
-      if (bindOp.getValidCol())
-        return bindOp.getValidCol();
-      cur = bindOp.getSource();
-      continue;
-    }
-    break;
-  }
-  return nullptr;
+  return bindOp;
 }
 
 struct FoldTileBufIntrinsicsPass
@@ -101,6 +72,13 @@ struct FoldTileBufIntrinsicsPass
     func::FuncOp func = getOperation();
     MLIRContext *ctx = &getContext();
     OpBuilder builder(ctx);
+
+    // Leftover TileLang template instances (private, uncalled after
+    // PTOInlineLibCall) still contain pto.tile_buf_addr / tile_valid_*
+    // ops on tile_buf function arguments — they have no bind_tile to
+    // fold against and will be removed by later DCE.  Skip them.
+    if (func->hasAttr("pto.tilelang.instance"))
+      return;
 
     SmallVector<pto::TileBufAddrOp, 8> addrOps;
     SmallVector<pto::TileValidRowsOp, 8> rowsOps;
@@ -115,30 +93,51 @@ struct FoldTileBufIntrinsicsPass
         colsOps.push_back(cols);
     });
 
-    // Fold pto.tile_buf_addr → pto.simd.tile_to_memref.
+    // Fold pto.tile_buf_addr → bind_tile's source memref (the static-layout
+    // pto.pointer_cast result), or further to pto.castptr when the requested
+    // result type is already !pto.ptr<...>. This bypasses the dynamic-offset
+    // memref produced by bind_tile itself, so downstream vlds/vsts
+    // canonicalization sees a clean strided<[..],offset:0> layout.
     for (auto addrOp : addrOps) {
-      builder.setInsertionPoint(addrOp);
-      auto tbTy = dyn_cast<pto::TileBufType>(addrOp.getSrc().getType());
-      if (!tbTy) {
-        addrOp.emitError("tile_buf_addr source is not tile_buf");
+      pto::BindTileOp bindOp = findBindTileForTileBuf(addrOp.getSrc(), addrOp);
+      if (!bindOp)
+        return signalPassFailure();
+
+      Value srcMemref = bindOp.getSource();
+      if (!isa<MemRefType>(srcMemref.getType())) {
+        addrOp.emitError(
+            "FoldTileBufIntrinsics: pto.bind_tile source is not a memref");
         return signalPassFailure();
       }
 
-      MemRefType bridgeMemref = computeBridgeMemrefType(tbTy, ctx);
-      auto bridge = builder.create<pto::SimdTileToMemrefOp>(
-          addrOp.getLoc(), bridgeMemref, addrOp.getSrc());
-
-      Value result = bridge.getDst();
-      if (result.getType() != addrOp.getDst().getType()) {
-        result = builder.create<memref::CastOp>(
-            addrOp.getLoc(), addrOp.getDst().getType(), result);
+      if (auto resultMemrefType = dyn_cast<MemRefType>(addrOp.getDst().getType())) {
+        // The declared tile_buf_addr result type may differ from the actual
+        // bind_tile source layout (e.g. plain shape vs. strided layout) — the
+        // downstream vector ops are polymorphic over strided layouts of the
+        // same element type and shape, so retype the result in place.
+        if (srcMemref.getType() != resultMemrefType)
+          addrOp.getDst().setType(cast<MemRefType>(srcMemref.getType()));
+        addrOp.getDst().replaceAllUsesWith(srcMemref);
+        addrOp.erase();
+        continue;
       }
 
-      addrOp.getDst().replaceAllUsesWith(result);
+      auto resultPtrType = dyn_cast<pto::PtrType>(addrOp.getDst().getType());
+      if (!resultPtrType) {
+        addrOp.emitError(
+            "FoldTileBufIntrinsics: tile_buf_addr result must be memref or !pto.ptr");
+        return signalPassFailure();
+      }
+
+      builder.setInsertionPoint(addrOp);
+      Value replacement =
+          builder.create<pto::CastPtrOp>(addrOp.getLoc(), resultPtrType, srcMemref);
+      addrOp.getDst().replaceAllUsesWith(replacement);
       addrOp.erase();
     }
 
-    // Fold pto.tile_valid_rows → arith.constant or dynamic index.
+    // Fold pto.tile_valid_rows → arith.constant (static) or bind_tile's
+    // valid_row operand (dynamic).
     for (auto rowsOp : rowsOps) {
       builder.setInsertionPoint(rowsOp);
       auto tbTy = dyn_cast<pto::TileBufType>(rowsOp.getSrc().getType());
@@ -153,19 +152,28 @@ struct FoldTileBufIntrinsicsPass
         replacement =
             builder.create<arith::ConstantIndexOp>(rowsOp.getLoc(), vRow);
       } else {
-        replacement = findDynamicValidRow(rowsOp.getSrc());
+        pto::BindTileOp bindOp =
+            findBindTileForTileBuf(rowsOp.getSrc(), rowsOp);
+        if (!bindOp)
+          return signalPassFailure();
+        replacement = bindOp.getValidRow();
         if (!replacement) {
           rowsOp.emitError(
-              "tile_valid_rows: dynamic v_row but cannot find runtime value "
-              "(expected pto.bind_tile with valid_row operand)");
+              "tile_valid_rows: dynamic v_row but bind_tile has no "
+              "valid_row operand");
           return signalPassFailure();
         }
+        // bind_tile's valid_row is `index` (matches tile_valid_rows result),
+        // so no type adaptation is required.
+        assert(replacement.getType() == rowsOp.getResult().getType() &&
+               "tile_valid_rows fold: type mismatch with bind_tile valid_row");
       }
       rowsOp.getResult().replaceAllUsesWith(replacement);
       rowsOp.erase();
     }
 
-    // Fold pto.tile_valid_cols → arith.constant or dynamic index.
+    // Fold pto.tile_valid_cols → arith.constant (static) or bind_tile's
+    // valid_col operand (dynamic).
     for (auto colsOp : colsOps) {
       builder.setInsertionPoint(colsOp);
       auto tbTy = dyn_cast<pto::TileBufType>(colsOp.getSrc().getType());
@@ -180,13 +188,19 @@ struct FoldTileBufIntrinsicsPass
         replacement =
             builder.create<arith::ConstantIndexOp>(colsOp.getLoc(), vCol);
       } else {
-        replacement = findDynamicValidCol(colsOp.getSrc());
+        pto::BindTileOp bindOp =
+            findBindTileForTileBuf(colsOp.getSrc(), colsOp);
+        if (!bindOp)
+          return signalPassFailure();
+        replacement = bindOp.getValidCol();
         if (!replacement) {
           colsOp.emitError(
-              "tile_valid_cols: dynamic v_col but cannot find runtime value "
-              "(expected pto.bind_tile with valid_col operand)");
+              "tile_valid_cols: dynamic v_col but bind_tile has no "
+              "valid_col operand");
           return signalPassFailure();
         }
+        assert(replacement.getType() == colsOp.getResult().getType() &&
+               "tile_valid_cols fold: type mismatch with bind_tile valid_col");
       }
       colsOp.getResult().replaceAllUsesWith(replacement);
       colsOp.erase();

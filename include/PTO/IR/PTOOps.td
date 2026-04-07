@@ -266,8 +266,9 @@ def PartitionViewOp : PTO_Op<"partition_view", [AttrSizedOperandSegments]> {
 }
 
 // Helper: tensor_view or memref (after lowering tensor_view to memref).
-def TensorViewOrMemRef :
-  AnyTypeOf<[TensorViewType, AnyMemRef], "TensorView or MemRef">;
+def TensorViewLikeOrMemRef :
+  AnyTypeOf<[TensorViewType, PartitionTensorViewType, AnyMemRef],
+            "TensorView, PartitionTensorView, or MemRef">;
 
 // Get the size of a dimension of a tensor_view or its lowered memref view.
 // Result type: Index (use arith.index_cast if i32 is needed).
@@ -284,7 +285,27 @@ def GetTensorViewDimOp : PTO_Op<"get_tensor_view_dim", [Pure]> {
         : memref<...>, index -> index
   }];
   let arguments = (ins
-    TensorViewOrMemRef:$tensor_view,
+    TensorViewLikeOrMemRef:$tensor_view,
+    Index:$dim_index
+  );
+  let results = (outs Index:$result);
+  let assemblyFormat = [{
+    $tensor_view `,` $dim_index `:` qualified(type($tensor_view)) `->` qualified(type($result))
+    attr-dict
+  }];
+}
+
+// Get the logical stride of a tensor_view dimension in elements.
+// Result type: Index (use arith.index_cast if i32 is needed).
+def GetTensorViewStrideOp : PTO_Op<"get_tensor_view_stride", [Pure]> {
+  let summary = "Get the stride of a dimension of a tensor_view.";
+  let description = [{
+    Returns the stride, measured in elements, of the given dimension of a
+    logical tensor view. This op accepts either !pto.tensor_view or the memref
+    it is lowered to.
+  }];
+  let arguments = (ins
+    TensorViewLikeOrMemRef:$tensor_view,
     Index:$dim_index
   );
   let results = (outs Index:$result);
@@ -2684,25 +2705,6 @@ def SimdTileToMemrefOp : PTO_Op<"simd.tile_to_memref", [Pure]> {
 // These ops extract memref address and valid shape from tile_buf parameters.
 // After inline, FoldTileBufIntrinsics resolves them to concrete values.
 // ---------------------------------------------------------------------------
-
-def TileBufAddrOp : PTO_Op<"tile_buf_addr", [Pure]> {
-  let summary = "Extract memref address from a tile_buf.";
-  let description = [{
-    Returns a memref view of the data region of a `tile_buf` value.
-    The result memref has the same element type, shape (from tile_buf's static
-    shape), and address space as the source tile_buf, with row-major strides.
-
-    This op is emitted by TileLang DSL templates and resolved by the
-    FoldTileBufIntrinsics pass after inlining.
-  }];
-
-  let arguments = (ins TileBufType:$src);
-  let results = (outs AnyMemRef:$dst);
-
-  let assemblyFormat = [{
-    $src attr-dict `:` qualified(type($src)) `->` type($dst)
-  }];
-}
 
 def TileValidRowsOp : PTO_Op<"tile_valid_rows", [Pure]> {
   let summary = "Extract valid row count from a tile_buf.";
