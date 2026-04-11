@@ -13,6 +13,10 @@ import sys
 import os
 import numpy as np
 
+ANSI_RESET = "\033[0m"
+ANSI_BOLD_GREEN = "\033[1;32m"
+ANSI_BOLD_RED = "\033[1;31m"
+
 
 CASES = [
     {"name": "f32_16x64", "dtype": np.float32, "eps": 1e-6},
@@ -20,19 +24,35 @@ CASES = [
 ]
 
 
+def supports_color():
+    return sys.stdout.isatty() and os.environ.get("TERM") not in (None, "", "dumb")
+
+
+def style_pass(text):
+    if not supports_color():
+        return text
+    return f"{ANSI_BOLD_GREEN}{text}{ANSI_RESET}"
+
+
+def style_fail(text):
+    if not supports_color():
+        return text
+    return f"{ANSI_BOLD_RED}{text}{ANSI_RESET}"
+
+
 def compare_bin(golden_path, output_path, dtype, eps):
     golden = np.fromfile(golden_path, dtype=dtype)
     output = np.fromfile(output_path, dtype=dtype)
     if golden.shape != output.shape:
-        print(f"[ERROR] Shape mismatch: golden {golden.shape} vs output {output.shape}")
+        print(style_fail(f"[ERROR] Shape mismatch: golden {golden.shape} vs output {output.shape}"))
         return False
     if not np.allclose(golden, output, atol=eps, rtol=eps, equal_nan=True):
         g = golden.astype(np.float64, copy=False)
         o = output.astype(np.float64, copy=False)
         abs_diff = np.abs(g - o)
         idx = int(np.argmax(abs_diff))
-        print(f"[ERROR] Mismatch: max diff={float(abs_diff[idx])} at idx={idx} "
-              f"(golden={g[idx]}, output={o[idx]})")
+        print(style_fail(f"[ERROR] Mismatch: max diff={float(abs_diff[idx])} at idx={idx} "
+                         f"(golden={g[idx]}, output={o[idx]})"))
         return False
     return True
 
@@ -50,11 +70,11 @@ if __name__ == "__main__":
         output_path = os.path.join(case_dir, "output.bin")
         ok = compare_bin(golden_path, output_path, case["dtype"], case["eps"])
         if ok:
-            print(f"[INFO] {case['name']}: compare passed")
+            print(style_pass(f"[INFO] {case['name']}: compare passed"))
         else:
-            print(f"[ERROR] {case['name']}: compare failed")
+            print(style_fail(f"[ERROR] {case['name']}: compare failed"))
             all_passed = False
 
     if not all_passed:
         sys.exit(2)
-    print("[INFO] all cases passed")
+    print(style_pass("[INFO] all cases passed"))

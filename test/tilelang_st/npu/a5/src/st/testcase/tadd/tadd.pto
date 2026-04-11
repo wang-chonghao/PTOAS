@@ -8,7 +8,8 @@
 
 // TileLang ST kernels for pto.tadd: tload(a) + tload(b) + tadd(a,b)->c + tstore(c).
 // Multiple cases with different shapes in a single module.
-// Compiled by ptoas --enable-tile-op-expand --vpto-emit-hivm-llvm to produce LLVM IR.
+// Compiled by ptoas --enable-insert-sync --enable-tile-op-expand --vpto-emit-hivm-llvm
+// to produce LLVM IR.
 
 module {
   // Case 0: f32 16x64 (1024 elements)

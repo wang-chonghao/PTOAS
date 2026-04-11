@@ -75,8 +75,16 @@ static int RunCase(const TestCase &tc, int deviceId, aclrtStream stream) {
     ACL_CHECK(aclrtMalloc((void **)&src1Device, fileSize, ACL_MEM_MALLOC_HUGE_FIRST));
     ACL_CHECK(aclrtMalloc((void **)&dstDevice, fileSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
-    ReadFile((caseDir + "/input1.bin").c_str(), fileSize, src0Host, fileSize);
-    ReadFile((caseDir + "/input2.bin").c_str(), fileSize, src1Host, fileSize);
+    size_t src0FileSize = fileSize;
+    size_t src1FileSize = fileSize;
+    if (!ReadFile((caseDir + "/input1.bin").c_str(), src0FileSize, src0Host, fileSize)) {
+        std::fprintf(stderr, "[ERROR] failed to read %s/input1.bin\n", caseDir.c_str());
+        return 1;
+    }
+    if (!ReadFile((caseDir + "/input2.bin").c_str(), src1FileSize, src1Host, fileSize)) {
+        std::fprintf(stderr, "[ERROR] failed to read %s/input2.bin\n", caseDir.c_str());
+        return 1;
+    }
 
     ACL_CHECK(aclrtMemcpy(src0Device, fileSize, src0Host, fileSize, ACL_MEMCPY_HOST_TO_DEVICE));
     ACL_CHECK(aclrtMemcpy(src1Device, fileSize, src1Host, fileSize, ACL_MEMCPY_HOST_TO_DEVICE));

@@ -94,6 +94,10 @@ def set_env_variables(run_mode, soc_version):
         )
 
 
+def get_testcase_work_dir(testcase):
+    return os.path.join("build", "testcase", testcase)
+
+
 def build_project(run_mode, soc_version, testcase, ptoas_bin):
     build_dir = "build"
     if os.path.exists(build_dir):
@@ -135,11 +139,13 @@ def build_project(run_mode, soc_version, testcase, ptoas_bin):
         raise
 
 
-def run_gen_data(golden_path):
+def run_gen_data(golden_path, testcase):
     original_dir = os.getcwd()
     try:
-        run_command(["cp", golden_path, "build/gen_data.py"])
-        os.chdir("build/")
+        work_dir = get_testcase_work_dir(testcase)
+        os.makedirs(work_dir, exist_ok=True)
+        run_command(["cp", golden_path, os.path.join(work_dir, "gen_data.py")])
+        os.chdir(work_dir)
         run_command([sys.executable, "gen_data.py"])
     except Exception as e:
         print(f"gen golden failed: {e}")
@@ -151,8 +157,8 @@ def run_gen_data(golden_path):
 def run_binary(testcase, case_filter=None):
     original_dir = os.getcwd()
     try:
-        os.chdir("build/bin/")
-        cmd = ["./" + testcase]
+        os.chdir(get_testcase_work_dir(testcase))
+        cmd = [os.path.join("..", "..", "bin", testcase)]
         if case_filter:
             cmd.append(case_filter)
         run_command(cmd)
@@ -163,11 +169,13 @@ def run_binary(testcase, case_filter=None):
         os.chdir(original_dir)
 
 
-def run_compare(compare_path, case_filter=None):
+def run_compare(compare_path, testcase, case_filter=None):
     original_dir = os.getcwd()
     try:
-        run_command(["cp", compare_path, "build/compare.py"])
-        os.chdir("build/")
+        work_dir = get_testcase_work_dir(testcase)
+        os.makedirs(work_dir, exist_ok=True)
+        run_command(["cp", compare_path, os.path.join(work_dir, "compare.py")])
+        os.chdir(work_dir)
         cmd = [sys.executable, "compare.py"]
         if case_filter:
             cmd.append(case_filter)
@@ -233,12 +241,12 @@ def main():
 
         # gen golden → run binary → compare
         golden_path = f"testcase/{testcase}/gen_data.py"
-        run_gen_data(golden_path)
+        run_gen_data(golden_path, testcase)
 
         run_binary(testcase, args.case)
 
         compare_path = f"testcase/{testcase}/compare.py"
-        run_compare(compare_path, args.case)
+        run_compare(compare_path, testcase, args.case)
 
     except Exception as e:
         print(f"run failed: {str(e)}", file=sys.stderr)

@@ -17,6 +17,7 @@ execute_process(
     COMMAND "${PTOAS_BIN}"
         --pto-arch=a5
         --pto-backend=vpto
+        --enable-insert-sync
         --enable-tile-op-expand
         --vpto-emit-hivm-llvm
         "${PTO_SRC}"

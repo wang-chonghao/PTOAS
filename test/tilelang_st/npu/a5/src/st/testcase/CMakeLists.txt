@@ -12,8 +12,9 @@
 # CMake macro for TileLang ST test cases.  Unlike pto-isa's pto_vec_st()
 # which compiles a hand-written kernel.cpp with -xcce, this macro:
 #   1. Runs ptoas to compile <NAME>.pto → kernel.ll  (LLVM IR)
-#   2. Runs bisheng -x ir   kernel.ll  → kernel.o   (object file)
-#   3. Compiles launch.cpp with -xcce and links kernel.o → shared library
+#   2. Runs bisheng -x ir   kernel.ll  → device .o
+#   3. Repacks the device .o into a host-linkable fatobj object
+#   4. Links the repacked object → shared library
 #   4. Builds host executable from main.cpp (no GTest — comparison via compare.py)
 # --------------------------------------------------------------------------
 set(PTO_TILELANG_ST_TESTCASE_DIR ${CMAKE_CURRENT_LIST_DIR})
@@ -36,24 +37,49 @@ function(pto_tilelang_vec_st NAME)
         VERBATIM
     )
 
-    # Step 2: bisheng  kernel.ll → kernel.o
-    set(KERNEL_OBJ ${CMAKE_CURRENT_BINARY_DIR}/${NAME}_kernel.o)
+    # Step 2: bisheng  kernel.ll → device .o
+    set(KERNEL_DEVICE_OBJ ${CMAKE_CURRENT_BINARY_DIR}/${NAME}_kernel_device.o)
     add_custom_command(
-        OUTPUT ${KERNEL_OBJ}
+        OUTPUT ${KERNEL_DEVICE_OBJ}
         COMMAND bisheng
             --target=hiipu64-hisilicon-cce
             -march=dav-c310-vec
             --cce-aicore-arch=dav-c310-vec
             --cce-aicore-only
+            -O2
             -c -x ir ${KERNEL_LL}
-            -o ${KERNEL_OBJ}
+            -o ${KERNEL_DEVICE_OBJ}
         DEPENDS ${KERNEL_LL}
-        COMMENT "bisheng: ${NAME}_kernel.ll -> ${NAME}_kernel.o"
+        COMMENT "bisheng: ${NAME}_kernel.ll -> ${NAME}_kernel_device.o"
+        VERBATIM
     )
 
-    # Step 3: launch.cpp (-xcce) + kernel.o → shared library
-    add_library(${NAME}_kernel SHARED launch.cpp ${KERNEL_OBJ})
-    set_source_files_properties(${KERNEL_OBJ} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    # Step 3: repack device .o into a host-linkable fatobj object using a
+    # generated stub source derived from launch.cpp's kernel declarations.
+    set(REPACK_SCRIPT ${PTO_TILELANG_ST_TESTCASE_DIR}/repack_tilelang_kernel.sh)
+    set(KERNEL_LAUNCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/launch.cpp)
+    set(KERNEL_REPACK_OBJ ${CMAKE_CURRENT_BINARY_DIR}/${NAME}_kernel_repack.o)
+    string(MD5 KERNEL_MODULE_ID_HASH "${NAME}")
+    string(SUBSTRING "${KERNEL_MODULE_ID_HASH}" 0 16 KERNEL_MODULE_ID)
+    add_custom_command(
+        OUTPUT ${KERNEL_REPACK_OBJ}
+        COMMAND bash ${REPACK_SCRIPT}
+            ${ASCEND_HOME_PATH}
+            ${PTO_ISA_ROOT}
+            dav-c310-vec
+            ${KERNEL_LAUNCH_SRC}
+            ${KERNEL_DEVICE_OBJ}
+            ${KERNEL_REPACK_OBJ}
+            ${KERNEL_MODULE_ID}
+        DEPENDS ${KERNEL_LAUNCH_SRC} ${KERNEL_DEVICE_OBJ} ${REPACK_SCRIPT}
+        COMMENT "repack: ${NAME}_kernel_device.o -> ${NAME}_kernel_repack.o"
+        VERBATIM
+    )
+
+    # Step 4: launch.cpp (-xcce) + repack object → shared library
+    add_library(${NAME}_kernel SHARED launch.cpp ${KERNEL_REPACK_OBJ})
+    set_source_files_properties(${KERNEL_REPACK_OBJ}
+        PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
     target_compile_options(${NAME}_kernel PRIVATE
         ${CMAKE_CCE_COMPILE_OPTIONS} --cce-aicore-arch=dav-c310-vec -std=c++17)
     target_include_directories(${NAME}_kernel PRIVATE
@@ -63,7 +89,7 @@ function(pto_tilelang_vec_st NAME)
     )
     target_link_options(${NAME}_kernel PRIVATE --cce-fatobj-link)
 
-    # Step 4: main.cpp → host executable
+    # Step 5: main.cpp → host executable
     add_executable(${NAME} main.cpp)
     target_compile_options(${NAME} PRIVATE ${CMAKE_CPP_COMPILE_OPTIONS})
     target_include_directories(${NAME} PRIVATE
