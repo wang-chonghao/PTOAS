@@ -181,7 +181,7 @@ scf.for %i = %c0 to %N step %c1 {
 | Aspect | `set_flag`/`wait_flag` | `get_buf`/`rls_buf` |
 |--------|------------------------|---------------------|
 | **Dependency tracking** | Manual: track event IDs, signal directions, pair every set with wait | Automatic: buffer ID + program order |
-| **Event ID management** | **8 IDs per pipe-pair direction** (HW limit); 2-buffer ping/pong uses 4 IDs per pipe-pair (2 fwd + 2 rev) | **1 buffer ID per shared resource** (HW limit: 32 global); same ID used across all pipelines |
+| **Event ID management** | **8 IDs per pipe-pair direction** (HW limit); each buffer occupies 1 ID per direction | **1 buffer ID per shared resource** (HW limit: 32 global); same ID used across all pipelines |
 | **Error-prone areas** | Forgetting prime/drain, mismatched IDs, wrong direction | Forgetting release (but compile-time checkable) |
 
 ### Quick Example Comparison
@@ -202,10 +202,10 @@ scf.for %i = ... {
 }
 
 // AFTER loop: drain 4 signals
-pto.wait_flag["PIPE_V", "PIPE_MTE2", "EVT_IN_REV_{(N-1)%2}"]
-pto.wait_flag["PIPE_V", "PIPE_MTE2", "EVT_IN_REV_{(N-2)%2}"]
-pto.wait_flag["PIPE_MTE3", "PIPE_V", "EVT_OUT_REV_{(N-1)%2}"]
-pto.wait_flag["PIPE_MTE3", "PIPE_V", "EVT_OUT_REV_{(N-2)%2}"]
+pto.wait_flag["PIPE_V", "PIPE_MTE2", "EVT_IN_REV_0"]
+pto.wait_flag["PIPE_V", "PIPE_MTE2", "EVT_IN_REV_1"]
+pto.wait_flag["PIPE_MTE3", "PIPE_V", "EVT_OUT_REV_0"]
+pto.wait_flag["PIPE_MTE3", "PIPE_V", "EVT_OUT_REV_1"]
 ```
 
 **get_buf/rls_buf approach:**
