@@ -31,6 +31,7 @@ from .frontend_ast import (
     FrontendNameTarget,
     FrontendReturnStmt,
     FrontendSliceExpr,
+    FrontendSourceLocation,
     FrontendStrictVecscopeStmt,
     FrontendStmtNode,
     FrontendSubscriptExpr,
@@ -663,6 +664,44 @@ class _SemanticAnalyzer:
         self._inline_proc_return_types: dict[tuple[str, tuple[SemanticType, ...]], SemanticType | None] = {}
         self._inline_proc_order: list[tuple[str, tuple[SemanticType, ...]]] = []
         self._inline_proc_active_stack: list[tuple[str, tuple[SemanticType, ...]]] = []
+
+    def _expr_source_location(
+        self,
+        expr: FrontendExprNode | SemanticExpr,
+    ) -> FrontendSourceLocation | None:
+        return getattr(expr, "source_location", None)
+
+    def _attach_expr_source_location(
+        self,
+        semantic_expr: SemanticExpr,
+        frontend_expr: FrontendExprNode,
+    ) -> SemanticExpr:
+        source_location = self._expr_source_location(frontend_expr)
+        if source_location is not None:
+            object.__setattr__(semantic_expr, "source_location", source_location)
+        return semantic_expr
+
+    def _format_source_message(
+        self,
+        message: str,
+        expr: FrontendExprNode | SemanticExpr | None = None,
+    ) -> str:
+        if expr is None:
+            return message
+        source_location = self._expr_source_location(expr)
+        if source_location is None:
+            return message
+        return (
+            f"{source_location.path}:{source_location.line}:{source_location.column}: "
+            f"{message}"
+        )
+
+    def _raise_expr_type_error(
+        self,
+        message: str,
+        expr: FrontendExprNode | SemanticExpr | None = None,
+    ) -> None:
+        raise TypeError(self._format_source_message(message, expr))
 
     def analyze(self) -> SemanticKernel:
         env: dict[str, SemanticBinding] = {}
@@ -2655,27 +2694,48 @@ class _SemanticAnalyzer:
                 raise ValueError(
                     f"implicit capture of '{expr.name}' is not allowed in pto.strict_vecscope"
                 )
-            return SemanticBindingRef(binding=binding, type=binding.type)
+            return self._attach_expr_source_location(
+                SemanticBindingRef(binding=binding, type=binding.type),
+                expr,
+            )
         if isinstance(expr, FrontendConstantExpr):
             if isinstance(expr.value, bool):
-                return SemanticLiteralExpr(value=expr.value, type=SemanticScalarType(dtype=i1))
+                return self._attach_expr_source_location(
+                    SemanticLiteralExpr(value=expr.value, type=SemanticScalarType(dtype=i1)),
+                    expr,
+                )
             if isinstance(expr.value, int):
-                return SemanticLiteralExpr(value=expr.value, type=SemanticIndexType())
+                return self._attach_expr_source_location(
+                    SemanticLiteralExpr(value=expr.value, type=SemanticIndexType()),
+                    expr,
+                )
             if isinstance(expr.value, float):
-                return SemanticLiteralExpr(
-                    value=expr.value,
-                    type=SemanticScalarType(dtype=f32),
+                return self._attach_expr_source_location(
+                    SemanticLiteralExpr(
+                        value=expr.value,
+                        type=SemanticScalarType(dtype=f32),
+                    ),
+                    expr,
                 )
             if isinstance(expr.value, str):
-                return SemanticLiteralExpr(
-                    value=expr.value,
-                    type=SemanticMetaType(kind="string"),
+                return self._attach_expr_source_location(
+                    SemanticLiteralExpr(
+                        value=expr.value,
+                        type=SemanticMetaType(kind="string"),
+                    ),
+                    expr,
                 )
             if expr.value is None:
-                return SemanticLiteralExpr(value=None, type=SemanticIndexType())
+                return self._attach_expr_source_location(
+                    SemanticLiteralExpr(value=None, type=SemanticIndexType()),
+                    expr,
+                )
             raise TypeError(f"unsupported constant {expr.value!r} in TileLang DSL v1")
         if isinstance(expr, FrontendSymbolExpr):
-            return self._analyze_symbol_expr(expr)
+            return self._attach_expr_source_location(
+                self._analyze_symbol_expr(expr),
+                expr,
+            )
         if isinstance(expr, FrontendSliceExpr):
             start = None if expr.start is None else self._analyze_expr(expr.start, env, allow_outer_lookup=allow_outer_lookup)
             stop = None if expr.stop is None else self._analyze_expr(expr.stop, env, allow_outer_lookup=allow_outer_lookup)
@@ -2683,44 +2743,62 @@ class _SemanticAnalyzer:
             for item in (start, stop, step):
                 if item is not None:
                     self._require_index_typed_expr(item)
-            return SemanticSliceExpr(
-                start=start,
-                stop=stop,
-                step=step,
-                type=SemanticSliceType(),
+            return self._attach_expr_source_location(
+                SemanticSliceExpr(
+                    start=start,
+                    stop=stop,
+                    step=step,
+                    type=SemanticSliceType(),
+                ),
+                expr,
             )
         if isinstance(expr, FrontendTupleExpr):
             elements = tuple(
                 self._analyze_expr(element, env, allow_outer_lookup=allow_outer_lookup)
                 for element in expr.elements
             )
-            return SemanticTupleExpr(
-                elements=elements,
-                type=SemanticTupleType(elements=tuple(element.type for element in elements)),
+            return self._attach_expr_source_location(
+                SemanticTupleExpr(
+                    elements=elements,
+                    type=SemanticTupleType(elements=tuple(element.type for element in elements)),
+                ),
+                expr,
             )
         if isinstance(expr, FrontendAttributeExpr):
             base = self._analyze_expr(expr.base, env, allow_outer_lookup=allow_outer_lookup)
             if expr.attr == "element_type":
-                return self._element_type_expr(base)
+                return self._attach_expr_source_location(self._element_type_expr(base), expr)
             if expr.attr == "valid_shape":
-                return self._valid_shape_expr(base)
+                return self._attach_expr_source_location(self._valid_shape_expr(base), expr)
             if expr.attr == "strides":
-                return self._strides_expr(base)
+                return self._attach_expr_source_location(self._strides_expr(base), expr)
             attr_type = self._attribute_type(base, expr.attr)
-            return SemanticAttributeAccess(base=base, attr=expr.attr, type=attr_type)
+            return self._attach_expr_source_location(
+                SemanticAttributeAccess(base=base, attr=expr.attr, type=attr_type),
+                expr,
+            )
         if isinstance(expr, FrontendSubscriptExpr):
             base = self._analyze_expr(expr.base, env, allow_outer_lookup=allow_outer_lookup)
             index = self._analyze_expr(expr.index, env, allow_outer_lookup=allow_outer_lookup)
             result_type = self._subscript_type(base, index)
             if isinstance(result_type, SemanticTensorSliceType):
                 slices = self._normalize_tensor_slice(index, base.type.rank)
-                return SemanticTensorSliceExpr(base=base, slices=slices, type=result_type)
-            return SemanticSubscriptAccess(base=base, index=index, type=result_type)
+                return self._attach_expr_source_location(
+                    SemanticTensorSliceExpr(base=base, slices=slices, type=result_type),
+                    expr,
+                )
+            return self._attach_expr_source_location(
+                SemanticSubscriptAccess(base=base, index=index, type=result_type),
+                expr,
+            )
         if isinstance(expr, FrontendBinaryExpr):
             lhs = self._analyze_expr(expr.lhs, env, allow_outer_lookup=allow_outer_lookup)
             rhs = self._analyze_expr(expr.rhs, env, allow_outer_lookup=allow_outer_lookup)
             result_type = self._binary_type(lhs, rhs, expr.op)
-            return SemanticBinaryExpr(lhs=lhs, op=expr.op, rhs=rhs, type=result_type)
+            return self._attach_expr_source_location(
+                SemanticBinaryExpr(lhs=lhs, op=expr.op, rhs=rhs, type=result_type),
+                expr,
+            )
         if isinstance(expr, FrontendCallExpr):
             if expr.namespace is None and expr.name in self._inline_proc_nodes:
                 if expr.keywords:
@@ -4601,7 +4679,10 @@ class _SemanticAnalyzer:
 
     def _require_index_typed_expr(self, expr: SemanticExpr) -> None:
         if not isinstance(expr.type, SemanticIndexType):
-            raise TypeError("slice bounds and vector offsets must be index-typed in TileLang DSL v1")
+            self._raise_expr_type_error(
+                "slice bounds and vector offsets must be index-typed in TileLang DSL v1",
+                expr,
+            )
 
     def _try_static_dtype(self, expr: SemanticExpr) -> ScalarType | None:
         if (

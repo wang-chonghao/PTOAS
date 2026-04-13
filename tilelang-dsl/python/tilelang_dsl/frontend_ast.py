@@ -36,6 +36,13 @@ class FrontendTileSpecializationNode:
     valid_shape: tuple[int | None, ...] | None
 
 
+@dataclass(frozen=True)
+class FrontendSourceLocation:
+    path: str
+    line: int
+    column: int
+
+
 class FrontendExprNode:
     """Base class for lowered frontend expressions."""
 
@@ -230,6 +237,26 @@ class _FrontendBuildContext:
             active_inline_proc_stack=(*self.active_inline_proc_stack, name),
             vecscope_depth=self.vecscope_depth,
         )
+
+
+def _attach_source_location(
+    frontend_node: FrontendExprNode | FrontendStmtNode,
+    ast_node: ast.AST,
+    context: _FrontendBuildContext,
+) -> FrontendExprNode | FrontendStmtNode:
+    if context.source_info is None:
+        return frontend_node
+    line, column = context.source_info.location(ast_node)
+    object.__setattr__(
+        frontend_node,
+        "source_location",
+        FrontendSourceLocation(
+            path=context.source_info.path,
+            line=line,
+            column=column,
+        ),
+    )
+    return frontend_node
 
 
 def _inline_proc_param_specs(inline_proc: _FrontendInlineProc) -> tuple[tuple[str, ast.expr | None], ...]:
@@ -740,9 +767,9 @@ def _build_call_keywords(
 
 def _build_expr(node: ast.AST, context: _FrontendBuildContext) -> FrontendExprNode:
     if isinstance(node, ast.Name):
-        return FrontendNameExpr(name=node.id)
+        return _attach_source_location(FrontendNameExpr(name=node.id), node, context)
     if isinstance(node, ast.Constant):
-        return FrontendConstantExpr(value=node.value)
+        return _attach_source_location(FrontendConstantExpr(value=node.value), node, context)
     if isinstance(node, ast.UnaryOp):
         if isinstance(node.op, ast.UAdd):
             sign = 1
@@ -764,15 +791,27 @@ def _build_expr(node: ast.AST, context: _FrontendBuildContext) -> FrontendExprNo
                 node,
                 "unary +/- currently only supports numeric literals in TileLang DSL v1",
             )
-        return FrontendConstantExpr(value=literal if sign > 0 else -literal)
+        return _attach_source_location(
+            FrontendConstantExpr(value=literal if sign > 0 else -literal),
+            node,
+            context,
+        )
     if isinstance(node, ast.Slice):
         start = None if node.lower is None else _build_expr(node.lower, context)
         stop = None if node.upper is None else _build_expr(node.upper, context)
         step = None if node.step is None else _build_expr(node.step, context)
-        return FrontendSliceExpr(start=start, stop=stop, step=step)
+        return _attach_source_location(
+            FrontendSliceExpr(start=start, stop=stop, step=step),
+            node,
+            context,
+        )
     if isinstance(node, ast.Tuple):
-        return FrontendTupleExpr(
-            elements=tuple(_build_expr(elt, context) for elt in node.elts)
+        return _attach_source_location(
+            FrontendTupleExpr(
+                elements=tuple(_build_expr(elt, context) for elt in node.elts)
+            ),
+            node,
+            context,
         )
     if isinstance(node, ast.Attribute):
         path = _attribute_path(node)
@@ -793,12 +832,24 @@ def _build_expr(node: ast.AST, context: _FrontendBuildContext) -> FrontendExprNo
             "OrderMode",
             "PostUpdateMode",
         } and len(path) >= 2:
-            return FrontendSymbolExpr(namespace=".".join(path[:-1]), name=path[-1])
-        return FrontendAttributeExpr(base=_build_expr(node.value, context), attr=node.attr)
+            return _attach_source_location(
+                FrontendSymbolExpr(namespace=".".join(path[:-1]), name=path[-1]),
+                node,
+                context,
+            )
+        return _attach_source_location(
+            FrontendAttributeExpr(base=_build_expr(node.value, context), attr=node.attr),
+            node,
+            context,
+        )
     if isinstance(node, ast.Subscript):
-        return FrontendSubscriptExpr(
-            base=_build_expr(node.value, context),
-            index=_build_expr(node.slice, context),
+        return _attach_source_location(
+            FrontendSubscriptExpr(
+                base=_build_expr(node.value, context),
+                index=_build_expr(node.slice, context),
+            ),
+            node,
+            context,
         )
     if isinstance(node, ast.BinOp):
         op_name = _BINARY_OP_NAMES.get(type(node.op))
@@ -807,10 +858,14 @@ def _build_expr(node: ast.AST, context: _FrontendBuildContext) -> FrontendExprNo
                 node,
                 f"unsupported binary operator `{type(node.op).__name__}` in TileLang DSL v1",
             )
-        return FrontendBinaryExpr(
-            lhs=_build_expr(node.left, context),
-            op=op_name,
-            rhs=_build_expr(node.right, context),
+        return _attach_source_location(
+            FrontendBinaryExpr(
+                lhs=_build_expr(node.left, context),
+                op=op_name,
+                rhs=_build_expr(node.right, context),
+            ),
+            node,
+            context,
         )
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1 or len(node.comparators) != 1:
@@ -824,10 +879,14 @@ def _build_expr(node: ast.AST, context: _FrontendBuildContext) -> FrontendExprNo
                 node,
                 f"unsupported comparison operator `{type(node.ops[0]).__name__}` in TileLang DSL v1",
             )
-        return FrontendBinaryExpr(
-            lhs=_build_expr(node.left, context),
-            op=op_name,
-            rhs=_build_expr(node.comparators[0], context),
+        return _attach_source_location(
+            FrontendBinaryExpr(
+                lhs=_build_expr(node.left, context),
+                op=op_name,
+                rhs=_build_expr(node.comparators[0], context),
+            ),
+            node,
+            context,
         )
     if isinstance(node, ast.BoolOp):
         op_name = _BOOL_OP_NAMES.get(type(node.op))
@@ -848,7 +907,7 @@ def _build_expr(node: ast.AST, context: _FrontendBuildContext) -> FrontendExprNo
                 op=op_name,
                 rhs=_build_expr(value, context),
             )
-        return expr
+        return _attach_source_location(expr, node, context)
     if isinstance(node, ast.Call):
         if isinstance(node.func, ast.Name) and node.func.id in context.inline_procs:
             inline_proc = context.inline_procs[node.func.id]
@@ -857,11 +916,15 @@ def _build_expr(node: ast.AST, context: _FrontendBuildContext) -> FrontendExprNo
                     node,
                     f"recursive inline_proc call `{node.func.id}` is not supported in TileLang DSL v1",
                 )
-            return FrontendCallExpr(
-                namespace=None,
-                name=node.func.id,
-                args=_bind_inline_proc_call(node, inline_proc, context),
-                keywords=(),
+            return _attach_source_location(
+                FrontendCallExpr(
+                    namespace=None,
+                    name=node.func.id,
+                    args=_bind_inline_proc_call(node, inline_proc, context),
+                    keywords=(),
+                ),
+                node,
+                context,
             )
         if (
             isinstance(node.func, ast.Attribute)
@@ -904,40 +967,52 @@ def _build_expr(node: ast.AST, context: _FrontendBuildContext) -> FrontendExprNo
                     f"selected op {context.selected_op!r}",
                 )
             _validate_resolved_template_op_surface(resolved_op, node, context)
-            return FrontendCallExpr(
-                namespace="pto",
-                name=resolved_op,
-                args=tuple(_build_expr(arg, context) for arg in node.args[1:]),
-                keywords=_build_call_keywords(
-                    node,
+            return _attach_source_location(
+                FrontendCallExpr(
                     namespace="pto",
                     name=resolved_op,
-                    context=context,
+                    args=tuple(_build_expr(arg, context) for arg in node.args[1:]),
+                    keywords=_build_call_keywords(
+                        node,
+                        namespace="pto",
+                        name=resolved_op,
+                        context=context,
+                    ),
                 ),
+                node,
+                context,
             )
         if isinstance(node.func, ast.Name):
-            return FrontendCallExpr(
-                namespace=None,
-                name=node.func.id,
-                args=tuple(_build_expr(arg, context) for arg in node.args),
-                keywords=_build_call_keywords(
-                    node,
+            return _attach_source_location(
+                FrontendCallExpr(
                     namespace=None,
                     name=node.func.id,
-                    context=context,
+                    args=tuple(_build_expr(arg, context) for arg in node.args),
+                    keywords=_build_call_keywords(
+                        node,
+                        namespace=None,
+                        name=node.func.id,
+                        context=context,
+                    ),
                 ),
+                node,
+                context,
             )
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-            return FrontendCallExpr(
-                namespace=node.func.value.id,
-                name=node.func.attr,
-                args=tuple(_build_expr(arg, context) for arg in node.args),
-                keywords=_build_call_keywords(
-                    node,
+            return _attach_source_location(
+                FrontendCallExpr(
                     namespace=node.func.value.id,
                     name=node.func.attr,
-                    context=context,
+                    args=tuple(_build_expr(arg, context) for arg in node.args),
+                    keywords=_build_call_keywords(
+                        node,
+                        namespace=node.func.value.id,
+                        name=node.func.attr,
+                        context=context,
+                    ),
                 ),
+                node,
+                context,
             )
     raise context.error(
         node,
@@ -969,26 +1044,38 @@ def _build_stmt(node: ast.stmt, context: _FrontendBuildContext) -> FrontendStmtN
     if isinstance(node, ast.Assign):
         if len(node.targets) != 1:
             raise context.error(node, "multiple assignment targets are not supported in TileLang DSL v1")
-        return FrontendAssignStmt(
-            target=_build_target(node.targets[0], context),
-            value=_build_expr(node.value, context),
+        return _attach_source_location(
+            FrontendAssignStmt(
+                target=_build_target(node.targets[0], context),
+                value=_build_expr(node.value, context),
+            ),
+            node,
+            context,
         )
     if isinstance(node, ast.AnnAssign):
         if node.value is None:
             raise context.error(node, "annotation-only assignments are not supported in TileLang DSL v1")
-        return FrontendAssignStmt(
-            target=_build_target(node.target, context),
-            value=_build_expr(node.value, context),
-            annotation=node.annotation,
+        return _attach_source_location(
+            FrontendAssignStmt(
+                target=_build_target(node.target, context),
+                value=_build_expr(node.value, context),
+                annotation=node.annotation,
+            ),
+            node,
+            context,
         )
     if isinstance(node, ast.Expr):
-        return FrontendExprStmt(expr=_build_expr(node.value, context))
+        return _attach_source_location(
+            FrontendExprStmt(expr=_build_expr(node.value, context)),
+            node,
+            context,
+        )
     if isinstance(node, ast.Return):
         value = None
         if node.value is not None:
             if not (isinstance(node.value, ast.Constant) and node.value.value is None):
                 value = _build_expr(node.value, context)
-        return FrontendReturnStmt(value=value)
+        return _attach_source_location(FrontendReturnStmt(value=value), node, context)
     if isinstance(node, ast.For):
         if not isinstance(node.target, ast.Name):
             raise context.error(node.target, "for target must be a single name")
@@ -996,12 +1083,16 @@ def _build_stmt(node: ast.stmt, context: _FrontendBuildContext) -> FrontendStmtN
             raise context.error(node.iter, "only Python range(lb, ub, step) loops are supported")
         if len(node.iter.args) != 3:
             raise context.error(node.iter, "range() expects exactly 3 arguments in TileLang DSL v1")
-        return FrontendForStmt(
-            target=node.target.id,
-            lower_bound=_build_expr(node.iter.args[0], context),
-            upper_bound=_build_expr(node.iter.args[1], context),
-            step=_build_expr(node.iter.args[2], context),
-            body=_build_stmt_list(node.body, context),
+        return _attach_source_location(
+            FrontendForStmt(
+                target=node.target.id,
+                lower_bound=_build_expr(node.iter.args[0], context),
+                upper_bound=_build_expr(node.iter.args[1], context),
+                step=_build_expr(node.iter.args[2], context),
+                body=_build_stmt_list(node.body, context),
+            ),
+            node,
+            context,
         )
     if isinstance(node, ast.If):
         is_constexpr = False
@@ -1025,11 +1116,15 @@ def _build_stmt(node: ast.stmt, context: _FrontendBuildContext) -> FrontendStmtN
                 )
             is_constexpr = True
             condition_node = node.test.args[0]
-        return FrontendIfStmt(
-            condition=_build_expr(condition_node, context),
-            then_body=_build_stmt_list(node.body, context),
-            else_body=_build_stmt_list(node.orelse, context),
-            is_constexpr=is_constexpr,
+        return _attach_source_location(
+            FrontendIfStmt(
+                condition=_build_expr(condition_node, context),
+                then_body=_build_stmt_list(node.body, context),
+                else_body=_build_stmt_list(node.orelse, context),
+                is_constexpr=is_constexpr,
+            ),
+            node,
+            context,
         )
     if isinstance(node, ast.With):
         if len(node.items) != 1:
@@ -1055,8 +1150,12 @@ def _build_stmt(node: ast.stmt, context: _FrontendBuildContext) -> FrontendStmtN
                 )
             if item.optional_vars is not None:
                 raise context.error(item, "pto.vecscope() does not support `as` bindings in TileLang DSL v1")
-            return FrontendVecscopeStmt(
-                body=_build_stmt_list(node.body, context.nested_vecscope()),
+            return _attach_source_location(
+                FrontendVecscopeStmt(
+                    body=_build_stmt_list(node.body, context.nested_vecscope()),
+                ),
+                node,
+                context,
             )
         if with_name != "strict_vecscope":
             raise context.error(
@@ -1075,10 +1174,14 @@ def _build_stmt(node: ast.stmt, context: _FrontendBuildContext) -> FrontendStmtN
             if not isinstance(elt, ast.Name):
                 raise context.error(elt, "pto.strict_vecscope bindings must be names")
             block_arguments.append(elt.id)
-        return FrontendStrictVecscopeStmt(
-            captures=tuple(_build_expr(arg, context) for arg in item.context_expr.args),
-            block_arguments=tuple(block_arguments),
-            body=_build_stmt_list(node.body, context.nested_vecscope()),
+        return _attach_source_location(
+            FrontendStrictVecscopeStmt(
+                captures=tuple(_build_expr(arg, context) for arg in item.context_expr.args),
+                block_arguments=tuple(block_arguments),
+                body=_build_stmt_list(node.body, context.nested_vecscope()),
+            ),
+            node,
+            context,
         )
     raise context.error(
         node,

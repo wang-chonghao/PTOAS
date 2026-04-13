@@ -4112,6 +4112,45 @@ class TileLangDSLDiagnosticsTests(unittest.TestCase):
         self.assertIn("valid_shape axis 0=5 must be <= shape axis 0=4", str(valid_shape_ctx.exception))
         self.assertIn(f"{__file__}:", str(valid_shape_ctx.exception))
 
+    def test_slice_index_type_error_reports_template_source_location(self) -> None:
+        source = """
+import tilelang_dsl as pto
+
+@pto.inline_proc
+def store_row(dst: pto.Tile, src: pto.Tile, row: pto.i32):
+    vec = pto.vlds(src[row, 0:])
+    mask = pto.make_mask(dst.element_type, pto.PAT.ALL)
+    pto.vsts(vec, dst[row, 0:], mask)
+    return None
+
+@pto.vkernel(op="diag_index_type_unique", dtypes=[(pto.f32, pto.f32, pto.i32)])
+def kernel(dst: pto.Tile, src: pto.Tile, row: pto.i32):
+    store_row(dst, src, row)
+    return None
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module_path = Path(tmpdir) / "diag_index_type_kernel.py"
+            module_path.write_text(source, encoding="utf-8")
+            spec = util.spec_from_file_location("diag_index_type_kernel", module_path)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+
+            specialized = module.kernel.specialize(
+                dst=pto.TileSpecialization(shape=(8, 16), memory_space=pto.MemorySpace.UB),
+                src=pto.TileSpecialization(shape=(8, 16), memory_space=pto.MemorySpace.UB),
+            )
+
+            with self.assertRaises(TypeError) as ctx:
+                specialized.mlir_text()
+
+        message = str(ctx.exception)
+        self.assertIn(str(module_path), message)
+        self.assertIn(":6:", message)
+        self.assertIn("slice bounds and vector offsets must be index-typed", message)
+
 
 if __name__ == "__main__":
     unittest.main()
