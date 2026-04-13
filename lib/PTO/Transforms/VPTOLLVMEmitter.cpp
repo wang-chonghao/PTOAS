@@ -27,8 +27,6 @@
 namespace mlir::pto {
 
 void materializeVecScopeCarrierLoops(ModuleOp module);
-LogicalResult normalizePtoMemRefSpaces(ModuleOp module,
-                                       llvm::raw_ostream &diagOS);
 LogicalResult applyQueriedTargetAttrs(ModuleOp module,
                                       const VPTOEmissionOptions &options,
                                       llvm::raw_ostream &diagOS);
@@ -4855,10 +4853,6 @@ static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
 
   materializeVecScopeCarrierLoops(clonedModule);
 
-  if (failed(normalizePtoMemRefSpaces(clonedModule, diagOS))) {
-    diagOS << "VPTO LLVM emission failed: normalizePtoMemRefSpaces failed\n";
-    return failure();
-  }
   if (failed(lowerVPTOOps(clonedModule, diagOS))) {
     diagOS << "VPTO LLVM emission failed: lowerVPTOOps failed\n";
     return failure();

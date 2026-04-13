@@ -68,39 +68,16 @@ static bool hasPtrNormalizeConvertibleType(Type type) {
   if (isa<pto::PtrType>(type))
     return true;
   auto memrefType = dyn_cast<MemRefType>(type);
-  return memrefType &&
-         static_cast<bool>(
-             getPointerMemorySpace(memrefType.getMemorySpace(), type.getContext()));
+  return memrefType && static_cast<bool>(getPointerMemorySpace(
+                           memrefType.getMemorySpace(), type.getContext()));
 }
 
 static bool hasPtrNormalizeConvertibleType(TypeRange types) {
-  return llvm::any_of(types, [](Type type) {
-    return hasPtrNormalizeConvertibleType(type);
-  });
+  return llvm::any_of(
+      types, [](Type type) { return hasPtrNormalizeConvertibleType(type); });
 }
 
-static Value materializePtrCast(OpBuilder &builder, Type resultType,
-                                ValueRange inputs, Location loc) {
-  if (inputs.size() != 1 || !isa<pto::PtrType>(resultType))
-    return {};
-
-  Value input = inputs.front();
-  if (input.getType() == resultType)
-    return input;
-
-  auto inputMemrefType = dyn_cast<MemRefType>(input.getType());
-  auto resultPtrType = dyn_cast<pto::PtrType>(resultType);
-  if (!inputMemrefType || !resultPtrType)
-    return {};
-
-  auto memorySpace = getPointerMemorySpace(inputMemrefType.getMemorySpace(),
-                                           builder.getContext());
-  if (!memorySpace || memorySpace != resultPtrType.getMemorySpace() ||
-      inputMemrefType.getElementType() != resultPtrType.getElementType())
-    return {};
-
-  return builder.create<pto::CastPtrOp>(loc, resultPtrType, input);
-}
+static bool isMemRefType(Type type) { return isa<BaseMemRefType>(type); }
 
 static Value materializeUnrealizedCast(OpBuilder &builder, Type resultType,
                                        ValueRange inputs, Location loc) {
@@ -211,6 +188,38 @@ struct ConvertPointerCastToCastPtrPattern
 
     rewriter.replaceOpWithNewOp<pto::CastPtrOp>(op, ptrType,
                                                 adaptor.getAddrs().front());
+    return success();
+  }
+};
+
+struct ConvertCastPtrPattern : public OpConversionPattern<pto::CastPtrOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::CastPtrOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type convertedResultType =
+        getTypeConverter()->convertType(op.getResult().getType());
+    if (!convertedResultType)
+      return failure();
+
+    Value input = adaptor.getInput();
+    Type inputType = input.getType();
+    if (isMemRefType(inputType) || isMemRefType(convertedResultType))
+      return rewriter.notifyMatchFailure(op,
+                                         "memref castptr must be eliminated");
+
+    if (!isa<pto::PtrType, IntegerType>(inputType) ||
+        !isa<pto::PtrType, IntegerType>(convertedResultType))
+      return rewriter.notifyMatchFailure(op,
+                                         "expected ptr/int castptr operands");
+
+    if (inputType == convertedResultType) {
+      rewriter.replaceOp(op, input);
+      return success();
+    }
+
+    rewriter.replaceOpWithNewOp<pto::CastPtrOp>(op, convertedResultType, input);
     return success();
   }
 };
@@ -359,8 +368,8 @@ struct VPTOPtrNormalizePass
     target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
                            scf::SCFDialect>();
     target.addDynamicallyLegalDialect<pto::PTODialect>([](Operation *op) {
-      return !isa<pto::TileBufAddrOp, pto::PointerCastOp, pto::BindTileOp,
-                  pto::VldsOp, pto::VstsOp>(op);
+      return !isa<pto::TileBufAddrOp, pto::PointerCastOp, pto::CastPtrOp,
+                  pto::BindTileOp, pto::VldsOp, pto::VstsOp>(op);
     });
     target.addLegalOp<ModuleOp>();
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
@@ -381,6 +390,10 @@ struct VPTOPtrNormalizePass
           return op.getResult().getType() ==
                  typeConverter.convertType(op.getResult().getType());
         });
+    target.addDynamicallyLegalOp<pto::CastPtrOp>([&](pto::CastPtrOp op) {
+      return !isMemRefType(op.getInput().getType()) &&
+             !isMemRefType(op.getResult().getType());
+    });
     target.addDynamicallyLegalOp<pto::BindTileOp>([&](pto::BindTileOp op) {
       return op.getResult().getType() ==
              typeConverter.convertType(op.getResult().getType());
@@ -399,7 +412,7 @@ struct VPTOPtrNormalizePass
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                    typeConverter);
     patterns.add<ConvertTileBufAddrToPtrPattern,
-                 ConvertPointerCastToCastPtrPattern,
+                 ConvertPointerCastToCastPtrPattern, ConvertCastPtrPattern,
                  ConvertBindTileToPtrPattern,
                  ConvertSubviewToAddPtrPattern, ConvertVldsSubviewOperandPattern,
                  ConvertVstsSubviewOperandPattern,
