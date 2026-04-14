@@ -2040,6 +2040,129 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
         self.assertIn("pto.plt_b32", text)
         self.assertIn("pto.vadd", text)
 
+    def test_scalar_binary_arithmetic_supports_float_and_integer_paths(self) -> None:
+        @pto.vkernel(
+            op="scalar_binary_arithmetic_unique",
+            dtypes=[(pto.f32, pto.f32, pto.i32)],
+            advanced=True,
+        )
+        def kernel(dst_tile: pto.Tile, src_tile: pto.Tile, gate: pto.i32):
+            rows = src_tile.shape[0]
+            cols = src_tile.shape[1]
+            with pto.strict_vecscope(
+                src_tile,
+                dst_tile,
+                gate,
+                rows,
+                cols,
+                0,
+                rows,
+                1,
+            ) as (src, dst, in_gate, valid_rows, valid_cols, row_lb, row_ub, row_step):
+                for row in range(row_lb, row_ub, row_step):
+                    for lane in range(0, valid_cols, 64):
+                        half = in_gate // pto.i32(2)
+                        remain = in_gate % pto.i32(7)
+                        factor = pto.f32(half) + pto.f32(remain) * pto.f32(0.5)
+                        mask, _ = pto.make_mask(pto.f32, valid_cols - lane)
+                        vec = pto.vlds(src, lane)
+                        vec = pto.vmuls(vec, factor, mask)
+                        pto.vsts(vec, dst, lane, mask)
+            return None
+
+        specialized = kernel.specialize(
+            dst_tile=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
+            src_tile=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
+        )
+
+        text = specialized.mlir_text()
+        self.assertRegex(text, r"= arith\.floordivsi %in_gate_\d+, %c2_i32 : i32")
+        self.assertRegex(text, r"= arith\.remsi %in_gate_\d+, %c7_i32 : i32")
+        self.assertRegex(text, r"= arith\.mulf %tmp_\d+, %c0\.5_f32 : f32")
+        self.assertRegex(text, r"= arith\.addf %tmp_\d+, %tmp_\d+ : f32")
+
+    def test_index_floordiv_lowers_to_divui_instead_of_floordivsi(self) -> None:
+        @pto.vkernel(
+            op="index_floordiv_lowering_unique",
+            dtypes=[(pto.f32, pto.f32, pto.f32)],
+            advanced=True,
+        )
+        def kernel(
+            lhs_tile: pto.Tile,
+            rhs_tile: pto.Tile,
+            dst_tile: pto.Tile,
+        ):
+            rows = lhs_tile.shape[0]
+            cols = lhs_tile.shape[1]
+            with pto.strict_vecscope(
+                lhs_tile,
+                rhs_tile,
+                dst_tile,
+                rows,
+                cols,
+                0,
+                rows,
+                1,
+            ) as (lhs, rhs, dst, valid_rows, valid_cols, row_lb, row_ub, row_step):
+                for row in range(row_lb, row_ub, row_step):
+                    for lane in range(0, valid_cols, 64):
+                        row_bucket = row // valid_cols
+                        offset = row_bucket * valid_cols + lane
+                        mask, _ = pto.make_mask(pto.f32, valid_cols - lane)
+                        summed = pto.vadd(pto.vlds(lhs, offset), pto.vlds(rhs, offset), mask)
+                        pto.vsts(summed, dst, offset, mask)
+            return None
+
+        specialized = kernel.specialize(
+            lhs_tile=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
+            rhs_tile=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
+            dst_tile=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
+        )
+
+        text = specialized.mlir_text()
+        self.assertRegex(text, r"= arith\.divui %row_\d+, %valid_cols_\d+ : index")
+        self.assertNotRegex(text, r"arith\.floordivsi .*: index")
+
+    def test_scalar_bitwise_and_shift_ops_lower_for_signed_and_unsigned(self) -> None:
+        @pto.vkernel(
+            op="scalar_bitwise_shift_unique",
+            dtypes=[(pto.i32, pto.ui32)],
+            advanced=True,
+        )
+        def kernel(signed_val: pto.i32, unsigned_val: pto.ui32):
+            signed_mix = (signed_val & pto.i32(15)) | pto.i32(1)
+            signed_mix = signed_mix ^ pto.i32(2)
+            signed_mix = signed_mix >> pto.i32(1)
+            signed_mix = signed_mix << pto.i32(3)
+
+            unsigned_mix = unsigned_val & pto.ui32(31)
+            unsigned_mix = unsigned_mix >> pto.ui32(2)
+            unsigned_mix = unsigned_mix << pto.ui32(1)
+            unsigned_mix = unsigned_mix ^ pto.ui32(7)
+            return None
+
+        specialized = kernel.specialize()
+        text = specialized.mlir_text()
+
+        self.assertIn("arith.andi", text)
+        self.assertIn("arith.ori", text)
+        self.assertIn("arith.xori", text)
+        self.assertRegex(text, r"= arith\.shrsi %\w+_\d+, %c1_i32 : i32")
+        self.assertRegex(text, r"= arith\.shli %\w+_\d+, %c3_i32 : i32")
+        self.assertRegex(text, r"= arith\.shrui %\w+_\d+, %c2_ui32 : ui32")
+        self.assertRegex(text, r"= arith\.shli %\w+_\d+, %c1_ui32 : ui32")
+
+    def test_scalar_bitwise_rejects_float_operands(self) -> None:
+        @pto.vkernel(op="scalar_bitwise_float_reject_unique", dtypes=[(pto.f32,)])
+        def kernel(value: pto.f32):
+            _ = value & pto.f32(1.0)
+            return None
+
+        specialized = kernel.specialize()
+        with self.assertRaises(TypeError) as ctx:
+            specialized.mlir_text()
+        self.assertIn("mod/floordiv/bitwise/shift for integer", str(ctx.exception))
+
     def test_stable_mode_infers_vecscope_and_lowers_tile_vector_sugar(self) -> None:
         @pto.vkernel(op="tadd_stable", dtypes=[(pto.f32, pto.f32, pto.f32)])
         def kernel(dst: pto.Tile, src0: pto.Tile, src1: pto.Tile):

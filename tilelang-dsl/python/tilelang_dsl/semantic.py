@@ -3513,10 +3513,23 @@ class _SemanticAnalyzer:
         rhs: SemanticExpr,
         op: str,
     ) -> SemanticType:
-        if op in {"add", "sub", "mul", "mod", "floordiv"}:
+        if op in {"add", "sub", "mul", "mod", "floordiv", "bitand", "bitor", "bitxor", "lshift", "rshift"}:
             if isinstance(lhs.type, SemanticIndexType) and isinstance(rhs.type, SemanticIndexType):
-                return SemanticIndexType()
-            raise TypeError("binary expressions currently only support index-typed operands")
+                if op in {"add", "sub", "mul", "mod", "floordiv"}:
+                    return SemanticIndexType()
+            if isinstance(lhs.type, SemanticScalarType) and lhs.type == rhs.type:
+                dtype = lhs.type.dtype
+                if op in {"add", "sub", "mul"} and (is_integer_dtype(dtype) or is_float_dtype(dtype)):
+                    return SemanticScalarType(dtype=dtype)
+                if op in {"mod", "floordiv"} and is_integer_dtype(dtype):
+                    return SemanticScalarType(dtype=dtype)
+                if op in {"bitand", "bitor", "bitxor", "lshift", "rshift"} and is_integer_dtype(dtype):
+                    return SemanticScalarType(dtype=dtype)
+            raise TypeError(
+                "binary expressions currently require matching index operands, "
+                "or matching scalar operands (add/sub/mul for integer/float; "
+                "mod/floordiv/bitwise/shift for integer)"
+            )
         if op in {"eq", "ne"}:
             if isinstance(lhs.type, SemanticIndexType) and isinstance(rhs.type, SemanticIndexType):
                 return SemanticScalarType(dtype=i1)
@@ -5148,15 +5161,30 @@ class _SemanticAnalyzer:
             if lhs is None or rhs is None:
                 return None
             if expr.op == "add":
-                if isinstance(lhs, int) and isinstance(rhs, int):
+                if (
+                    isinstance(lhs, (int, float))
+                    and isinstance(rhs, (int, float))
+                    and not isinstance(lhs, bool)
+                    and not isinstance(rhs, bool)
+                ):
                     return lhs + rhs
                 return None
             if expr.op == "sub":
-                if isinstance(lhs, int) and isinstance(rhs, int):
+                if (
+                    isinstance(lhs, (int, float))
+                    and isinstance(rhs, (int, float))
+                    and not isinstance(lhs, bool)
+                    and not isinstance(rhs, bool)
+                ):
                     return lhs - rhs
                 return None
             if expr.op == "mul":
-                if isinstance(lhs, int) and isinstance(rhs, int):
+                if (
+                    isinstance(lhs, (int, float))
+                    and isinstance(rhs, (int, float))
+                    and not isinstance(lhs, bool)
+                    and not isinstance(rhs, bool)
+                ):
                     return lhs * rhs
                 return None
             if expr.op == "mod":
@@ -5170,6 +5198,36 @@ class _SemanticAnalyzer:
                     if rhs == 0:
                         return None
                     return lhs // rhs
+                return None
+            if expr.op == "bitand":
+                if isinstance(lhs, int) and isinstance(rhs, int):
+                    if isinstance(lhs, bool) or isinstance(rhs, bool):
+                        return None
+                    return lhs & rhs
+                return None
+            if expr.op == "bitor":
+                if isinstance(lhs, int) and isinstance(rhs, int):
+                    if isinstance(lhs, bool) or isinstance(rhs, bool):
+                        return None
+                    return lhs | rhs
+                return None
+            if expr.op == "bitxor":
+                if isinstance(lhs, int) and isinstance(rhs, int):
+                    if isinstance(lhs, bool) or isinstance(rhs, bool):
+                        return None
+                    return lhs ^ rhs
+                return None
+            if expr.op == "lshift":
+                if isinstance(lhs, int) and isinstance(rhs, int):
+                    if isinstance(lhs, bool) or isinstance(rhs, bool) or rhs < 0:
+                        return None
+                    return lhs << rhs
+                return None
+            if expr.op == "rshift":
+                if isinstance(lhs, int) and isinstance(rhs, int):
+                    if isinstance(lhs, bool) or isinstance(rhs, bool) or rhs < 0:
+                        return None
+                    return lhs >> rhs
                 return None
             if expr.op == "eq":
                 return lhs == rhs

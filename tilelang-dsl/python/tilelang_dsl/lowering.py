@@ -78,6 +78,7 @@ from .types import (
     get_lanes,
     integer_bitwidth,
     integer_signedness,
+    is_float_dtype,
     is_integer_dtype,
 )
 
@@ -3431,7 +3432,7 @@ class _AuthoringRenderer:
         raise NotImplementedError(f"unsupported constant type {ty!r}")
 
     def _render_binary_op(self, op: str, ty: SemanticType) -> str:
-        if isinstance(ty, (SemanticIndexType, SemanticScalarType)):
+        if isinstance(ty, SemanticIndexType):
             if op == "add":
                 return "arith.addi"
             if op == "sub":
@@ -3441,9 +3442,41 @@ class _AuthoringRenderer:
             if op == "mod":
                 if isinstance(ty, SemanticIndexType):
                     return "arith.remui"
-                return "arith.remsi"
             if op == "floordiv":
-                return "arith.floordivsi"
+                return "arith.divui"
+        if isinstance(ty, SemanticScalarType):
+            dtype = ty.dtype
+            if is_float_dtype(dtype):
+                if op == "add":
+                    return "arith.addf"
+                if op == "sub":
+                    return "arith.subf"
+                if op == "mul":
+                    return "arith.mulf"
+            if is_integer_dtype(dtype):
+                if op == "add":
+                    return "arith.addi"
+                if op == "sub":
+                    return "arith.subi"
+                if op == "mul":
+                    return "arith.muli"
+                if op == "mod":
+                    sign = integer_signedness(dtype)
+                    return "arith.remui" if sign == "unsigned" else "arith.remsi"
+                if op == "floordiv":
+                    sign = integer_signedness(dtype)
+                    return "arith.divui" if sign == "unsigned" else "arith.floordivsi"
+                if op == "bitand":
+                    return "arith.andi"
+                if op == "bitor":
+                    return "arith.ori"
+                if op == "bitxor":
+                    return "arith.xori"
+                if op == "lshift":
+                    return "arith.shli"
+                if op == "rshift":
+                    sign = integer_signedness(dtype)
+                    return "arith.shrui" if sign == "unsigned" else "arith.shrsi"
         raise NotImplementedError(f"unsupported binary op '{op}' for type {ty!r}")
 
     def _render_type(self, ty: SemanticType) -> str:

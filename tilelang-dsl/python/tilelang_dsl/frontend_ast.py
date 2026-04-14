@@ -622,6 +622,11 @@ _BINARY_OP_NAMES = {
     ast.Mult: "mul",
     ast.Mod: "mod",
     ast.FloorDiv: "floordiv",
+    ast.BitAnd: "bitand",
+    ast.BitOr: "bitor",
+    ast.BitXor: "bitxor",
+    ast.LShift: "lshift",
+    ast.RShift: "rshift",
 }
 _COMPARE_OP_NAMES = {
     ast.Eq: "eq",
