@@ -893,16 +893,20 @@ class _SemanticAnalyzer:
         env: dict[str, SemanticBinding],
         *,
         allow_outer_lookup: bool,
+        allow_inferred_vecscope: bool = True,
     ) -> tuple[tuple[SemanticStmt, ...], dict[str, SemanticBinding]]:
         current_env = dict(env)
         semantic_statements = []
         index = 0
         while index < len(statements):
-            if self._should_infer_vecscope(statements[index], allow_outer_lookup=allow_outer_lookup):
+            if self._should_infer_vecscope(
+                statements[index],
+                allow_inferred_vecscope=allow_inferred_vecscope,
+            ):
                 end = index + 1
                 while end < len(statements) and self._should_infer_vecscope(
                     statements[end],
-                    allow_outer_lookup=allow_outer_lookup,
+                    allow_inferred_vecscope=allow_inferred_vecscope,
                 ):
                     end += 1
                 run = statements[index:end]
@@ -982,13 +986,13 @@ class _SemanticAnalyzer:
         self,
         stmt: FrontendStmtNode,
         *,
-        allow_outer_lookup: bool,
+        allow_inferred_vecscope: bool,
     ) -> bool:
         if self._has_explicit_vecscope:
             return False
         if self._disable_inference_depth > 0:
             return False
-        if not allow_outer_lookup:
+        if not allow_inferred_vecscope:
             return False
         if isinstance(stmt, FrontendForStmt):
             return self._block_can_live_in_inferred_vecscope(stmt.body)
@@ -1365,6 +1369,7 @@ class _SemanticAnalyzer:
                 inline_proc_node.body,
                 helper_env,
                 allow_outer_lookup=False,
+                allow_inferred_vecscope=True,
             )
         finally:
             self._inline_proc_active_stack.pop()
@@ -2693,11 +2698,16 @@ class _SemanticAnalyzer:
             block_binding = self._make_binding(name, capture.type, "strict_vecscope_arg")
             scope_env[name] = block_binding
             block_arguments.append(block_binding)
-        body, _ = self._analyze_block(
-            stmt.body,
-            scope_env,
-            allow_outer_lookup=False,
-        )
+        self._disable_inference_depth += 1
+        try:
+            body, _ = self._analyze_block(
+                stmt.body,
+                scope_env,
+                allow_outer_lookup=False,
+                allow_inferred_vecscope=False,
+            )
+        finally:
+            self._disable_inference_depth -= 1
         return (
             SemanticStrictVecscopeStmt(
                 captures=captures,
