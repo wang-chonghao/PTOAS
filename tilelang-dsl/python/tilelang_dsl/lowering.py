@@ -3342,6 +3342,20 @@ class _AuthoringRenderer:
         desired_name: str | None,
         into: list[str] | None,
     ) -> _RenderedValue:
+        if isinstance(expr.base, SemanticTupleExpr):
+            if not isinstance(expr.index, SemanticLiteralExpr) or not isinstance(expr.index.value, int):
+                raise NotImplementedError("tuple indices must be integer literals in TileLang DSL v1 lowering")
+            if expr.index.value < 0 or expr.index.value >= len(expr.base.elements):
+                raise NotImplementedError(
+                    f"tuple subscript index {expr.index.value} is out of bounds for tuple length {len(expr.base.elements)}"
+                )
+            return self._lower_expr(
+                expr.base.elements[expr.index.value],
+                env,
+                indent=indent,
+                desired_name=desired_name,
+                into=into,
+            )
         if (
             into is not None
             and isinstance(expr.base, SemanticAttributeAccess)

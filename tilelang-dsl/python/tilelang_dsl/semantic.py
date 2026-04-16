@@ -3436,17 +3436,32 @@ class _SemanticAnalyzer:
         if isinstance(base.type, SemanticShapeType):
             if not isinstance(index.type, SemanticIndexType):
                 raise TypeError("shape subscript index must be an index value in TileLang DSL v1")
-            if (
-                isinstance(base, SemanticAttributeAccess)
-                and isinstance(base.base, SemanticBindingRef)
-                and isinstance(index, SemanticLiteralExpr)
-                and isinstance(index.value, int)
-            ):
-                if index.value < 0 or index.value >= base.type.rank:
-                    raise TypeError(
-                        f"shape subscript index {index.value} is out of bounds for rank {base.type.rank}"
-                    )
+            if not isinstance(index, SemanticLiteralExpr) or not isinstance(index.value, int):
+                raise TypeError(
+                    "shape/stride/valid_shape subscript index must be an integer literal in TileLang DSL v1"
+                )
+            if index.value < 0 or index.value >= base.type.rank:
+                raise TypeError(
+                    f"shape subscript index {index.value} is out of bounds for rank {base.type.rank}"
+                )
             return SemanticIndexType()
+        if isinstance(base.type, SemanticTupleType):
+            if not isinstance(index.type, SemanticIndexType):
+                raise TypeError("tuple subscript index must be an index value in TileLang DSL v1")
+            if not isinstance(base, SemanticTupleExpr):
+                raise TypeError(
+                    "tuple subscripting currently requires a shape-like tuple expression in TileLang DSL v1"
+                )
+            if not base.type.elements:
+                raise TypeError("cannot subscript an empty tuple in TileLang DSL v1")
+            if not isinstance(index, SemanticLiteralExpr) or not isinstance(index.value, int):
+                raise TypeError("tuple subscript index must be an integer literal in TileLang DSL v1")
+
+            if index.value < 0 or index.value >= len(base.type.elements):
+                raise TypeError(
+                    f"tuple subscript index {index.value} is out of bounds for tuple length {len(base.type.elements)}"
+                )
+            return base.type.elements[index.value]
         if isinstance(base.type, (SemanticTensorViewType, SemanticPartitionTensorViewType)):
             if not isinstance(index, SemanticTupleExpr):
                 raise TypeError("TensorView slicing expects a tuple of slices in TileLang DSL v1")

@@ -3411,6 +3411,45 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
             r"pto\.vsts %summed_\d+, %tmp_\d+\[%c0\], %mask_\d+ : !pto\.vreg<128xf16>, memref<\?x\?xf16, strided<\[\?, \?\], offset: \?>, #pto\.address_space<vec>>, !pto\.mask<b16>",
         )
 
+    def test_tile_valid_shape_subscript_profile_lowers_to_runtime_bounds_in_advanced_mode(self) -> None:
+        @pto.vkernel(op="tile_valid_shape_subscript_unique", dtypes=[(pto.f16,)], advanced=True)
+        def kernel(dst: pto.Tile):
+            valid_rows = dst.valid_shape[0]
+            valid_cols = dst.valid_shape[1]
+            area = valid_rows * valid_cols
+            if area == 0:
+                area = 1
+            return None
+
+        specialized = kernel.specialize(
+            dst=pto.TileSpecialization(
+                shape=(8, 128),
+                memory_space=pto.MemorySpace.UB,
+                valid_shape=("valid_rows", "valid_cols"),
+            ),
+        )
+
+        semantic_kernel = analyze_frontend_kernel(build_frontend_kernel_node(specialized))
+        self.assertEqual(
+            [(param.name, param.kind) for param in semantic_kernel.parameters],
+            [
+                ("dst", "tile"),
+                ("__valid_shape_dst_0", "tile_valid_shape"),
+                ("__valid_shape_dst_1", "tile_valid_shape"),
+            ],
+        )
+        valid_rows_assign = semantic_kernel.body[0]
+        valid_cols_assign = semantic_kernel.body[1]
+        self.assertIsInstance(valid_rows_assign, SemanticAssignStmt)
+        self.assertIsInstance(valid_cols_assign, SemanticAssignStmt)
+        self.assertIsInstance(valid_rows_assign.targets[0].type, SemanticIndexType)
+        self.assertIsInstance(valid_cols_assign.targets[0].type, SemanticIndexType)
+
+        text = specialized.mlir_text()
+        self.assertIn("valid_shape=(?, ?)", text)
+        self.assertRegex(text, r"%valid_rows_\d+ = pto\.tile_valid_rows %arg0")
+        self.assertRegex(text, r"%valid_cols_\d+ = pto\.tile_valid_cols %arg0")
+
     def test_tile_partial_dynamic_valid_shape_profile_tracks_dynamic_axes_only(self) -> None:
         elem = pto.TypeVar("Elem")
 
@@ -4039,6 +4078,59 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
         self.assertEqual(text.count("pto.get_tensor_view_stride"), 5)
         self.assertRegex(text, r"%ub_rows_\d+ = arith\.constant 8 : index")
         self.assertRegex(text, r"%ub_cols_\d+ = arith\.constant 64 : index")
+
+    def test_shape_subscript_rejects_non_literal_index_in_semantic(self) -> None:
+        @pto.vkernel(op="shape_dynamic_subscript_reject_unique", dtypes=[(pto.f32,)])
+        def kernel(src: pto.TensorView):
+            axis = src.shape[0]
+            value = src.shape[axis]
+            return None
+
+        with self.assertRaises(TypeError) as ctx:
+            analyze_frontend_kernel(build_frontend_kernel_node(kernel))
+        self.assertIn(
+            "shape/stride/valid_shape subscript index must be an integer literal in TileLang DSL v1",
+            str(ctx.exception),
+        )
+
+    def test_valid_shape_subscript_rejects_non_literal_index_in_semantic(self) -> None:
+        @pto.vkernel(op="valid_shape_dynamic_subscript_reject_unique", dtypes=[(pto.f16,)], advanced=True)
+        def kernel(dst: pto.Tile):
+            axis = 0
+            value = dst.valid_shape[axis]
+            return None
+
+        specialized = kernel.specialize(
+            dst=pto.TileSpecialization(
+                shape=(8, 128),
+                memory_space=pto.MemorySpace.UB,
+                valid_shape=("valid_rows", "valid_cols"),
+            )
+        )
+
+        with self.assertRaises(TypeError) as ctx:
+            analyze_frontend_kernel(build_frontend_kernel_node(specialized))
+        self.assertIn(
+            "tuple subscript index must be an integer literal in TileLang DSL v1",
+            str(ctx.exception),
+        )
+
+    def test_tuple_call_result_subscript_rejects_in_semantic(self) -> None:
+        @pto.vkernel(op="tuple_call_result_subscript_reject_unique", dtypes=[(pto.f16,)], advanced=True)
+        def kernel(dst: pto.Tile):
+            mask = pto.make_mask(dst.element_type, pto.i32(64))[0]
+            return None
+
+        specialized = kernel.specialize(
+            dst=pto.TileSpecialization(shape=(8, 128), memory_space=pto.MemorySpace.UB),
+        )
+
+        with self.assertRaises(TypeError) as ctx:
+            analyze_frontend_kernel(build_frontend_kernel_node(specialized))
+        self.assertIn(
+            "tuple subscripting currently requires a shape-like tuple expression in TileLang DSL v1",
+            str(ctx.exception),
+        )
 
     def test_advanced_mode_lowers_compare_predicate_carry_and_rearrangement_families(self) -> None:
         @pto.vkernel(op="advanced_family", dtypes=[(pto.i32, pto.i32, pto.i32, pto.i32)], advanced=True)
