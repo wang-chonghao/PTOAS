@@ -232,6 +232,51 @@ def PTO_CopyGmToUbufOp : PTO_Op<"copy_gm_to_ubuf", [
   }];
 }
 
+def PTO_DmaLoadOp : PTO_Op<"dma_load", [
+    AttrSizedOperandSegments,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+  ]> {
+  let arguments = (ins
+    PTO_BufferType:$source,
+    PTO_BufferType:$destination,
+    I64:$sid,
+    I64:$l2_cache_ctl,
+    I64:$len_burst,
+    I64:$n_burst,
+    I64:$nburst_src_stride,
+    I64:$nburst_dst_stride,
+    Optional<I64>:$loop1_count,
+    Optional<I64>:$loop1_src_stride,
+    Optional<I64>:$loop1_dst_stride,
+    Optional<I64>:$loop2_count,
+    Optional<I64>:$loop2_src_stride,
+    Optional<I64>:$loop2_dst_stride,
+    Optional<AnyTypeOf<[AnyInteger, AnyFloat], "integer/float scalar">>:$pad_value,
+    Optional<I64>:$left_padding_count,
+    Optional<I64>:$right_padding_count
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Value":$source,
+      "::mlir::Value":$destination,
+      "::mlir::Value":$sid,
+      "::mlir::Value":$l2CacheCtl,
+      "::mlir::Value":$lenBurst,
+      "::mlir::pto::DmaLoopConfig":$nburst,
+      "::std::optional<::mlir::pto::DmaLoopConfig>":$loop1,
+      "::std::optional<::mlir::pto::DmaLoopConfig>":$loop2,
+      "::std::optional<::mlir::pto::DmaPadConfig>":$pad
+    )>
+  ];
+
+}
+
 def PTO_CopyUbufToUbufOp : PTO_Op<"copy_ubuf_to_ubuf"> {
   let arguments = (ins
     PTO_BufferType:$source,
@@ -1176,6 +1221,47 @@ def PTO_CopyUbufToGmOp : PTO_Op<"copy_ubuf_to_gm", [
     type($len_burst) `,` type($reserved) `,`
     type($burst_dst_stride) `,` type($burst_src_stride)
   }];
+}
+
+def PTO_DmaStoreOp : PTO_Op<"dma_store", [
+    AttrSizedOperandSegments,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+  ]> {
+  let arguments = (ins
+    PTO_BufferType:$source,
+    PTO_BufferType:$destination,
+    I64:$sid,
+    I64:$reserved,
+    I64:$len_burst,
+    I64:$n_burst,
+    I64:$nburst_src_stride,
+    I64:$nburst_dst_stride,
+    Optional<I64>:$loop1_count,
+    Optional<I64>:$loop1_src_stride,
+    Optional<I64>:$loop1_dst_stride,
+    Optional<I64>:$loop2_count,
+    Optional<I64>:$loop2_src_stride,
+    Optional<I64>:$loop2_dst_stride
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Value":$source,
+      "::mlir::Value":$destination,
+      "::mlir::Value":$sid,
+      "::mlir::Value":$reserved,
+      "::mlir::Value":$lenBurst,
+      "::mlir::pto::DmaLoopConfig":$nburst,
+      "::std::optional<::mlir::pto::DmaLoopConfig>":$loop1,
+      "::std::optional<::mlir::pto::DmaLoopConfig>":$loop2
+    )>
+  ];
+
 }
 
 // NOTE: Unvalidated new x2 / pair / align-store-family abstractions. Added to

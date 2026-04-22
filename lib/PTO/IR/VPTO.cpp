@@ -947,6 +947,137 @@ static int64_t getPtrElementByteSize(Type type) {
   return 0;
 }
 
+static bool hasAll(Value first, Value second, Value third) {
+  return static_cast<bool>(first) && static_cast<bool>(second) &&
+         static_cast<bool>(third);
+}
+
+static bool hasAny(Value first, Value second, Value third) {
+  return static_cast<bool>(first) || static_cast<bool>(second) ||
+         static_cast<bool>(third);
+}
+
+static ParseResult parseRequiredOperandWithComma(
+    OpAsmParser &parser, OpAsmParser::UnresolvedOperand &operand) {
+  if (parser.parseOperand(operand))
+    return failure();
+  return parser.parseComma();
+}
+
+static ParseResult parseDmaTripleGroup(
+    OpAsmParser &parser, StringRef keyword,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands) {
+  if (parser.parseKeyword(keyword) || parser.parseLParen())
+    return failure();
+  for (int i = 0; i < 3; ++i) {
+    OpAsmParser::UnresolvedOperand operand;
+    if (parser.parseOperand(operand))
+      return failure();
+    operands.push_back(operand);
+    if (i != 2 && parser.parseComma())
+      return failure();
+  }
+  return parser.parseRParen();
+}
+
+static ParseResult parseOptionalDmaTripleGroup(
+    OpAsmParser &parser, StringRef keyword,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands) {
+  if (failed(parser.parseOptionalKeyword(keyword)))
+    return success();
+  if (parser.parseLParen())
+    return failure();
+  for (int i = 0; i < 3; ++i) {
+    OpAsmParser::UnresolvedOperand operand;
+    if (parser.parseOperand(operand))
+      return failure();
+    operands.push_back(operand);
+    if (i != 2 && parser.parseComma())
+      return failure();
+  }
+  return parser.parseRParen();
+}
+
+static ParseResult parseOptionalDmaPadGroup(
+    OpAsmParser &parser,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands) {
+  if (failed(parser.parseOptionalKeyword("pad")))
+    return success();
+  if (parser.parseLParen())
+    return failure();
+  OpAsmParser::UnresolvedOperand value;
+  if (parser.parseOperand(value))
+    return failure();
+  operands.push_back(value);
+  if (succeeded(parser.parseOptionalComma())) {
+    OpAsmParser::UnresolvedOperand left;
+    OpAsmParser::UnresolvedOperand right;
+    if (parser.parseOperand(left) || parser.parseComma() ||
+        parser.parseOperand(right))
+      return failure();
+    operands.push_back(left);
+    operands.push_back(right);
+  }
+  return parser.parseRParen();
+}
+
+static ParseResult parseDmaTripleTypes(OpAsmParser &parser,
+                                       SmallVectorImpl<Type> &types) {
+  for (int i = 0; i < 3; ++i) {
+    Type type;
+    if (parser.parseType(type))
+      return failure();
+    types.push_back(type);
+    if (i != 2 && parser.parseComma())
+      return failure();
+  }
+  return success();
+}
+
+static ParseResult parseDmaPadTypes(OpAsmParser &parser,
+                                    SmallVectorImpl<Type> &types) {
+  Type valueType;
+  if (parser.parseType(valueType))
+    return failure();
+  types.push_back(valueType);
+  if (succeeded(parser.parseOptionalComma())) {
+    Type leftType;
+    Type rightType;
+    if (parser.parseType(leftType) || parser.parseComma() ||
+        parser.parseType(rightType))
+      return failure();
+    types.push_back(leftType);
+    types.push_back(rightType);
+  }
+  return success();
+}
+
+static void printDmaTripleGroup(OpAsmPrinter &printer, StringRef keyword,
+                                Value first, Value second, Value third) {
+  printer << " " << keyword << "(" << first << ", " << second << ", " << third
+          << ")";
+}
+
+static void printDmaTripleTypes(OpAsmPrinter &printer, StringRef keyword,
+                                Type first, Type second, Type third) {
+  printer << ", " << keyword << " " << first << ", " << second << ", " << third;
+}
+
+static void printDmaPadGroup(OpAsmPrinter &printer, Value value, Value left,
+                             Value right) {
+  printer << " pad(" << value;
+  if (left || right)
+    printer << ", " << left << ", " << right;
+  printer << ")";
+}
+
+static void printDmaPadTypes(OpAsmPrinter &printer, Type valueType,
+                             Type leftType, Type rightType) {
+  printer << ", pad " << valueType;
+  if (leftType || rightType)
+    printer << ", " << leftType << ", " << rightType;
+}
+
 template <typename CopyOp>
 static LogicalResult verifyCopyGmToUbufOp(CopyOp op, bool expectSourceGM) {
   auto sourceType = dyn_cast<pto::PtrType>(op.getSource().getType());
@@ -979,6 +1110,38 @@ static LogicalResult verifyCopyGmToUbufOp(CopyOp op, bool expectSourceGM) {
   if (sourceElemBytes != destinationElemBytes)
     return op.emitOpError("requires source and destination element byte widths to match");
 
+  return success();
+}
+
+template <typename DmaOp>
+static LogicalResult verifyOptionalDmaLoopGroup(DmaOp op, Value count,
+                                                Value srcStride,
+                                                Value dstStride,
+                                                StringRef name) {
+  if (hasAny(count, srcStride, dstStride) && !hasAll(count, srcStride, dstStride))
+    return op.emitOpError() << "requires " << name
+                            << " group to provide count, src stride, and dst stride together";
+  return success();
+}
+
+static LogicalResult verifyDmaLoadStoreLoopGroups(Operation *op, Value loop1Count,
+                                                  Value loop1SrcStride,
+                                                  Value loop1DstStride,
+                                                  Value loop2Count,
+                                                  Value loop2SrcStride,
+                                                  Value loop2DstStride) {
+  auto emitError = [&]() { return op->emitOpError(); };
+  if (hasAny(loop1Count, loop1SrcStride, loop1DstStride) &&
+      !hasAll(loop1Count, loop1SrcStride, loop1DstStride))
+    return emitError()
+           << "requires loop1 group to provide count, src stride, and dst stride together";
+  if (hasAny(loop2Count, loop2SrcStride, loop2DstStride) &&
+      !hasAll(loop2Count, loop2SrcStride, loop2DstStride))
+    return emitError()
+           << "requires loop2 group to provide count, src stride, and dst stride together";
+  if (hasAll(loop2Count, loop2SrcStride, loop2DstStride) &&
+      !hasAll(loop1Count, loop1SrcStride, loop1DstStride))
+    return emitError() << "requires loop1 when loop2 is present";
   return success();
 }
 
@@ -1137,6 +1300,185 @@ void CopyGmToUbufOp::getEffects(
 
 LogicalResult CopyGmToUbufOp::verify() {
   return verifyCopyGmToUbufOp(*this, true);
+}
+
+void DmaLoadOp::build(OpBuilder &builder, OperationState &state, Value source,
+                      Value destination, Value sid, Value l2CacheCtl,
+                      Value lenBurst, pto::DmaLoopConfig nburst,
+                      std::optional<pto::DmaLoopConfig> loop1,
+                      std::optional<pto::DmaLoopConfig> loop2,
+                      std::optional<pto::DmaPadConfig> pad) {
+  state.addOperands({source, destination, sid, l2CacheCtl, lenBurst,
+                     nburst.count, nburst.srcStride, nburst.dstStride});
+  if (loop1)
+    state.addOperands({loop1->count, loop1->srcStride, loop1->dstStride});
+  if (loop2)
+    state.addOperands({loop2->count, loop2->srcStride, loop2->dstStride});
+  bool hasPadCounts = pad && pad->leftCount && pad->rightCount;
+  assert((!pad || static_cast<bool>(pad->leftCount) ==
+                       static_cast<bool>(pad->rightCount)) &&
+         "dma_load pad config must provide both left and right counts, or omit both");
+  if (pad) {
+    state.addOperands(pad->value);
+    if (hasPadCounts)
+      state.addOperands({pad->leftCount, pad->rightCount});
+  }
+
+  state.addAttribute(
+      getOperandSegmentSizeAttr(),
+      builder.getDenseI32ArrayAttr(
+          {1, 1, 1, 1, 1, 1, 1, 1,
+           loop1 ? 1 : 0, loop1 ? 1 : 0, loop1 ? 1 : 0,
+           loop2 ? 1 : 0, loop2 ? 1 : 0, loop2 ? 1 : 0,
+           pad ? 1 : 0, hasPadCounts ? 1 : 0, hasPadCounts ? 1 : 0}));
+}
+
+ParseResult DmaLoadOp::parse(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand source, destination, sid, l2CacheCtl, lenBurst;
+  SmallVector<OpAsmParser::UnresolvedOperand> nburstOperands;
+  SmallVector<OpAsmParser::UnresolvedOperand> loop1Operands;
+  SmallVector<OpAsmParser::UnresolvedOperand> loop2Operands;
+  SmallVector<OpAsmParser::UnresolvedOperand> padOperands;
+  if (parseRequiredOperandWithComma(parser, source) ||
+      parseRequiredOperandWithComma(parser, destination) ||
+      parseRequiredOperandWithComma(parser, sid) ||
+      parseRequiredOperandWithComma(parser, l2CacheCtl) ||
+      parser.parseOperand(lenBurst) ||
+      parseDmaTripleGroup(parser, "nburst", nburstOperands) ||
+      parseOptionalDmaTripleGroup(parser, "loop1", loop1Operands) ||
+      parseOptionalDmaTripleGroup(parser, "loop2", loop2Operands) ||
+      parseOptionalDmaPadGroup(parser, padOperands))
+    return failure();
+
+  if (parser.parseOptionalAttrDict(result.attributes) || parser.parseColon())
+    return failure();
+
+  Type sourceType, destinationType, sidType, l2CacheCtlType, lenBurstType;
+  SmallVector<Type> nburstTypes, loop1Types, loop2Types, padTypes;
+  if (parser.parseType(sourceType) || parser.parseComma() ||
+      parser.parseType(destinationType) || parser.parseComma() ||
+      parser.parseType(sidType) || parser.parseComma() ||
+      parser.parseType(l2CacheCtlType) || parser.parseComma() ||
+      parser.parseType(lenBurstType) || parser.parseComma() ||
+      parseDmaTripleTypes(parser, nburstTypes))
+    return failure();
+  while (succeeded(parser.parseOptionalComma())) {
+    StringRef keyword;
+    if (parser.parseKeyword(&keyword))
+      return failure();
+    if (keyword == "loop1") {
+      if (!loop1Types.empty() || parseDmaTripleTypes(parser, loop1Types))
+        return failure();
+      continue;
+    }
+    if (keyword == "loop2") {
+      if (!loop2Types.empty() || parseDmaTripleTypes(parser, loop2Types))
+        return failure();
+      continue;
+    }
+    if (keyword == "pad") {
+      if (!padTypes.empty() || parseDmaPadTypes(parser, padTypes))
+        return failure();
+      continue;
+    }
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected one of 'loop1', 'loop2', or 'pad'");
+  }
+
+  auto &segments =
+      result.getOrAddProperties<DmaLoadOp::Properties>().operandSegmentSizes;
+  llvm::copy(ArrayRef<int32_t>{1, 1, 1, 1, 1, 1, 1, 1,
+                               static_cast<int32_t>(loop1Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop1Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop1Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop2Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop2Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop2Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(padOperands.size() ? 1 : 0),
+                               static_cast<int32_t>(padOperands.size() == 3 ? 1 : 0),
+                               static_cast<int32_t>(padOperands.size() == 3 ? 1 : 0)},
+             segments.begin());
+
+  if (parser.resolveOperand(source, sourceType, result.operands) ||
+      parser.resolveOperand(destination, destinationType, result.operands) ||
+      parser.resolveOperand(sid, sidType, result.operands) ||
+      parser.resolveOperand(l2CacheCtl, l2CacheCtlType, result.operands) ||
+      parser.resolveOperand(lenBurst, lenBurstType, result.operands) ||
+      parser.resolveOperands(nburstOperands, nburstTypes, parser.getCurrentLocation(),
+                             result.operands) ||
+      parser.resolveOperands(loop1Operands, loop1Types, parser.getCurrentLocation(),
+                             result.operands) ||
+      parser.resolveOperands(loop2Operands, loop2Types, parser.getCurrentLocation(),
+                             result.operands) ||
+      parser.resolveOperands(padOperands, padTypes, parser.getCurrentLocation(),
+                             result.operands))
+    return failure();
+  return success();
+}
+
+void DmaLoadOp::print(OpAsmPrinter &printer) {
+  printer << " " << getSource() << ", " << getDestination() << ", " << getSid()
+          << ", " << getL2CacheCtl() << ", " << getLenBurst();
+  printDmaTripleGroup(printer, "nburst", getNBurst(), getNburstSrcStride(),
+                      getNburstDstStride());
+  if (hasAll(getLoop1Count(), getLoop1SrcStride(), getLoop1DstStride()))
+    printDmaTripleGroup(printer, "loop1", getLoop1Count(), getLoop1SrcStride(),
+                        getLoop1DstStride());
+  if (hasAll(getLoop2Count(), getLoop2SrcStride(), getLoop2DstStride()))
+    printDmaTripleGroup(printer, "loop2", getLoop2Count(), getLoop2SrcStride(),
+                        getLoop2DstStride());
+  if (getPadValue())
+    printDmaPadGroup(printer, getPadValue(), getLeftPaddingCount(),
+                     getRightPaddingCount());
+  printer.printOptionalAttrDict((*this)->getAttrs());
+  printer << " : " << getSource().getType() << ", " << getDestination().getType()
+          << ", " << getSid().getType() << ", " << getL2CacheCtl().getType()
+          << ", " << getLenBurst().getType() << ", " << getNBurst().getType()
+          << ", " << getNburstSrcStride().getType() << ", "
+          << getNburstDstStride().getType();
+  if (hasAll(getLoop1Count(), getLoop1SrcStride(), getLoop1DstStride()))
+    printDmaTripleTypes(printer, "loop1", getLoop1Count().getType(),
+                        getLoop1SrcStride().getType(),
+                        getLoop1DstStride().getType());
+  if (hasAll(getLoop2Count(), getLoop2SrcStride(), getLoop2DstStride()))
+    printDmaTripleTypes(printer, "loop2", getLoop2Count().getType(),
+                        getLoop2SrcStride().getType(),
+                        getLoop2DstStride().getType());
+  if (getPadValue())
+    printDmaPadTypes(printer, getPadValue().getType(),
+                     getLeftPaddingCount() ? getLeftPaddingCount().getType() : Type{},
+                     getRightPaddingCount() ? getRightPaddingCount().getType() : Type{});
+}
+
+void DmaLoadOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDestinationMutable());
+}
+
+LogicalResult DmaLoadOp::verify() {
+  if (failed(verifyCopyGmToUbufOp(*this, true)))
+    return failure();
+  if (failed(verifyDmaLoadStoreLoopGroups(
+          getOperation(), getLoop1Count(), getLoop1SrcStride(),
+          getLoop1DstStride(), getLoop2Count(), getLoop2SrcStride(),
+          getLoop2DstStride())))
+    return failure();
+  if (!getPadValue() && (getLeftPaddingCount() || getRightPaddingCount()))
+    return emitOpError() << "requires pad group to provide a pad value";
+  if (getPadValue() && static_cast<bool>(getLeftPaddingCount()) !=
+                         static_cast<bool>(getRightPaddingCount()))
+    return emitOpError()
+           << "requires pad group to provide both left and right counts, or omit both";
+  if (Value padValue = getPadValue()) {
+    Type valueType = padValue.getType();
+    if (!isSupportedMovPadScalarType(valueType))
+      return emitOpError()
+             << "expects pad value to be i8/i16/i32 or f16/bf16/f32 scalar, but got "
+             << valueType;
+  }
+  return success();
 }
 
 LogicalResult SetMovPadValOp::verify() {
@@ -2967,4 +3309,138 @@ void CopyUbufToGmOp::getEffects(
 
 LogicalResult CopyUbufToGmOp::verify() {
   return verifyCopyUbufToGmOp(*this, false);
+}
+
+void DmaStoreOp::build(OpBuilder &builder, OperationState &state, Value source,
+                       Value destination, Value sid, Value reserved,
+                       Value lenBurst, pto::DmaLoopConfig nburst,
+                       std::optional<pto::DmaLoopConfig> loop1,
+                       std::optional<pto::DmaLoopConfig> loop2) {
+  state.addOperands({source, destination, sid, reserved, lenBurst, nburst.count,
+                     nburst.srcStride, nburst.dstStride});
+  if (loop1)
+    state.addOperands({loop1->count, loop1->srcStride, loop1->dstStride});
+  if (loop2)
+    state.addOperands({loop2->count, loop2->srcStride, loop2->dstStride});
+
+  state.addAttribute(
+      getOperandSegmentSizeAttr(),
+      builder.getDenseI32ArrayAttr(
+          {1, 1, 1, 1, 1, 1, 1, 1,
+           loop1 ? 1 : 0, loop1 ? 1 : 0, loop1 ? 1 : 0,
+           loop2 ? 1 : 0, loop2 ? 1 : 0, loop2 ? 1 : 0}));
+}
+
+ParseResult DmaStoreOp::parse(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand source, destination, sid, reserved, lenBurst;
+  SmallVector<OpAsmParser::UnresolvedOperand> nburstOperands;
+  SmallVector<OpAsmParser::UnresolvedOperand> loop1Operands;
+  SmallVector<OpAsmParser::UnresolvedOperand> loop2Operands;
+  if (parseRequiredOperandWithComma(parser, source) ||
+      parseRequiredOperandWithComma(parser, destination) ||
+      parseRequiredOperandWithComma(parser, sid) ||
+      parseRequiredOperandWithComma(parser, reserved) ||
+      parser.parseOperand(lenBurst) ||
+      parseDmaTripleGroup(parser, "nburst", nburstOperands) ||
+      parseOptionalDmaTripleGroup(parser, "loop1", loop1Operands) ||
+      parseOptionalDmaTripleGroup(parser, "loop2", loop2Operands))
+    return failure();
+
+  if (parser.parseOptionalAttrDict(result.attributes) || parser.parseColon())
+    return failure();
+
+  Type sourceType, destinationType, sidType, reservedType, lenBurstType;
+  SmallVector<Type> nburstTypes, loop1Types, loop2Types;
+  if (parser.parseType(sourceType) || parser.parseComma() ||
+      parser.parseType(destinationType) || parser.parseComma() ||
+      parser.parseType(sidType) || parser.parseComma() ||
+      parser.parseType(reservedType) || parser.parseComma() ||
+      parser.parseType(lenBurstType) || parser.parseComma() ||
+      parseDmaTripleTypes(parser, nburstTypes))
+    return failure();
+  while (succeeded(parser.parseOptionalComma())) {
+    StringRef keyword;
+    if (parser.parseKeyword(&keyword))
+      return failure();
+    if (keyword == "loop1") {
+      if (!loop1Types.empty() || parseDmaTripleTypes(parser, loop1Types))
+        return failure();
+      continue;
+    }
+    if (keyword == "loop2") {
+      if (!loop2Types.empty() || parseDmaTripleTypes(parser, loop2Types))
+        return failure();
+      continue;
+    }
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected one of 'loop1' or 'loop2'");
+  }
+
+  auto &segments =
+      result.getOrAddProperties<DmaStoreOp::Properties>().operandSegmentSizes;
+  llvm::copy(ArrayRef<int32_t>{1, 1, 1, 1, 1, 1, 1, 1,
+                               static_cast<int32_t>(loop1Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop1Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop1Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop2Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop2Operands.size() ? 1 : 0),
+                               static_cast<int32_t>(loop2Operands.size() ? 1 : 0)},
+             segments.begin());
+
+  if (parser.resolveOperand(source, sourceType, result.operands) ||
+      parser.resolveOperand(destination, destinationType, result.operands) ||
+      parser.resolveOperand(sid, sidType, result.operands) ||
+      parser.resolveOperand(reserved, reservedType, result.operands) ||
+      parser.resolveOperand(lenBurst, lenBurstType, result.operands) ||
+      parser.resolveOperands(nburstOperands, nburstTypes, parser.getCurrentLocation(),
+                             result.operands) ||
+      parser.resolveOperands(loop1Operands, loop1Types, parser.getCurrentLocation(),
+                             result.operands) ||
+      parser.resolveOperands(loop2Operands, loop2Types, parser.getCurrentLocation(),
+                             result.operands))
+    return failure();
+  return success();
+}
+
+void DmaStoreOp::print(OpAsmPrinter &printer) {
+  printer << " " << getSource() << ", " << getDestination() << ", " << getSid()
+          << ", " << getReserved() << ", " << getLenBurst();
+  printDmaTripleGroup(printer, "nburst", getNBurst(), getNburstSrcStride(),
+                      getNburstDstStride());
+  if (hasAll(getLoop1Count(), getLoop1SrcStride(), getLoop1DstStride()))
+    printDmaTripleGroup(printer, "loop1", getLoop1Count(), getLoop1SrcStride(),
+                        getLoop1DstStride());
+  if (hasAll(getLoop2Count(), getLoop2SrcStride(), getLoop2DstStride()))
+    printDmaTripleGroup(printer, "loop2", getLoop2Count(), getLoop2SrcStride(),
+                        getLoop2DstStride());
+  printer.printOptionalAttrDict((*this)->getAttrs());
+  printer << " : " << getSource().getType() << ", " << getDestination().getType()
+          << ", " << getSid().getType() << ", " << getReserved().getType()
+          << ", " << getLenBurst().getType() << ", " << getNBurst().getType()
+          << ", " << getNburstSrcStride().getType() << ", "
+          << getNburstDstStride().getType();
+  if (hasAll(getLoop1Count(), getLoop1SrcStride(), getLoop1DstStride()))
+    printDmaTripleTypes(printer, "loop1", getLoop1Count().getType(),
+                        getLoop1SrcStride().getType(),
+                        getLoop1DstStride().getType());
+  if (hasAll(getLoop2Count(), getLoop2SrcStride(), getLoop2DstStride()))
+    printDmaTripleTypes(printer, "loop2", getLoop2Count().getType(),
+                        getLoop2SrcStride().getType(),
+                        getLoop2DstStride().getType());
+}
+
+void DmaStoreOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDestinationMutable());
+}
+
+LogicalResult DmaStoreOp::verify() {
+  if (failed(verifyCopyUbufToGmOp(*this, false)))
+    return failure();
+  return verifyDmaLoadStoreLoopGroups(
+      getOperation(), getLoop1Count(), getLoop1SrcStride(),
+      getLoop1DstStride(), getLoop2Count(), getLoop2SrcStride(),
+      getLoop2DstStride());
 }

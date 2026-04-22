@@ -66,6 +66,24 @@
 // PTO Dialect Operations
 //===----------------------------------------------------------------------===//
 
+namespace mlir {
+namespace pto {
+
+struct DmaLoopConfig {
+  Value count;
+  Value srcStride;
+  Value dstStride;
+};
+
+struct DmaPadConfig {
+  Value value;
+  Value leftCount;
+  Value rightCount;
+};
+
+} // namespace pto
+} // namespace mlir
+
 #define GET_OP_CLASSES
 #include "PTO/IR/PTOOps.h.inc"
 
