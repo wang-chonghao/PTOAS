@@ -7,9 +7,9 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-# case: micro-op/dsa-sfu/vexpdiff-boundary
+# case: micro-op/dsa-sfu/vexpdif-boundary
 # family: dsa-sfu
-# target_ops: pto.vexpdiff
+# target_ops: pto.vexpdif
 # scenarios: core-f32, fused-expdiff, exceptional-values, floating-overflow-underflow
 # NOTE: bulk-generated coverage skeleton.
 # coding=utf-8

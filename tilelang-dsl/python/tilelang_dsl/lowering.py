@@ -3038,7 +3038,6 @@ class _AuthoringRenderer:
             "vzunpack",
             "vusqz",
             "vsqz",
-            "vexpdiff",
             "vcgadd",
             "vcgmax",
             "vcgmin",
@@ -3051,6 +3050,17 @@ class _AuthoringRenderer:
                 self._indent(indent)
                 + f"{result_name} = pto.{expr.name} {value.name}, {mask.name} : "
                 + f"{self._render_type(value.type)}, {self._render_type(mask.type)} -> {self._render_type(expr.type)}"
+            )
+            return _RenderedValue(name=result_name, type=expr.type)
+
+        if expr.name == "vexpdif":
+            lhs = self._lower_expr(expr.args[0], env, indent=indent, into=into)
+            rhs = self._lower_expr(expr.args[1], env, indent=indent, into=into)
+            part = self._render_string_literal(expr.args[2])
+            into.append(
+                self._indent(indent)
+                + f"{result_name} = pto.vexpdif {lhs.name}, {rhs.name}, {part} : "
+                + f"{self._render_type(lhs.type)}, {self._render_type(rhs.type)} -> {self._render_type(expr.type)}"
             )
             return _RenderedValue(name=result_name, type=expr.type)
 

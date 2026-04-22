@@ -7,9 +7,9 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // -----------------------------------------------------------------------------
-// case: micro-op/dsa-sfu/vexpdiff-f16-part
+// case: micro-op/dsa-sfu/vexpdif-f16-part
 // family: dsa-sfu
-// target_ops: pto.vexpdiff
+// target_ops: pto.vexpdif
 // scenarios: core-f16, fused-expdiff, part-even-odd
 // -----------------------------------------------------------------------------
 
@@ -21,7 +21,7 @@
 #define __gm__
 #endif
 
-extern "C" __global__ [aicore] void vexpdiff_f16_part_kernel_2d(__gm__ half *v1,
+extern "C" __global__ [aicore] void vexpdif_f16_part_kernel_2d(__gm__ half *v1,
                                                               __gm__ half *v2,
                                                               __gm__ float *v3) {
   (void)v1;

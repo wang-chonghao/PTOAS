@@ -7,9 +7,9 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // -----------------------------------------------------------------------------
-// case: micro-op/dsa-sfu/vexpdiff-boundary
+// case: micro-op/dsa-sfu/vexpdif-boundary
 // family: dsa-sfu
-// target_ops: pto.vexpdiff
+// target_ops: pto.vexpdif
 // scenarios: core-f32, fused-expdiff, exceptional-values, floating-overflow-underflow
 // NOTE: bulk-generated coverage skeleton. Parser/verifier/lowering failure is
 // still a valid test conclusion in the current coverage-first phase.
@@ -43,12 +43,12 @@ struct MrgSortExecutedNumList {
 #include "acl/acl.h"
 #endif
 
-extern "C" __global__ [aicore] void vexpdiff_boundary_kernel_2d(__gm__ float *v1,
+extern "C" __global__ [aicore] void vexpdif_boundary_kernel_2d(__gm__ float *v1,
                                                               __gm__ float *v2,
                                                               __gm__ float *v3);
 
 void LaunchVexpdiff_boundary_kernel_2d(float *v1, float *v2, float *v3, void *stream) {
-  vexpdiff_boundary_kernel_2d<<<1, nullptr, stream>>>((__gm__ float *)v1,
+  vexpdif_boundary_kernel_2d<<<1, nullptr, stream>>>((__gm__ float *)v1,
                                                       (__gm__ float *)v2,
                                                       (__gm__ float *)v3);
 }

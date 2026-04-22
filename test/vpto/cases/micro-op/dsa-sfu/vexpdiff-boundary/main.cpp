@@ -7,9 +7,9 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // -----------------------------------------------------------------------------
-// case: micro-op/dsa-sfu/vexpdiff-boundary
+// case: micro-op/dsa-sfu/vexpdif-boundary
 // family: dsa-sfu
-// target_ops: pto.vexpdiff
+// target_ops: pto.vexpdif
 // scenarios: core-f32, fused-expdiff, exceptional-values, floating-overflow-underflow
 // NOTE: bulk-generated coverage skeleton. Parser/verifier/lowering failure is
 // still a valid test conclusion in the current coverage-first phase.

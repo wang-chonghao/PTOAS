@@ -2941,7 +2941,7 @@ static LogicalResult verifyFloatBinaryVecNoMaskOp(BinaryVecNoMaskOp op) {
 }
 
 LogicalResult VpreluOp::verify() { return verifyFloatBinaryVecNoMaskOp(*this); }
-LogicalResult VexpdiffOp::verify() {
+LogicalResult VexpdifOp::verify() {
   if (failed(verifyVRegTypeLike(*this, getInput().getType(), "input type")) ||
       failed(verifyVRegTypeLike(*this, getMax().getType(), "max type")) ||
       failed(verifyVRegTypeLike(*this, getResult().getType(), "result type")))

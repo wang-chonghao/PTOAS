@@ -343,23 +343,27 @@ neg_vec = pto.vneg(vec_f32, mask32)
 **Constraints**:
 - Operates on integer vector types only
 
-#### `pto.vexpdiff(vec: VRegType, mask: MaskType) -> VRegType`
+#### `pto.vexpdif(vec: VRegType, max_vec: VRegType, part: pto.VcvtPartMode) -> VRegType`
 
-**Description**: Exponential difference of vector elements.
+**Description**: Fused exponential difference `exp(vec - max_vec)` for numerically stable softmax lowering.
 
 **Parameters**:
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `vec` | `VRegType` | Input vector |
-| `mask` | `MaskType` | Predicate mask |
+| `max_vec` | `VRegType` | Per-lane max vector subtracted before exponentiation |
+| `part` | `pto.VcvtPartMode` | Output part selector enum. Use `pto.VcvtPartMode.EVEN` or `pto.VcvtPartMode.ODD`. |
 
 **Returns**:
 | Return Value | Type | Description |
 |--------------|------|-------------|
-| `result` | `VRegType` | Exponential difference values |
+| `result` | `VRegType` | Exponential difference values; result element type is `f32` |
 
 **Constraints**:
-- For floating-point vector types only
+- Supports `f16` and `f32` input vectors only
+- `vec` and `max_vec` must use the same vector type
+- `part` should use `pto.VcvtPartMode.EVEN` or `pto.VcvtPartMode.ODD`
+- Canonical strings `"EVEN"` / `"ODD"` are still accepted for compatibility
 
 ### Binary Vector Operations
 

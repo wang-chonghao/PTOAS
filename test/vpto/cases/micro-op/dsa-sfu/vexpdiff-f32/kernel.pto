@@ -1,13 +1,13 @@
 // -----------------------------------------------------------------------------
-// case: micro-op/dsa-sfu/vexpdiff-f32
+// case: micro-op/dsa-sfu/vexpdif-f32
 // family: dsa-sfu
-// target_ops: pto.vexpdiff
+// target_ops: pto.vexpdif
 // scenarios: core-f32, fused-expdiff
 // NOTE: bulk-generated coverage skeleton. Parser/verifier/lowering failure is
 // still a valid test conclusion in the current coverage-first phase.
 // -----------------------------------------------------------------------------
 module attributes {pto.target_arch = "a5"} {
-  func.func @vexpdiff_kernel_2d(%arg0: !pto.ptr<f32, gm>,
+  func.func @vexpdif_kernel_2d(%arg0: !pto.ptr<f32, gm>,
                                 %arg1: !pto.ptr<f32, gm>) {
     %c0 = arith.constant 0 : index
     %c64 = arith.constant 64 : index
@@ -34,7 +34,7 @@ module attributes {pto.target_arch = "a5"} {
       %_:1 = scf.for %offset = %c0 to %c1024 step %c64 iter_args(%remaining = %c1024_i32) -> (i32) {
         %mask, %next_remaining = pto.plt_b32 %remaining : i32 -> !pto.mask<b32>, i32
         %vec = pto.vlds %ub_in[%offset] : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
-        %sum = pto.vexpdiff %vec, %vec, "ODD" : !pto.vreg<64xf32>, !pto.vreg<64xf32> -> !pto.vreg<64xf32>
+        %sum = pto.vexpdif %vec, %vec, "ODD" : !pto.vreg<64xf32>, !pto.vreg<64xf32> -> !pto.vreg<64xf32>
         pto.vsts %sum, %ub_out[%offset], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
         scf.yield %next_remaining : i32
       }

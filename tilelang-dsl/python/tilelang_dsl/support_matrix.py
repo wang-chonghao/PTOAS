@@ -104,6 +104,7 @@ SUPPORTED_VECSCOPE_PTO_CALLS = frozenset(
         "vzunpack",
         "vusqz",
         "vsqz",
+        "vexpdif",
         "vexpdiff",
         "vtrc",
         "vbr",

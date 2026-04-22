@@ -2965,7 +2965,7 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
             out = pto.vsqrt(out, all_mask)
             out = pto.vrec(out, all_mask)
             out = pto.vrsqrt(out, all_mask)
-            out = pto.vexpdiff(out, all_mask)
+            out = pto.vexpdif(out, vec1, pto.VcvtPartMode.ODD)
             out = pto.vcadd(out, all_mask)
             out = pto.vcmax(out, all_mask)
             out = pto.vcmin(out, all_mask)
@@ -2987,7 +2987,7 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
         self.assertIn("pto.vsqrt", text)
         self.assertIn("pto.vrec", text)
         self.assertIn("pto.vrsqrt", text)
-        self.assertIn("pto.vexpdiff", text)
+        self.assertIn("pto.vexpdif", text)
         self.assertIn("pto.vcadd", text)
         self.assertIn("pto.vcmax", text)
         self.assertIn("pto.vcmin", text)
@@ -2996,6 +2996,32 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
         self.assertIn("pto.vprelu", text)
         self.assertIn("pto.vlrelu", text)
         self.assertIn("pto.vcvt", text)
+
+    def test_vexpdif_f16_surface_lowers_to_f32_half_lanes(self) -> None:
+        @pto.vkernel(
+            op="vexpdif_f16_surface_unique",
+            dtypes=[(pto.f32, pto.f16, pto.f16)],
+            advanced=True,
+        )
+        def kernel(dst: pto.Tile, src: pto.Tile, max_src: pto.Tile):
+            vec = pto.vlds(src, 0)
+            max_vec = pto.vlds(max_src, 0)
+            out = pto.vexpdif(vec, max_vec, pto.VcvtPartMode.ODD)
+            mask = pto.make_mask(pto.f32, pto.PAT.ALL)
+            pto.vsts(out, dst, 0, mask)
+            return None
+
+        specialized = kernel.specialize(
+            dst=pto.TileSpecialization(shape=(8, 64), memory_space=pto.MemorySpace.UB),
+            src=pto.TileSpecialization(shape=(8, 128), memory_space=pto.MemorySpace.UB),
+            max_src=pto.TileSpecialization(shape=(8, 128), memory_space=pto.MemorySpace.UB),
+        )
+
+        text = specialized.mlir_text()
+        self.assertRegex(
+            text,
+            r'pto\.vexpdif %\w+_\d+, %\w+_\d+, "ODD" : !pto\.vreg<128xf16>, !pto\.vreg<128xf16> -> !pto\.vreg<64xf32>',
+        )
 
     def test_vcvt_supports_keyword_attrs_with_enums(self) -> None:
         @pto.vkernel(

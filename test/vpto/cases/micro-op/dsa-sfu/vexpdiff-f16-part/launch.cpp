@@ -7,9 +7,9 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // -----------------------------------------------------------------------------
-// case: micro-op/dsa-sfu/vexpdiff-f16-part
+// case: micro-op/dsa-sfu/vexpdif-f16-part
 // family: dsa-sfu
-// target_ops: pto.vexpdiff
+// target_ops: pto.vexpdif
 // scenarios: core-f16, fused-expdiff, part-even-odd
 // -----------------------------------------------------------------------------
 #ifndef __VEC_SCOPE__
@@ -41,13 +41,13 @@ struct MrgSortExecutedNumList {
 #include "acl/acl.h"
 #endif
 
-extern "C" __global__ [aicore] void vexpdiff_f16_part_kernel_2d(__gm__ half *v1,
+extern "C" __global__ [aicore] void vexpdif_f16_part_kernel_2d(__gm__ half *v1,
                                                               __gm__ half *v2,
                                                               __gm__ float *v3);
 
 void LaunchVexpdiff_f16_part_kernel_2d(uint16_t *v1, uint16_t *v2, float *v3,
                                        void *stream) {
-  vexpdiff_f16_part_kernel_2d<<<1, nullptr, stream>>>((__gm__ half *)v1,
+  vexpdif_f16_part_kernel_2d<<<1, nullptr, stream>>>((__gm__ half *)v1,
                                                       (__gm__ half *)v2,
                                                       (__gm__ float *)v3);
 }

@@ -1456,7 +1456,7 @@ class PTO_UnmaskedBinaryVecOp<string mnemonic> : PTO_Op<mnemonic, [Pure]> {
 }
 
 def PTO_VpreluOp : PTO_UnmaskedBinaryVecOp<"vprelu">;
-def PTO_VexpdiffOp : PTO_Op<"vexpdiff", [Pure]> {
+def PTO_VexpdifOp : PTO_Op<"vexpdif", [Pure]> {
   let arguments = (ins
     PTO_VectorType:$input,
     PTO_VectorType:$max,

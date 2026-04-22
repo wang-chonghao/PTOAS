@@ -1669,9 +1669,9 @@ static FailureOr<StringRef> buildVtrcCallee(MLIRContext *context, Type resultTyp
   return StringAttr::get(context, "llvm.hivm.vtrc." + vec + ".x").getValue();
 }
 
-static FailureOr<StringRef> buildVexpdiffCallee(MLIRContext *context,
-                                                Type inputType,
-                                                Type resultType) {
+static FailureOr<StringRef> buildVexpdifCallee(MLIRContext *context,
+                                               Type inputType,
+                                               Type resultType) {
   std::string srcVec =
       getElementTypeFragment(getElementTypeFromVectorLike(inputType));
   auto srcLanes = getElementCountFromVectorLike(inputType);
@@ -4090,38 +4090,38 @@ private:
   LoweringState &state;
 };
 
-class LowerVexpdiffOpPattern final
-    : public OpConversionPattern<pto::VexpdiffOp> {
+class LowerVexpdifOpPattern final
+    : public OpConversionPattern<pto::VexpdifOp> {
 public:
-  explicit LowerVexpdiffOpPattern(TypeConverter &typeConverter,
-                                  MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<pto::VexpdiffOp>(typeConverter, context),
+  explicit LowerVexpdifOpPattern(TypeConverter &typeConverter,
+                                 MLIRContext *context, LoweringState &state)
+      : OpConversionPattern<pto::VexpdifOp>(typeConverter, context),
         state(state) {}
 
   LogicalResult
-  matchAndRewrite(pto::VexpdiffOp op, pto::VexpdiffOp::Adaptor adaptor,
+  matchAndRewrite(pto::VexpdifOp op, pto::VexpdifOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto laneCount = getElementCountFromVectorLike(op.getInput().getType());
     Type elemType = getElementTypeFromVectorLike(op.getInput().getType());
     auto part = parsePartImmediate(op.getPart());
     if (!laneCount || !elemType || !part)
-      return rewriter.notifyMatchFailure(op, "unsupported vexpdiff signature");
+      return rewriter.notifyMatchFailure(op, "unsupported vexpdif signature");
 
     FailureOr<Value> mask = materializeDynamicPltMask(
         rewriter, state, op.getLoc(), getI32Constant(rewriter, op.getLoc(), *laneCount),
         elemType);
     if (failed(mask))
-      return rewriter.notifyMatchFailure(op, "failed to materialize vexpdiff mask");
+      return rewriter.notifyMatchFailure(op, "failed to materialize vexpdif mask");
 
     Type resultType = this->getTypeConverter()->convertType(op.getResult().getType());
     if (!resultType)
-      return rewriter.notifyMatchFailure(op, "failed to convert vexpdiff result type");
+      return rewriter.notifyMatchFailure(op, "failed to convert vexpdif result type");
 
     FailureOr<StringRef> calleeName =
-        buildVexpdiffCallee(op.getContext(), op.getInput().getType(),
-                            op.getResult().getType());
+        buildVexpdifCallee(op.getContext(), op.getInput().getType(),
+                           op.getResult().getType());
     if (failed(calleeName))
-      return rewriter.notifyMatchFailure(op, "unsupported vexpdiff callee");
+      return rewriter.notifyMatchFailure(op, "unsupported vexpdif callee");
 
     Value partValue = getI32Constant(rewriter, op.getLoc(), *part);
     auto funcType = rewriter.getFunctionType(
@@ -5051,7 +5051,7 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerVgather2OpPattern, LowerVgather2BcOpPattern,
                LowerVgatherbOpPattern, LowerVscatterOpPattern,
                LowerVpreluOpPattern, LowerVaxpyOpPattern,
-               LowerVciOpPattern, LowerVexpdiffOpPattern,
+               LowerVciOpPattern, LowerVexpdifOpPattern,
                LowerVbitsortOpPattern, LowerVtrcOpPattern, LowerVcvtOpPattern,
                LowerVbitcastOpPattern,
                LowerPredicateLoadOpPattern<pto::PldiOp>,
@@ -5110,7 +5110,7 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::PintlvB8Op, pto::PintlvB16Op, pto::PintlvB32Op,
                       pto::VsunpackOp, pto::VzunpackOp, pto::VpackOp,
                       pto::VintlvOp, pto::VdintlvOp, pto::VpreluOp,
-                      pto::VaxpyOp, pto::VciOp, pto::VexpdiffOp,
+                      pto::VaxpyOp, pto::VciOp, pto::VexpdifOp,
                       pto::VbitsortOp, pto::VtrcOp, pto::VcvtOp,
                       pto::VbitcastOp,
                       pto::VcmpOp, pto::VcmpsOp,

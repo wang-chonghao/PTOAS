@@ -228,7 +228,6 @@ _UNARY_VECTOR_OPS = {
     "vzunpack",
     "vusqz",
     "vsqz",
-    "vexpdiff",
     "vtrc",
     "vcgadd",
     "vcgmax",
@@ -275,6 +274,7 @@ _VECTOR_IMMEDIATE_OPS = {"vshift", "vslide"}
 _TERNARY_VECTOR_OPS = {"vaxpy", "vmula"}
 _MULTI_RESULT_VECTOR_OPS = {"vmull", "vldsx2", "vldus", "pstu"}
 _BROADCAST_VECTOR_OPS = {"vbr", "vdup", "vci"}
+_VEXPDIF_OP_ALIASES = {"vexpdif", "vexpdiff"}
 _LOW_LEVEL_DMA_UNARY_CONFIG_OPS = {"set_mov_pad_val"}
 _LOW_LEVEL_DMA_CONFIG_OPS = {
     "set_loop2_stride_outtoub",
@@ -1188,6 +1188,7 @@ class _SemanticAnalyzer:
             | _MULTI_RESULT_VECTOR_OPS
             | _BROADCAST_VECTOR_OPS
             | _ADVANCED_VECTOR_ACTIVITY_OPS
+            | _VEXPDIF_OP_ALIASES
         )
 
     def _block_can_live_in_inferred_vecscope(
@@ -1289,6 +1290,7 @@ class _SemanticAnalyzer:
                 | _MULTI_RESULT_VECTOR_OPS
                 | _BROADCAST_VECTOR_OPS
                 | _ADVANCED_VECTOR_ACTIVITY_OPS
+                | _VEXPDIF_OP_ALIASES
             )
         )
 
@@ -1412,6 +1414,7 @@ class _SemanticAnalyzer:
                 | _MULTI_RESULT_VECTOR_OPS
                 | _BROADCAST_VECTOR_OPS
                 | _ADVANCED_VECTOR_ACTIVITY_OPS
+                | _VEXPDIF_OP_ALIASES
             ):
                 return True
             return any(self._expr_contains_vector_activity(arg) for arg in expr.args)
@@ -4033,6 +4036,8 @@ class _SemanticAnalyzer:
             return self._analyze_broadcast_vector_op(name, args)
         if name in _MULTI_RESULT_VECTOR_OPS:
             return self._analyze_multi_result_vector_op(name, args)
+        if name in _VEXPDIF_OP_ALIASES:
+            return self._analyze_vexpdif_op(args)
         if name in _UNARY_VECTOR_OPS:
             return self._analyze_unary_vector_op(name, args)
         if name in _BINARY_VECTOR_OPS:
@@ -4742,6 +4747,26 @@ class _SemanticAnalyzer:
             result_type = self._vcadd_result_vreg_type(vreg)
         return SemanticCallExpr(namespace="pto", name=name, args=args, type=result_type)
 
+    def _analyze_vexpdif_op(
+        self,
+        args: tuple[SemanticExpr, ...],
+    ) -> SemanticExpr:
+        if len(args) != 3:
+            raise TypeError("pto.vexpdif expects exactly 3 positional arguments in TileLang DSL v1")
+        input_expr, max_expr, part_expr = args
+        input_type = self._require_vreg_expr(input_expr, "pto.vexpdif input")
+        max_type = self._require_vreg_expr(max_expr, "pto.vexpdif max")
+        if input_type != max_type:
+            raise TypeError("pto.vexpdif requires input/max vector types to match")
+        self._validate_vexpdif_dtype(input_type.element_dtype)
+        part = self._normalize_vexpdif_part(part_expr, "pto.vexpdif part")
+        return SemanticCallExpr(
+            namespace="pto",
+            name="vexpdif",
+            args=(input_expr, max_expr, part),
+            type=self._vexpdif_result_vreg_type(input_type),
+        )
+
     def _analyze_binary_vector_op(
         self,
         name: str,
@@ -5366,6 +5391,11 @@ class _SemanticAnalyzer:
             return self._vreg_type_for_dtype(widened_dtype)
         return vreg_type
 
+    def _vexpdif_result_vreg_type(self, vreg_type: SemanticVRegType) -> SemanticVRegType:
+        if vreg_type.element_dtype.name == "f32":
+            return vreg_type
+        return SemanticVRegType(element_dtype=f32, lanes=vreg_type.lanes // 2)
+
     def _normalize_position_mode(
         self,
         expr: SemanticExpr | None,
@@ -5581,6 +5611,31 @@ class _SemanticAnalyzer:
         ):
             return expr.binding.value
         raise TypeError(f"{context} must be a string literal in TileLang DSL")
+
+    def _normalize_vexpdif_part(self, expr: SemanticExpr, context: str) -> SemanticExpr:
+        if (
+            isinstance(expr, SemanticSymbolExpr)
+            and isinstance(expr.type, SemanticMetaType)
+            and expr.type.kind == "vcvt_part_mode"
+            and isinstance(expr.value, VcvtPartMode)
+        ):
+            part = expr.value.value
+        elif (
+            isinstance(expr, SemanticBindingRef)
+            and isinstance(expr.type, SemanticMetaType)
+            and expr.type.kind == "vcvt_part_mode"
+            and isinstance(expr.binding.value, VcvtPartMode)
+        ):
+            part = expr.binding.value.value
+        else:
+            part = self._require_string_expr(expr, context)
+        if part not in {VcvtPartMode.EVEN.value, VcvtPartMode.ODD.value}:
+            raise TypeError(
+                "pto.vexpdif part must be `pto.VcvtPartMode.EVEN` or "
+                "`pto.VcvtPartMode.ODD`, or one of the canonical strings "
+                '`"EVEN"` / `"ODD"` in TileLang DSL v1'
+            )
+        return SemanticLiteralExpr(value=part, type=SemanticMetaType(kind="string"))
 
     def _normalize_cmp_mode(self, expr: SemanticExpr, context: str) -> SemanticExpr:
         if (
@@ -5953,7 +6008,7 @@ class _SemanticAnalyzer:
         return SemanticVRegType(element_dtype=dtype, lanes=256 // width)
 
     def _validate_unary_dtype(self, name: str, dtype: ScalarType) -> None:
-        if name in {"vexp", "vln", "vsqrt", "vrec", "vrsqrt", "vexpdiff"} and dtype.name not in {"f16", "f32"}:
+        if name in {"vexp", "vln", "vsqrt", "vrec", "vrsqrt"} and dtype.name not in {"f16", "f32"}:
             raise TypeError(f"pto.{name} only supports f16/f32 in TileLang DSL v1")
         if name == "vrelu" and dtype.name not in {"f16", "f32"}:
             raise TypeError("pto.vrelu only supports f16/f32 in TileLang DSL v1")
@@ -6002,6 +6057,10 @@ class _SemanticAnalyzer:
             (is_integer_dtype(dtype) and integer_bitwidth(dtype) in {8, 16, 32}) or dtype.name in {"f16", "bf16", "f32"}
         ):
             raise TypeError(f"pto.{name} does not support this dtype in TileLang DSL v1")
+
+    def _validate_vexpdif_dtype(self, dtype: ScalarType) -> None:
+        if dtype.name not in {"f16", "f32"}:
+            raise TypeError("pto.vexpdif only supports f16/f32 in TileLang DSL v1")
 
     def _validate_vector_scalar_dtype(self, name: str, dtype: ScalarType) -> None:
         if name == "vdivs" and dtype.name not in {"f16", "f32"}:
