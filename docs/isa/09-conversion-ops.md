@@ -29,17 +29,21 @@ Cycle-accurate simulator **popped→retire** latency (cycles). Only representati
 
 ## `pto.vci`
 
-- **syntax:** `%result = pto.vci %index {order = "ASC|DESC"} : integer -> !pto.vreg<NxT>`
-- **semantics:** Generate a lane-index vector from a scalar seed/index value.
+- **syntax:** `%result = pto.vci %index {order = "ASC|DESC"} : T -> !pto.vreg<NxT>`
+- **semantics:** Generate a lane-index vector from a scalar base value.
 - **inputs:**
-  `%index` is the scalar seed or base index.
+  `%index` is the scalar base value. Supported scalar types are `i8/i16/i32`,
+  `f16`, and `f32`.
 - **outputs:**
   `%result` is the generated index vector.
 - **constraints and limitations:**
-  This is an index-generation family, not a numeric conversion. `order` and the
-  result element type together determine how indices are generated. `%result`
-  uses an integer element type, and the scalar `%index` type matches that
-  result element type.
+  This is an index-generation family, not a numeric conversion. `order` and
+  the result element type together determine whether lanes are generated as
+  `base + lane_id` or `base - lane_id`. Supported result types are
+  `!pto.vreg<256xsi8>`, `!pto.vreg<128xsi16>`, `!pto.vreg<64xsi32>`,
+  `!pto.vreg<128xf16>`, and `!pto.vreg<64xf32>`. `%index` must use the
+  matching scalar type for `f16`/`f32`; for integer results, `%index` must use
+  the same bit width and may be signless or signed.
 
 ---
 

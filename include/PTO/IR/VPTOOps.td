@@ -1031,7 +1031,7 @@ def PTO_VbitcastOp : PTO_Op<"vbitcast", [Pure]> {
 
 def PTO_VciOp : PTO_Op<"vci", [Pure]> {
   let arguments = (ins
-    AnyInteger:$index,
+    AnyTypeOf<[AnyInteger, AnyFloat], "integer/float scalar">:$index,
     OptionalAttr<StrAttr>:$order
   );
   let results = (outs PTO_VectorType:$result);

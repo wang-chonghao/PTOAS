@@ -149,21 +149,25 @@ for (int i = 0; i < N; i++)
 
 ### `pto.vci`
 
-- **syntax:** `%result = pto.vci %index {order = "ASC|DESC"} : integer -> !pto.vreg<NxT>`
-- **semantics:** Generate lane index vector.
+- **syntax:** `%result = pto.vci %index {order = "ASC|DESC"} : T -> !pto.vreg<NxT>`
+- **semantics:** Generate a lane index vector from a scalar base value.
 
 ```c
 for (int i = 0; i < N; i++)
-    dst[i] = base_index + i;
+    dst[i] = (order == ASC) ? (base_index + i) : (base_index - i);
 ```
 
 **Use case:** Generate indices for gather/scatter, argsort, etc.
 
-- **inputs:** `%index` is the scalar seed/base index.
+- **inputs:** `%index` is the scalar base value. Supported scalar types are
+  `i8/i16/i32`, `f16`, and `f32`.
 - **outputs:** `%result` is the generated index vector.
-- **constraints and limitations:** This page documents the arithmetic/indexing
-  use of the family; the conversion page also records the same opcode for
-  completeness.
+- **constraints and limitations:** `%result` element type determines both the
+  generated element type and the lane count. Supported result types are
+  `!pto.vreg<256xsi8>`, `!pto.vreg<128xsi16>`, `!pto.vreg<64xsi32>`,
+  `!pto.vreg<128xf16>`, and `!pto.vreg<64xf32>`. `%index` must use the
+  matching scalar type for `f16`/`f32`; for integer results, `%index` must use
+  the same bit width and may be signless or signed.
 
 ---
 
@@ -208,7 +212,7 @@ for (int i = 0; i < N; i++)
 
 - `pto.vmull %lhs, %rhs, %mask : !pto.vreg<NxT>, !pto.vreg<NxT>, !pto.mask<G> -> !pto.vreg<NxT>, !pto.vreg<NxT>`
 - `pto.vmula %acc, %lhs, %rhs, %mask : !pto.vreg<NxT>, !pto.vreg<NxT>, !pto.vreg<NxT>, !pto.mask<G> -> !pto.vreg<NxT>`
-- `pto.vci %index {order = "ASC|DESC"} : integer -> !pto.vreg<NxT>`
+- `pto.vci %index {order = "ASC|DESC"} : T -> !pto.vreg<NxT>`
 - `pto.vbitsort %dest, %src, %indices, %repeat_times : !pto.ptr<...>, !pto.ptr<...>, !pto.ptr<...>, index`
 - `pto.vmrgsort4 %dest, %src0, %src1, %src2, %src3, %count, %config : !pto.ptr<...>, !pto.ptr<...>, !pto.ptr<...>, !pto.ptr<...>, !pto.ptr<...>, i64, i64`
 
@@ -224,6 +228,6 @@ for (int i = 0; i < N; i++)
 // Leaky ReLU activation
 %activated = pto.vlrelu %linear_out, %alpha_scalar, %mask : !pto.vreg<64xf32>, f32, !pto.mask<G> -> !pto.vreg<64xf32>
 
-// Generate indices for argsort
-%indices = pto.vci %c0 {order = "ASC"} : i32 -> !pto.vreg<64xi32>
+// Generate ascending si32 indices for argsort
+%indices = pto.vci %c0 {order = "ASC"} : i32 -> !pto.vreg<64xsi32>
 ```

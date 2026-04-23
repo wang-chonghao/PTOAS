@@ -6,8 +6,6 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-#include <stdint.h>
-
 #ifndef __global__
 #define __global__
 #endif
@@ -16,8 +14,8 @@
 #define __gm__
 #endif
 
-extern "C" __global__ [aicore] void vci_kernel_2d(__gm__ int32_t *v1,
-                                                  __gm__ int32_t *v2) {
+extern "C" __global__ [aicore] void vci_kernel_2d(__gm__ half *v1,
+                                                  __gm__ half *v2) {
   (void)v1;
   (void)v2;
 }

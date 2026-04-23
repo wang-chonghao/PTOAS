@@ -25,17 +25,17 @@ using namespace PtoTestCommon;
     }                                                                            \
   } while (0)
 
-void LaunchVci_kernel_2d(int32_t *v1, int32_t *v2, void *stream);
+void LaunchVci_kernel_2d(int8_t *v1, int8_t *v2, void *stream);
 
 int main() {
   size_t elemCount_v1 = 1024;
-  size_t fileSize_v1 = elemCount_v1 * sizeof(int32_t);
+  size_t fileSize_v1 = elemCount_v1 * sizeof(int8_t);
   size_t elemCount_v2 = 1024;
-  size_t fileSize_v2 = elemCount_v2 * sizeof(int32_t);
-  int32_t *v1Host = nullptr;
-  int32_t *v1Device = nullptr;
-  int32_t *v2Host = nullptr;
-  int32_t *v2Device = nullptr;
+  size_t fileSize_v2 = elemCount_v2 * sizeof(int8_t);
+  int8_t *v1Host = nullptr;
+  int8_t *v1Device = nullptr;
+  int8_t *v2Host = nullptr;
+  int8_t *v2Device = nullptr;
   int rc = 0;
   bool aclInited = false;
   bool deviceSet = false;

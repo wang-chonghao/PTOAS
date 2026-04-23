@@ -8,7 +8,6 @@
 
 #include "test_common.h"
 #include "acl/acl.h"
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
@@ -25,17 +24,17 @@ using namespace PtoTestCommon;
     }                                                                            \
   } while (0)
 
-void LaunchVci_kernel_2d(int32_t *v1, int32_t *v2, void *stream);
+void LaunchVci_kernel_2d(aclFloat16 *v1, aclFloat16 *v2, void *stream);
 
 int main() {
-  size_t elemCount_v1 = 1024;
-  size_t fileSize_v1 = elemCount_v1 * sizeof(int32_t);
-  size_t elemCount_v2 = 1024;
-  size_t fileSize_v2 = elemCount_v2 * sizeof(int32_t);
-  int32_t *v1Host = nullptr;
-  int32_t *v1Device = nullptr;
-  int32_t *v2Host = nullptr;
-  int32_t *v2Device = nullptr;
+  size_t elemCount_v1 = 128;
+  size_t fileSize_v1 = elemCount_v1 * sizeof(aclFloat16);
+  size_t elemCount_v2 = 128;
+  size_t fileSize_v2 = elemCount_v2 * sizeof(aclFloat16);
+  aclFloat16 *v1Host = nullptr;
+  aclFloat16 *v1Device = nullptr;
+  aclFloat16 *v2Host = nullptr;
+  aclFloat16 *v2Device = nullptr;
   int rc = 0;
   bool aclInited = false;
   bool deviceSet = false;

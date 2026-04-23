@@ -4200,13 +4200,30 @@ public:
     if (failed(calleeName))
       return rewriter.notifyMatchFailure(op, "unsupported vci callee");
 
+    Value indexValue = adaptor.getIndex();
+    Type resultElemType =
+        cast<pto::VRegType>(op.getResult().getType()).getElementType();
+    if (auto intType = dyn_cast<IntegerType>(resultElemType)) {
+      if (intType.getWidth() == 8) {
+        Type loweredIndexType = rewriter.getI16Type();
+        if (intType.isUnsigned())
+          indexValue = rewriter.create<arith::ExtUIOp>(op.getLoc(),
+                                                       loweredIndexType,
+                                                       indexValue);
+        else
+          indexValue = rewriter.create<arith::ExtSIOp>(op.getLoc(),
+                                                       loweredIndexType,
+                                                       indexValue);
+      }
+    }
+
     Value orderValue = getI32Constant(rewriter, op.getLoc(), *order);
     auto funcType = rewriter.getFunctionType(
-        TypeRange{adaptor.getIndex().getType(), orderValue.getType()},
+        TypeRange{indexValue.getType(), orderValue.getType()},
         TypeRange{resultType});
     auto call = rewriter.create<func::CallOp>(
         op.getLoc(), *calleeName, TypeRange{resultType},
-        ValueRange{adaptor.getIndex(), orderValue});
+        ValueRange{indexValue, orderValue});
     state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
     rewriter.replaceOp(op, call.getResults());
     return success();

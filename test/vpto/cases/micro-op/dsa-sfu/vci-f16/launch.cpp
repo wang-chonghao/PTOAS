@@ -35,10 +35,10 @@ struct MrgSortExecutedNumList {
 #include "acl/acl.h"
 #endif
 
-extern "C" __global__ [aicore] void vci_kernel_2d(__gm__ int32_t *v1,
-                                                  __gm__ int32_t *v2);
+extern "C" __global__ [aicore] void vci_kernel_2d(__gm__ half *v1,
+                                                  __gm__ half *v2);
 
-void LaunchVci_kernel_2d(int32_t *v1, int32_t *v2, void *stream) {
-  vci_kernel_2d<<<1, nullptr, stream>>>((__gm__ int32_t *)v1,
-                                        (__gm__ int32_t *)v2);
+void LaunchVci_kernel_2d(aclFloat16 *v1, aclFloat16 *v2, void *stream) {
+  vci_kernel_2d<<<1, nullptr, stream>>>((__gm__ half *)v1,
+                                        (__gm__ half *)v2);
 }

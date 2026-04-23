@@ -16,8 +16,8 @@
 #define __gm__
 #endif
 
-extern "C" __global__ [aicore] void vci_kernel_2d(__gm__ int32_t *v1,
-                                                  __gm__ int32_t *v2) {
+extern "C" __global__ [aicore] void vci_kernel_2d(__gm__ int8_t *v1,
+                                                  __gm__ int8_t *v2) {
   (void)v1;
   (void)v2;
 }

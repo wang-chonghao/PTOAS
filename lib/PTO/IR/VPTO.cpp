@@ -1640,12 +1640,15 @@ LogicalResult VciOp::verify() {
   auto resultType = dyn_cast<VRegType>(getResult().getType());
   if (!resultType)
     return emitOpError("result must be !pto.vreg<...>");
-  if (!isa<IntegerType>(resultType.getElementType()))
-    return emitOpError("result element type must be integer");
-  auto indexType = dyn_cast<IntegerType>(getIndex().getType());
-  if (!indexType)
-    return emitOpError("index must be an integer scalar");
-  if (indexType != resultType.getElementType())
+  Type resultElemType = resultType.getElementType();
+  bool supportedInteger = false;
+  if (auto intType = dyn_cast<IntegerType>(resultElemType))
+    supportedInteger = intType.getWidth() == 8 || intType.getWidth() == 16 ||
+                       intType.getWidth() == 32;
+  bool supportedFloat = resultElemType.isF16() || resultElemType.isF32();
+  if (!supportedInteger && !supportedFloat)
+    return emitOpError("result element type must be integer or f16/f32");
+  if (!isCompatibleScalarForSemanticType(resultElemType, getIndex().getType()))
     return emitOpError("index type must match result element type");
   return success();
 }
