@@ -1728,6 +1728,23 @@ VPTOUnaryContract buildUnaryContract(StringRef family, Value src) {
   return contract;
 }
 
+static bool isCompatibleScalarForSemanticType(Type semanticType,
+                                              Type scalarType) {
+  if (semanticType == scalarType)
+    return true;
+
+  auto semanticInt = dyn_cast<IntegerType>(semanticType);
+  auto scalarInt = dyn_cast<IntegerType>(scalarType);
+  if (!semanticInt || !scalarInt || semanticInt.getWidth() != scalarInt.getWidth())
+    return false;
+
+  if (semanticInt.isSigned())
+    return scalarInt.isSigned() || scalarInt.isSignless();
+  if (semanticInt.isUnsigned())
+    return scalarInt.isUnsigned() || scalarInt.isSignless();
+  return scalarInt.isSignless();
+}
+
 VPTOUnaryContract extractTExpContract(TExpOp op) {
   return buildUnaryContract("exp", op.getSrc());
 }
@@ -5050,7 +5067,8 @@ LogicalResult lowerTCmpS(TCmpSOp op, PatternRewriter &rewriter) {
   auto dstElemType = dyn_cast_or_null<IntegerType>(getElementType(op.getDst()));
   if (!dstElemType || !dstElemType.isUnsignedInteger(8))
     return op.emitOpError("tcmps lowering currently requires ui8 destination tiles");
-  if (op.getScalar().getType() != contract.elementType)
+  if (!isCompatibleScalarForSemanticType(contract.elementType,
+                                         op.getScalar().getType()))
     return op.emitOpError("tcmps lowering requires scalar type to match source element type");
 
   Value srcBuffer = materializeBufferPointer(op.getSrc(), contract.elementType,
@@ -5491,7 +5509,7 @@ LogicalResult lowerTExpandS(TExpandsOp op, PatternRewriter &rewriter) {
     return op.emitOpError("expands lowering requires a concrete element type");
 
   Type scalarType = op.getScalar().getType();
-  if (scalarType != contract.elementType)
+  if (!isCompatibleScalarForSemanticType(contract.elementType, scalarType))
     return op.emitOpError("expands lowering requires scalar type to match destination element type");
 
   if (!(contract.elementType.isF16() || contract.elementType.isF32() ||
@@ -6212,7 +6230,8 @@ LogicalResult lowerTMulS(TMulSOp op, PatternRewriter &rewriter,
           },
           "f16, f32, and 16/32-bit integer element types")))
     return failure();
-  if (op.getScalar().getType() != contract.elementType)
+  if (!isCompatibleScalarForSemanticType(contract.elementType,
+                                         op.getScalar().getType()))
     return op.emitOpError("tmuls lowering requires scalar type to match source element type");
   return buildScalarUnaryVecScope("muls", contract, strategy, op.getSrc0(), op.getScalar(),
                                   op.getDst(), rewriter, op.getLoc());
@@ -6539,7 +6558,8 @@ LogicalResult lowerTDivS(TDivSOp op, PatternRewriter &rewriter,
           [](Type type) { return type.isF16() || type.isF32(); },
           "f16 and f32 element types")))
     return failure();
-  if (scalarOperand.getType() != contract.elementType)
+  if (!isCompatibleScalarForSemanticType(contract.elementType,
+                                         scalarOperand.getType()))
     return op.emitOpError(
         "divs lowering requires scalar type to match source element type");
   return buildScalarDivVecScope(contract, strategy, tileOperand, scalarOperand, op.getDst(),
@@ -6560,7 +6580,8 @@ LogicalResult lowerTAddS(TAddSOp op, PatternRewriter &rewriter,
           },
           "f16, f32, bf16, and 16/32-bit integer element types")))
     return failure();
-  if (op.getScalar().getType() != contract.elementType)
+  if (!isCompatibleScalarForSemanticType(contract.elementType,
+                                         op.getScalar().getType()))
     return op.emitOpError("tadds lowering requires scalar type to match source element type");
   return buildScalarUnaryVecScope("adds", contract, strategy, op.getSrc(), op.getScalar(),
                                   op.getDst(), rewriter, op.getLoc());
@@ -6670,7 +6691,8 @@ LogicalResult lowerTMaxS(TMaxSOp op, PatternRewriter &rewriter,
           op, contract, op.getDst(),
           [](Type type) { return type.isF32(); }, "f32 element type")))
     return failure();
-  if (op.getScalar().getType() != contract.elementType)
+  if (!isCompatibleScalarForSemanticType(contract.elementType,
+                                         op.getScalar().getType()))
     return op.emitOpError("tmaxs lowering requires scalar type to match source element type");
   return buildScalarUnaryVecScope("maxs", contract, strategy, op.getSrc(), op.getScalar(),
                                   op.getDst(), rewriter, op.getLoc());
@@ -6683,7 +6705,8 @@ LogicalResult lowerTMinS(TMinSOp op, PatternRewriter &rewriter,
           op, contract, op.getDst(),
           [](Type type) { return type.isF32(); }, "f32 element type")))
     return failure();
-  if (op.getScalar().getType() != contract.elementType)
+  if (!isCompatibleScalarForSemanticType(contract.elementType,
+                                         op.getScalar().getType()))
     return op.emitOpError("tmins lowering requires scalar type to match source element type");
   return buildScalarUnaryVecScope("mins", contract, strategy, op.getSrc(), op.getScalar(),
                                   op.getDst(), rewriter, op.getLoc());

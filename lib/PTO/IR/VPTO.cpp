@@ -1540,6 +1540,23 @@ LogicalResult SetMovPadValOp::verify() {
          << valueType;
 }
 
+static bool isCompatibleScalarForSemanticType(Type semanticType,
+                                              Type scalarType) {
+  if (semanticType == scalarType)
+    return true;
+
+  auto semanticInt = dyn_cast<IntegerType>(semanticType);
+  auto scalarInt = dyn_cast<IntegerType>(scalarType);
+  if (!semanticInt || !scalarInt || semanticInt.getWidth() != scalarInt.getWidth())
+    return false;
+
+  if (semanticInt.isSigned())
+    return scalarInt.isSigned() || scalarInt.isSignless();
+  if (semanticInt.isUnsigned())
+    return scalarInt.isUnsigned() || scalarInt.isSignless();
+  return scalarInt.isSignless();
+}
+
 LogicalResult VbrOp::verify() {
   if (failed(verifyVRegTypeLike(*this, getResult().getType(), "result")))
     return failure();
@@ -1548,7 +1565,8 @@ LogicalResult VbrOp::verify() {
   Type elementType = getValue().getType();
   if (isa<ShapedType, VectorType>(elementType))
     return emitOpError("value must be a scalar matching the result element type");
-  if (elementType != resultVecType.getElementType())
+  Type resultElementType = resultVecType.getElementType();
+  if (!isCompatibleScalarForSemanticType(resultElementType, elementType))
     return emitOpError("value type must match result element type");
   return success();
 }
@@ -1954,7 +1972,8 @@ LogicalResult VdupOp::verify() {
   if (getPosition())
     return emitOpError("position is only supported for vector input");
 
-  if (inputType != resultType.getElementType())
+  Type resultElementType = resultType.getElementType();
+  if (!isCompatibleScalarForSemanticType(resultElementType, inputType))
     return emitOpError("scalar input must match result element type");
 
   return success();
@@ -2633,7 +2652,9 @@ LogicalResult VcmpsOp::verify() {
       failed(verifyMaskTypeLike(*this, getResult().getType(), "result type")))
     return failure();
   auto srcType = cast<VRegType>(getSrc().getType());
-  if (getScalar().getType() != srcType.getElementType())
+  Type srcElementType = srcType.getElementType();
+  Type scalarType = getScalar().getType();
+  if (!isCompatibleScalarForSemanticType(srcElementType, scalarType))
     return emitOpError("requires scalar type to match source element type");
   if (!isSupportedCmpMode(getCmpMode()))
     return emitOpError("requires cmp_mode to be one of eq/ne/lt/le/gt/ge");

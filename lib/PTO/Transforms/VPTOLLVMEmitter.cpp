@@ -278,6 +278,37 @@ static FailureOr<Value> normalizeVdupScalarOperand(OpBuilder &builder, Location 
   return builder.create<arith::ExtSIOp>(loc, i16Type, input).getResult();
 }
 
+static Value normalizeByteScalarOperandForHivmCall(OpBuilder &builder, Location loc,
+                                                   Value input,
+                                                   Type semanticElementType) {
+  auto intType = dyn_cast<IntegerType>(input.getType());
+  if (!intType || intType.getWidth() != 8)
+    return input;
+
+  Type i16Type = builder.getIntegerType(16);
+  auto semanticIntType = dyn_cast<IntegerType>(semanticElementType);
+  if (semanticIntType && semanticIntType.isUnsigned())
+    return builder.create<arith::ExtUIOp>(loc, i16Type, input).getResult();
+  return builder.create<arith::ExtSIOp>(loc, i16Type, input).getResult();
+}
+
+static bool isCompatibleScalarForSemanticType(Type semanticType,
+                                              Type scalarType) {
+  if (semanticType == scalarType)
+    return true;
+
+  auto semanticInt = dyn_cast<IntegerType>(semanticType);
+  auto scalarInt = dyn_cast<IntegerType>(scalarType);
+  if (!semanticInt || !scalarInt || semanticInt.getWidth() != scalarInt.getWidth())
+    return false;
+
+  if (semanticInt.isSigned())
+    return scalarInt.isSigned() || scalarInt.isSignless();
+  if (semanticInt.isUnsigned())
+    return scalarInt.isUnsigned() || scalarInt.isSignless();
+  return scalarInt.isSignless();
+}
+
 static std::string getCopyElementFragment(Type elementType) {
   if (!elementType)
     return {};
@@ -1178,8 +1209,9 @@ static FailureOr<StringRef> buildVdupCallee(MLIRContext *context, pto::VdupOp op
       .getValue();
 }
 
-static FailureOr<StringRef> buildVbrCallee(MLIRContext *context, Type scalarType) {
-  std::string scalar = getVbrScalarFragment(scalarType);
+static FailureOr<StringRef> buildVbrCallee(MLIRContext *context,
+                                          Type semanticElementType) {
+  std::string scalar = getVbrScalarFragment(semanticElementType);
   if (scalar.empty())
     return failure();
   return StringAttr::get(context, "llvm.hivm.vbr." + scalar + ".v300").getValue();
@@ -2563,7 +2595,10 @@ public:
       callArgs.push_back(input);
     } else {
       Type scalarType = getElementTypeFromVectorLike(op.getResult().getType());
-      if (!scalarType || op.getInput().getType() != scalarType) {
+      if (!scalarType ||
+          (op.getInput().getType() != scalarType &&
+           !isCompatibleScalarForSemanticType(scalarType,
+                                              op.getInput().getType()))) {
         return rewriter.notifyMatchFailure(op,
                                            "unexpected scalar-input vdup type");
       }
@@ -2600,7 +2635,8 @@ public:
   matchAndRewrite(pto::VbrOp op, pto::VbrOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     FailureOr<StringRef> calleeName =
-        buildVbrCallee(op.getContext(), op.getValue().getType());
+        buildVbrCallee(op.getContext(),
+                       cast<pto::VRegType>(op.getResult().getType()).getElementType());
     if (failed(calleeName))
       return rewriter.notifyMatchFailure(op, "unsupported vbr VPTO signature");
 
@@ -2614,6 +2650,10 @@ public:
     if (!scalar || !expectedScalarType || scalar.getType() != expectedScalarType)
       return rewriter.notifyMatchFailure(op,
                                          "unexpected converted vbr operand type");
+
+    scalar = normalizeByteScalarOperandForHivmCall(
+        rewriter, op.getLoc(), scalar,
+        cast<pto::VRegType>(op.getResult().getType()).getElementType());
 
     auto funcType = rewriter.getFunctionType(TypeRange{scalar.getType()},
                                              TypeRange{resultType});
@@ -3035,6 +3075,9 @@ public:
         return rewriter.notifyMatchFailure(
             op, "unexpected converted scalar-compare operand types");
       }
+      callArgs[1] = normalizeByteScalarOperandForHivmCall(
+          rewriter, op.getLoc(), callArgs[1],
+          cast<pto::VRegType>(op.getSrc().getType()).getElementType());
     } else {
       if (callArgs.size() != 3 || !callArgs[0] || !callArgs[1] || !callArgs[2] ||
           callArgs[0].getType() != callArgs[1].getType() ||
