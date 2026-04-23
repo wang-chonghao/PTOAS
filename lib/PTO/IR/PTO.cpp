@@ -4039,7 +4039,6 @@ static LogicalResult verifyVecTileStorage(Operation *op, Type ty, StringRef name
     return op->emitOpError() << "expects " << name << " to be in the vec address space";
   return success();
 }
-
 static LogicalResult verifyVecTileCommonA2A3(Operation *op, Type ty,
                                              StringRef name) {
   if (failed(verifyTileBufCommon(op, ty, name)))
