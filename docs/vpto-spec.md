@@ -287,6 +287,105 @@ pto.strict_vecscope(%ub_in, %ub_out, %lane, %remaining) {
 
 Use `pto.strict_vecscope` when the source form should make all vector-scope inputs explicit in the region signature instead of relying on surrounding SSA visibility. The scope op itself only defines the vector-interval boundary and region argument contract.
 
+### Cluster Programming Model
+
+#### Overview
+
+An A5 cluster contains one **Cube block** (AIC) and two **Vector blocks** (AIV0, AIV1). Each
+block runs an **independent program** under its own Scalar Unit (SU), with its own issue queues:
+
+| Block | Issue Queues |
+|---|---|
+| Cube (AIC) | MTE2, MTE1, CUBE, FIXP |
+| Vector (AIV) | MTE2, VEC, MTE3 |
+
+There is no implicit synchronization between blocks. All coordination between the Cube and Vector
+programs is **explicit**, via the primitives described below.
+
+#### Intra-Cluster Synchronization
+
+Within a cluster, the PTO micro ISA provides two levels of synchronization:
+
+**Intra-core pipeline sync** (`pto.set_flag` / `pto.wait_flag`): coordinates the asynchronous
+pipelines *within a single block* — for example, ensuring MTE2 completes a GM→UB load before
+the VEC pipeline begins computation. This does not cross block boundaries.
+
+**Inter-block sync** (`pto.set_intra_block` / `pto.wait_intra_core`): coordinates between the
+Cube block and a Vector block within the same cluster. The sender specifies which **local
+pipeline** commits the signal, ensuring the preceding operation on that pipeline has completed
+before the signal is issued. The receiver specifies which **local pipeline** should stall until
+the signal arrives. This is the fundamental IPC primitive for Cube–Vector cooperation on A5.
+
+> **Note:** `pto.set_cross_core` / `pto.wait_cross_core` operate at **multi-cluster** scope and
+> are not used for intra-cluster communication.
+
+#### Intra-Cluster Data Paths
+
+A5 provides dedicated on-chip data paths between the Cube and Vector blocks, bypassing Global
+Memory entirely. These are the **recommended high-performance paths** for intra-cluster tile
+exchange.
+
+##### C→V: Cube L0C → Vector UB (fixpipe)
+
+The **fixpipe** instruction transfers data directly from Cube's L0C buffer to a Vector block's UB.
+Because Cube natively produces results in **NZ fractal layout** and Vector operates on **ND
+(row-major) layout**, fixpipe performs the layout conversion in hardware:
+
+```
+Cube L0C  (NZ layout)  ──[fixpipe, NZ2ND]──▶  Vector UB  (ND layout)
+```
+
+Fixpipe supports a **dual-destination mode**: a single transfer can write to *both* AIV0's UB and
+AIV1's UB simultaneously, with the tile split in hardware along either the row axis
+(`DualModeSplitM`) or the column axis (`DualModeSplitN`):
+
+| Split | AIV0 receives | AIV1 receives |
+|---|---|---|
+| Split-M (rows) | Upper `[M/2, N]` in ND | Lower `[M/2, N]` in ND |
+| Split-N (cols) | Left `[M, N/2]` in ND | Right `[M, N/2]` in ND |
+
+This 1→2 broadcast with in-hardware tile split is the architectural basis for 1:2
+Cube-to-Vector tile distribution.
+
+##### V→C: Vector UB → Cube L1 (TMOV ub2l1)
+
+The reverse path uses `TMOV ub2l1` to transfer data from a Vector block's UB into Cube's L1
+buffer. A key architectural constraint: Cube's L1 stores tiles in **NZ fractal layout** (e.g.
+`K1M1M0K0` — for fp16: `K0=16`, `M0=16`) so they can be loaded into L0A/L0B for MMAD
+computation. Since Vector produces tiles in **ND layout**, the layout conversion from ND to NZ
+must be applied as part of the V→C transfer:
+
+```
+Vector UB  (ND layout)  ──[TMOV ub2l1, ND→NZ]──▶  Cube L1  (NZ K1M1M0K0)
+```
+
+For 1:2 mode, both AIV0 and AIV1 each transfer a sub-tile into Cube's L1. The two sub-tiles are
+assembled into a single contiguous NZ Mat tile in L1, ready for use as a LeftTile or RightTile
+input to MMAD:
+
+| Split | AIV0 writes to L1 | AIV1 writes to L1 | Assembled in L1 |
+|---|---|---|---|
+| Split-M (rows) | `[K/2, N]` NZ at base | `[K/2, N]` NZ at offset | Full `[K, N]` NZ Mat tile |
+| Split-N (cols) | `[K, N/2]` NZ at base | `[K, N/2]` NZ at offset | Full `[K, N]` NZ Mat tile |
+
+##### Fallback: GM-Staged Transfer
+
+When the local data path is not applicable, data can be exchanged via a **Global Memory staging
+buffer**: the producer DMAs data to GM, and the consumer DMAs from GM. This path incurs off-chip
+bandwidth cost and higher latency, but serves as a general fallback.
+
+#### Programming Model
+
+The common pattern for Cube–Vector co-programming is a **software pipeline**: the Cube and Vector
+programs run a coordinated loop where each iteration the Cube produces a tile and the Vector
+consumes it (or vice versa), with explicit `pto.set_intra_block` / `pto.wait_intra_core`
+handshakes at each step to maintain correct data ordering.
+
+The PTO micro ISA exposes all the hardware primitives above directly. Higher-level constructs
+that simplify this pattern (such as in-order FIFO abstractions) can be implemented as software
+libraries on top of these primitives; they are not part of the ISA itself.
+
+
 ### Scope
 
 This document is the interface specification centered on the `mlir::pto` dialect and the shared MLIR surface used alongside it in PTO micro Instruction programs.
