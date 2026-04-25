@@ -159,6 +159,14 @@ set(ALL_TESTCASES
     trowprod
     trsqrt
     tsqrt
+    trowexpand
+    trowexpandadd
+    trowexpanddiv
+    trowexpandexpdif
+    trowexpandmax
+    trowexpandmin
+    trowexpandmul
+    trowexpandsub
     texpands
     tfillpad
     tfillpad_inplace
