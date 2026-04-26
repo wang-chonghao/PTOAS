@@ -444,7 +444,7 @@ jobs:
           echo "PTOAS_BIN=${GITHUB_WORKSPACE}/build/tools/ptoas/ptoas" >> "${GITHUB_ENV}"
 
       - name: Run VPTO SIM validation
-        if: ${{ false }}
+        if: ${{ true }}
         shell: bash
         run: |
           set -euo pipefail
