@@ -25,6 +25,7 @@ prints the materialized MLIR module to stdout.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import importlib.util
 import json
 import sys
@@ -85,11 +86,34 @@ def _find_descriptors(module) -> list[VKernelDescriptor]:
     return result
 
 
+@contextmanager
+def _template_import_context(template_dir: Path):
+    """Temporarily expose a template directory and package parent to imports."""
+    import_roots: list[str] = []
+    for root in (template_dir, template_dir.parent):
+        root_text = str(root)
+        if root_text not in import_roots:
+            import_roots.append(root_text)
+
+    added_roots: list[str] = []
+    for root_text in reversed(import_roots):
+        if root_text in sys.path:
+            continue
+        sys.path.insert(0, root_text)
+        added_roots.append(root_text)
+
+    try:
+        yield
+    finally:
+        for root_text in added_roots:
+            try:
+                sys.path.remove(root_text)
+            except ValueError:
+                pass
+
+
 def _import_py_file(path: Path):
     """Import a .py file as a module and return it."""
-    template_parent = path.parent.parent
-    if str(template_parent) not in sys.path:
-        sys.path.insert(0, str(template_parent))
     module_name = f"_tl_template_{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, str(path))
     if spec is None or spec.loader is None:
@@ -413,11 +437,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Scan all .py files for descriptors.
     all_descriptors: list[VKernelDescriptor] = []
-    for py_path in sorted(template_dir.glob("*.py")):
-        mod = _import_py_file(py_path)
-        if mod is None:
-            continue
-        all_descriptors.extend(_find_descriptors(mod))
+    with _template_import_context(template_dir):
+        for py_path in sorted(template_dir.glob("*.py")):
+            mod = _import_py_file(py_path)
+            if mod is None:
+                continue
+            all_descriptors.extend(_find_descriptors(mod))
 
     if not all_descriptors:
         print(f"expand_helper: error: no @vkernel descriptors found in {template_dir}", file=sys.stderr)

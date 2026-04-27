@@ -8,6 +8,9 @@
 
 import tempfile
 import unittest
+import io
+import sys
+from contextlib import redirect_stderr
 from unittest import mock
 from importlib import util
 from pathlib import Path
@@ -300,6 +303,313 @@ class TileLangDSLPackageTests(unittest.TestCase):
 
 
 class TileLangDSLExpandHelperTests(unittest.TestCase):
+    def test_cross_file_inline_proc_direct_import_materializes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared_name = "shared_cross_file_positive_unique"
+            (root / f"{shared_name}.py").write_text(
+                """
+import tilelang_dsl as pto
+
+@pto.inline_proc
+def shared_touch():
+    return
+""",
+                encoding="utf-8",
+            )
+            template_path = root / "cross_file_positive_template_unique.py"
+            template_path.write_text(
+                f"""
+import tilelang_dsl as pto
+from {shared_name} import shared_touch
+
+@pto.vkernel(op="pto.cross_file_positive_unique", dtypes=[(pto.f32,)])
+def kernel(src: pto.Tile):
+    shared_touch()
+    return
+""",
+                encoding="utf-8",
+            )
+
+            with expand_helper._template_import_context(root):
+                mod = expand_helper._import_py_file(template_path)
+            self.assertIsNotNone(mod)
+            desc = expand_helper._find_descriptors(mod)[0]
+            self.assertIn("shared_touch", desc.inline_procs)
+
+            specialized = desc.specialize(
+                src=pto.TileSpecialization(shape=(1, 64), memory_space=pto.MemorySpace.UB)
+            )
+            frontend = build_frontend_kernel_node(specialized)
+            self.assertIn("shared_touch", {proc.name for proc in frontend.inline_procs})
+
+            text = specialized.mlir_text()
+            self.assertRegex(text, r"func\.call @__tl_inline_shared_touch_")
+            self.assertRegex(text, r"func\.func private @__tl_inline_shared_touch_")
+            self.assertIn("pto.tilelang.inline_proc", text)
+
+    def test_cross_file_inline_proc_package_import_materializes_without_leaking_sys_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_root = Path(tmpdir)
+            template_dir = package_root / "TileOps"
+            template_dir.mkdir()
+            (template_dir / "__init__.py").write_text("", encoding="utf-8")
+
+            shared_name = "shared_cross_file_package_unique"
+            (template_dir / f"{shared_name}.py").write_text(
+                """
+import tilelang_dsl as pto
+
+@pto.inline_proc
+def shared_touch():
+    return
+""",
+                encoding="utf-8",
+            )
+            template_path = template_dir / "cross_file_package_template_unique.py"
+            template_path.write_text(
+                f"""
+import tilelang_dsl as pto
+from TileOps.{shared_name} import shared_touch
+
+@pto.vkernel(op="pto.cross_file_package_unique", dtypes=[(pto.f32,)])
+def kernel(src: pto.Tile):
+    shared_touch()
+    return
+""",
+                encoding="utf-8",
+            )
+
+            before_counts = {
+                str(template_dir): sys.path.count(str(template_dir)),
+                str(package_root): sys.path.count(str(package_root)),
+            }
+            with expand_helper._template_import_context(template_dir):
+                self.assertGreaterEqual(
+                    sys.path.count(str(template_dir)),
+                    before_counts[str(template_dir)] + 1,
+                )
+                self.assertGreaterEqual(
+                    sys.path.count(str(package_root)),
+                    before_counts[str(package_root)] + 1,
+                )
+                mod = expand_helper._import_py_file(template_path)
+            self.assertIsNotNone(mod)
+            self.assertEqual(sys.path.count(str(template_dir)), before_counts[str(template_dir)])
+            self.assertEqual(sys.path.count(str(package_root)), before_counts[str(package_root)])
+
+            desc = expand_helper._find_descriptors(mod)[0]
+            self.assertIn("shared_touch", desc.inline_procs)
+
+            specialized = desc.specialize(
+                src=pto.TileSpecialization(shape=(1, 64), memory_space=pto.MemorySpace.UB)
+            )
+            frontend = build_frontend_kernel_node(specialized)
+            self.assertIn("shared_touch", {proc.name for proc in frontend.inline_procs})
+
+            text = specialized.mlir_text()
+            self.assertRegex(text, r"func\.call @__tl_inline_shared_touch_")
+            self.assertRegex(text, r"func\.func private @__tl_inline_shared_touch_")
+            self.assertIn("pto.tilelang.inline_proc", text)
+
+    def test_cross_file_inline_proc_collects_shared_helper_callees(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared_name = "shared_cross_file_nested_unique"
+            (root / f"{shared_name}.py").write_text(
+                """
+import tilelang_dsl as pto
+
+@pto.inline_proc
+def shared_leaf():
+    return
+
+@pto.inline_proc
+def shared_entry():
+    shared_leaf()
+    return
+""",
+                encoding="utf-8",
+            )
+            template_path = root / "cross_file_nested_template_unique.py"
+            template_path.write_text(
+                f"""
+import tilelang_dsl as pto
+from {shared_name} import shared_entry
+
+@pto.vkernel(op="pto.cross_file_nested_unique", dtypes=[(pto.f32,)])
+def kernel(src: pto.Tile):
+    shared_entry()
+    return
+""",
+                encoding="utf-8",
+            )
+
+            with expand_helper._template_import_context(root):
+                mod = expand_helper._import_py_file(template_path)
+            self.assertIsNotNone(mod)
+            desc = expand_helper._find_descriptors(mod)[0]
+            self.assertIn("shared_entry", desc.inline_procs)
+            self.assertIn("shared_leaf", desc.inline_procs)
+
+            specialized = desc.specialize(
+                src=pto.TileSpecialization(shape=(1, 64), memory_space=pto.MemorySpace.UB)
+            )
+            frontend = build_frontend_kernel_node(specialized)
+            self.assertEqual(
+                {proc.name for proc in frontend.inline_procs},
+                {"shared_entry", "shared_leaf"},
+            )
+
+            text = specialized.mlir_text()
+            self.assertRegex(text, r"func\.call @__tl_inline_shared_entry_")
+            self.assertRegex(text, r"func\.func private @__tl_inline_shared_entry_")
+            self.assertRegex(text, r"func\.func private @__tl_inline_shared_leaf_")
+
+    def test_cross_file_imported_plain_function_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared_name = "shared_cross_file_plain_unique"
+            (root / f"{shared_name}.py").write_text(
+                """
+def plain_helper():
+    return
+""",
+                encoding="utf-8",
+            )
+            template_path = root / "cross_file_plain_template_unique.py"
+            template_path.write_text(
+                f"""
+import tilelang_dsl as pto
+from {shared_name} import plain_helper
+
+@pto.vkernel(op="pto.cross_file_plain_unique", dtypes=[(pto.f32,)])
+def kernel(src: pto.Tile):
+    plain_helper()
+    return
+""",
+                encoding="utf-8",
+            )
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr), expand_helper._template_import_context(root):
+                mod = expand_helper._import_py_file(template_path)
+
+        self.assertIsNone(mod)
+        self.assertIn(
+            "arbitrary external call `plain_helper` is not supported",
+            stderr.getvalue(),
+        )
+
+    def test_cross_file_inline_proc_negative_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recursive_name = "shared_cross_file_recursive_unique"
+            (root / f"{recursive_name}.py").write_text(
+                """
+import tilelang_dsl as pto
+
+@pto.inline_proc
+def shared_recur():
+    shared_recur()
+    return
+""",
+                encoding="utf-8",
+            )
+            recursive_template = root / "cross_file_recursive_template_unique.py"
+            recursive_template.write_text(
+                f"""
+import tilelang_dsl as pto
+from {recursive_name} import shared_recur
+
+@pto.vkernel(op="pto.cross_file_recursive_unique", dtypes=[(pto.f32,)])
+def kernel(src: pto.Tile):
+    shared_recur()
+    return
+""",
+                encoding="utf-8",
+            )
+            with expand_helper._template_import_context(root):
+                recursive_mod = expand_helper._import_py_file(recursive_template)
+            self.assertIsNotNone(recursive_mod)
+            recursive_desc = expand_helper._find_descriptors(recursive_mod)[0]
+            with self.assertRaises(pto.TileLangFrontendError) as recursive_ctx:
+                recursive_desc.specialize(
+                    src=pto.TileSpecialization(shape=(1, 64), memory_space=pto.MemorySpace.UB)
+                ).mlir_text()
+            self.assertIn("recursive inline_proc call `shared_recur`", str(recursive_ctx.exception))
+
+            capture_name = "shared_cross_file_capture_unique"
+            (root / f"{capture_name}.py").write_text(
+                """
+import tilelang_dsl as pto
+
+scale = object()
+
+@pto.inline_proc
+def shared_capture():
+    value = scale
+    return
+""",
+                encoding="utf-8",
+            )
+            capture_template = root / "cross_file_capture_template_unique.py"
+            capture_template.write_text(
+                f"""
+import tilelang_dsl as pto
+from {capture_name} import shared_capture
+
+@pto.vkernel(op="pto.cross_file_capture_unique", dtypes=[(pto.f32,)])
+def kernel(src: pto.Tile):
+    shared_capture()
+    return
+""",
+                encoding="utf-8",
+            )
+            with expand_helper._template_import_context(root):
+                capture_mod = expand_helper._import_py_file(capture_template)
+            self.assertIsNotNone(capture_mod)
+            capture_desc = expand_helper._find_descriptors(capture_mod)[0]
+            with self.assertRaises(pto.TileLangFrontendError) as capture_ctx:
+                capture_desc.specialize(
+                    src=pto.TileSpecialization(shape=(1, 64), memory_space=pto.MemorySpace.UB)
+                ).mlir_text()
+            self.assertIn("implicit capture of 'scale' is not allowed", str(capture_ctx.exception))
+
+            conflict_name = "shared_cross_file_conflict_unique"
+            (root / f"{conflict_name}.py").write_text(
+                """
+import tilelang_dsl as pto
+
+@pto.inline_proc
+def helper():
+    return
+
+@pto.inline_proc
+def entry():
+    return
+""",
+                encoding="utf-8",
+            )
+            conflict_template = root / "cross_file_conflict_template_unique.py"
+            conflict_template.write_text(
+                f"""
+import tilelang_dsl as pto
+from {conflict_name} import entry as helper
+
+@pto.vkernel(op="pto.cross_file_conflict_unique", dtypes=[(pto.f32,)])
+def kernel(src: pto.Tile):
+    helper()
+    return
+""",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with redirect_stderr(stderr), expand_helper._template_import_context(root):
+                conflict_mod = expand_helper._import_py_file(conflict_template)
+            self.assertIsNone(conflict_mod)
+            self.assertIn("ambiguous inline_proc name `helper`", stderr.getvalue())
+
     def test_operand_specs_preserve_tile_valid_shape_and_pad_value(self) -> None:
         source = """
 import tilelang_dsl as pto

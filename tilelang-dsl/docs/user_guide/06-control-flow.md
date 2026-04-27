@@ -119,6 +119,36 @@ Important semantics:
 - Recursive/mutually-recursive helper call graphs are rejected.
 - `*args`, `**kwargs`, and keyword-only parameters are unsupported in current version.
 
+Shared helpers can live in a separate Python file in the template directory and
+be imported directly by templates:
+
+```python
+# shared_rows.py
+import tilelang_dsl as pto
+
+@pto.inline_proc
+def touch_row(dst: pto.Tile, row: pto.i32):
+    mask = pto.make_mask(dst.element_type, pto.PAT.ALL)
+    vec = pto.vlds(dst[row, 0:])
+    pto.vsts(vec, dst[row, 0:], mask)
+    return None
+
+# trow_template.py
+import tilelang_dsl as pto
+from shared_rows import touch_row
+
+@pto.vkernel(op="pto.row_touch", dtypes=[(pto.f32, pto.i32)])
+def row_touch(dst: pto.Tile, row: pto.i32):
+    touch_row(dst, row)
+    return None
+```
+
+Only directly imported `@pto.inline_proc` helpers are part of this shared-helper
+surface. Ordinary Python functions remain unsupported in DSL bodies, and
+qualified calls such as `shared_rows.touch_row(...)` are not part of this
+version. If multiple imported helpers expose the same bare name, the frontend
+rejects the template instead of choosing one by import order.
+
 ### Loops
 
 Counted loops use Python's `range` syntax:

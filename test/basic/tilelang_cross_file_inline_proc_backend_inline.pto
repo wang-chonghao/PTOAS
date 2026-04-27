@@ -1,0 +1,25 @@
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto -o - %s | FileCheck %s
+
+// Models MLIR produced by a template that imported a shared @pto.inline_proc
+// helper from another Python file. At this stage imported and local helpers use
+// the same pto.tilelang.inline_proc contract; the backend must erase the helper
+// boundary.
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @kernel(%arg0: !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>) attributes { pto.tilelang.instance } {
+    func.call @__tl_inline_shared_touch_0() : () -> ()
+    return
+  }
+
+  func.func private @__tl_inline_shared_touch_0() attributes { pto.tilelang.inline_proc } {
+    pto.vecscope {
+      %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+    }
+    return
+  }
+}
+
+// CHECK-LABEL: module
+// CHECK-NOT: func.call @__tl_inline_shared_touch
+// CHECK-NOT: func.func private @__tl_inline_shared_touch
+// CHECK-NOT: pto.tilelang.inline_proc

@@ -187,23 +187,52 @@ def _validate_inline_proc_call_surface(
         ) from exc
 
 
+def _same_inline_proc_descriptor(
+    lhs: InlineProcDescriptor,
+    rhs: InlineProcDescriptor,
+) -> bool:
+    return lhs is rhs or lhs.py_fn is rhs.py_fn
+
+
+def _format_inline_proc_origin(descriptor: InlineProcDescriptor) -> str:
+    return f"{descriptor.py_fn.__module__}.{descriptor.py_fn.__name__}"
+
+
+def _add_collected_inline_proc(
+    collected: dict[str, InlineProcDescriptor],
+    symbol: str,
+    descriptor: InlineProcDescriptor,
+) -> None:
+    existing = collected.get(symbol)
+    if existing is None:
+        collected[symbol] = descriptor
+        return
+    if _same_inline_proc_descriptor(existing, descriptor):
+        return
+    raise ValueError(
+        "ambiguous inline_proc name "
+        f"`{symbol}` in TileLang DSL module: "
+        f"{_format_inline_proc_origin(existing)} conflicts with "
+        f"{_format_inline_proc_origin(descriptor)}"
+    )
+
+
 def _collect_inline_procs(module_name: str) -> tuple[tuple[str, InlineProcDescriptor], ...]:
-    collected: dict[str, InlineProcDescriptor] = {
-        symbol: descriptor
-        for (registered_module, symbol), descriptor in _INLINE_PROC_REGISTRY.items()
-        if registered_module == module_name
-    }
+    collected: dict[str, InlineProcDescriptor] = {}
+    for (registered_module, symbol), descriptor in _INLINE_PROC_REGISTRY.items():
+        if registered_module == module_name:
+            _add_collected_inline_proc(collected, symbol, descriptor)
 
     module = sys.modules.get(module_name)
     if module is not None:
         for symbol, value in vars(module).items():
             if not isinstance(value, InlineProcDescriptor):
                 continue
-            collected.setdefault(symbol, value)
+            _add_collected_inline_proc(collected, symbol, value)
             origin_module = value.py_fn.__module__
             for (registered_module, helper_name), helper in _INLINE_PROC_REGISTRY.items():
                 if registered_module == origin_module:
-                    collected.setdefault(helper_name, helper)
+                    _add_collected_inline_proc(collected, helper_name, helper)
 
     return tuple(sorted(collected.items(), key=lambda item: item[0]))
 
