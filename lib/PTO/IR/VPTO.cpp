@@ -184,6 +184,18 @@ static bool isLoadAlignProducer(Operation *op) {
   return isa<VldasOp, VldusOp>(op);
 }
 
+static scf::IfOp getEnclosingBranchIf(Operation *op) {
+  for (Operation *cursor = op; cursor; cursor = cursor->getParentOp()) {
+    auto ifOp = dyn_cast<scf::IfOp>(cursor);
+    if (!ifOp)
+      continue;
+    Region *parentRegion = op->getParentRegion();
+    if (parentRegion == &ifOp.getThenRegion() || parentRegion == &ifOp.getElseRegion())
+      return ifOp;
+  }
+  return nullptr;
+}
+
 static bool isValueOwnedByRegion(Value value, Region *region) {
   if (auto blockArg = dyn_cast<BlockArgument>(value))
     return blockArg.getParentRegion() == region;
@@ -192,9 +204,11 @@ static bool isValueOwnedByRegion(Value value, Region *region) {
   return false;
 }
 
-static FailureOr<Value> resolveStoreAlignRoot(Value value, Operation *user) {
-  llvm::SmallPtrSet<void *, 8> visited;
-  Value current = value;
+static FailureOr<Value> resolveStoreAlignRoot(Value value, Operation *user);
+static FailureOr<Value> resolveLoadAlignRoot(Value value, Operation *user);
+
+static FailureOr<Value> resolveStoreAlignRootImpl(
+    Value current, llvm::SmallPtrSet<void *, 8> visited) {
 
   while (true) {
     if (!visited.insert(current.getAsOpaquePointer()).second) {
@@ -218,8 +232,20 @@ static FailureOr<Value> resolveStoreAlignRoot(Value value, Operation *user) {
     }
 
     if (Operation *def = current.getDefiningOp()) {
-      if (isStoreAlignProducer(def))
+      if (isa<InitAlignOp>(def))
         return current;
+      if (auto stateOp = dyn_cast<PstuOp>(def)) {
+        current = stateOp.getAlignIn();
+        continue;
+      }
+      if (auto stateOp = dyn_cast<VstusOp>(def)) {
+        current = stateOp.getAlignIn();
+        continue;
+      }
+      if (auto stateOp = dyn_cast<VsturOp>(def)) {
+        current = stateOp.getAlignIn();
+        continue;
+      }
       if (auto forOp = dyn_cast<scf::ForOp>(def)) {
         auto result = dyn_cast<OpResult>(current);
         if (!result)
@@ -230,10 +256,34 @@ static FailureOr<Value> resolveStoreAlignRoot(Value value, Operation *user) {
         current = forOp.getYieldedValues()[resultIdx];
         continue;
       }
+      if (auto ifOp = dyn_cast<scf::IfOp>(def)) {
+        auto result = dyn_cast<OpResult>(current);
+        if (!result || !ifOp.elseBlock())
+          return failure();
+        unsigned resultIdx = result.getResultNumber();
+        auto thenYield = dyn_cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
+        auto elseYield = dyn_cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator());
+        if (!thenYield || !elseYield || resultIdx >= thenYield.getNumOperands() ||
+            resultIdx >= elseYield.getNumOperands()) {
+          return failure();
+        }
+        FailureOr<Value> thenRoot =
+            resolveStoreAlignRootImpl(thenYield.getOperand(resultIdx), visited);
+        FailureOr<Value> elseRoot =
+            resolveStoreAlignRootImpl(elseYield.getOperand(resultIdx), visited);
+        if (failed(thenRoot) || failed(elseRoot) || *thenRoot != *elseRoot)
+          return failure();
+        return *thenRoot;
+      }
     }
 
     return failure();
   }
+}
+
+static FailureOr<Value> resolveStoreAlignRoot(Value value, Operation *user) {
+  (void)user;
+  return resolveStoreAlignRootImpl(value, {});
 }
 
 static LogicalResult verifyStoreAlignLoopThreading(Value align, Operation *user,
@@ -241,6 +291,8 @@ static LogicalResult verifyStoreAlignLoopThreading(Value align, Operation *user,
   Operation *cursor = user;
   while (auto forOp = cursor->getParentOfType<scf::ForOp>()) {
     Region *body = &forOp.getRegion();
+    if (isValueOwnedByRegion(align, body))
+      return success();
     if (!isValueOwnedByRegion(align, body)) {
       return user->emitOpError()
              << roleDescription
@@ -252,6 +304,17 @@ static LogicalResult verifyStoreAlignLoopThreading(Value align, Operation *user,
   return success();
 }
 
+static FailureOr<Value> resolveSingleAlignIfResult(scf::IfOp ifOp) {
+  SmallVector<unsigned> alignResultIndices;
+  for (auto [index, type] : llvm::enumerate(ifOp.getResultTypes())) {
+    if (isa<AlignType>(type))
+      alignResultIndices.push_back(index);
+  }
+  if (alignResultIndices.size() != 1)
+    return failure();
+  return ifOp.getResult(alignResultIndices.front());
+}
+
 static LogicalResult verifyStoreAlignLinearUses(Value value, Operation *user) {
   llvm::SmallPtrSet<void *, 16> visited;
   Value current = value;
@@ -259,23 +322,28 @@ static LogicalResult verifyStoreAlignLinearUses(Value value, Operation *user) {
   while (visited.insert(current.getAsOpaquePointer()).second) {
     SmallVector<Value> nextValues;
     SmallVector<Operation *> terminalUsers;
+    SmallVector<Operation *> branchUsers;
 
     for (OpOperand &use : current.getUses()) {
       Operation *owner = use.getOwner();
       if (isStoreAlignSink(owner)) {
         terminalUsers.push_back(owner);
+        branchUsers.push_back(owner);
         continue;
       }
       if (auto stateOp = dyn_cast<PstuOp>(owner)) {
         nextValues.push_back(stateOp.getAlignOut());
+        branchUsers.push_back(owner);
         continue;
       }
       if (auto stateOp = dyn_cast<VstusOp>(owner)) {
         nextValues.push_back(stateOp.getAlignOut());
+        branchUsers.push_back(owner);
         continue;
       }
       if (auto stateOp = dyn_cast<VsturOp>(owner)) {
         nextValues.push_back(stateOp.getAlignOut());
+        branchUsers.push_back(owner);
         continue;
       }
       if (auto forOp = dyn_cast<scf::ForOp>(owner)) {
@@ -307,6 +375,27 @@ static LogicalResult verifyStoreAlignLinearUses(Value value, Operation *user) {
     }
 
     if (nextValues.size() + terminalUsers.size() > 1) {
+      scf::IfOp commonIf;
+      for (Operation *branchUser : branchUsers) {
+        scf::IfOp enclosingIf = getEnclosingBranchIf(branchUser);
+        if (!enclosingIf) {
+          commonIf = nullptr;
+          break;
+        }
+        if (!commonIf)
+          commonIf = enclosingIf;
+        else if (commonIf != enclosingIf) {
+          commonIf = nullptr;
+          break;
+        }
+      }
+      if (commonIf) {
+        FailureOr<Value> mergedValue = resolveSingleAlignIfResult(commonIf);
+        if (succeeded(mergedValue)) {
+          current = *mergedValue;
+          continue;
+        }
+      }
       return user->emitOpError()
              << "!pto.align value must form a single linear store-state chain";
     }
@@ -355,9 +444,8 @@ static LogicalResult verifyStoreAlignChain(Value align, Operation *user,
   return verifyStoreAlignLinearUses(*root, user);
 }
 
-static FailureOr<Value> resolveLoadAlignRoot(Value value, Operation *user) {
-  llvm::SmallPtrSet<void *, 8> visited;
-  Value current = value;
+static FailureOr<Value> resolveLoadAlignRootImpl(
+    Value current, llvm::SmallPtrSet<void *, 8> visited) {
 
   while (true) {
     if (!visited.insert(current.getAsOpaquePointer()).second)
@@ -380,8 +468,12 @@ static FailureOr<Value> resolveLoadAlignRoot(Value value, Operation *user) {
     }
 
     if (Operation *def = current.getDefiningOp()) {
-      if (isLoadAlignProducer(def))
+      if (isa<VldasOp>(def))
         return current;
+      if (auto stateOp = dyn_cast<VldusOp>(def)) {
+        current = stateOp.getAlign();
+        continue;
+      }
       if (auto forOp = dyn_cast<scf::ForOp>(def)) {
         auto result = dyn_cast<OpResult>(current);
         if (!result)
@@ -392,10 +484,34 @@ static FailureOr<Value> resolveLoadAlignRoot(Value value, Operation *user) {
         current = forOp.getYieldedValues()[resultIdx];
         continue;
       }
+      if (auto ifOp = dyn_cast<scf::IfOp>(def)) {
+        auto result = dyn_cast<OpResult>(current);
+        if (!result || !ifOp.elseBlock())
+          return failure();
+        unsigned resultIdx = result.getResultNumber();
+        auto thenYield = dyn_cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
+        auto elseYield = dyn_cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator());
+        if (!thenYield || !elseYield || resultIdx >= thenYield.getNumOperands() ||
+            resultIdx >= elseYield.getNumOperands()) {
+          return failure();
+        }
+        FailureOr<Value> thenRoot =
+            resolveLoadAlignRootImpl(thenYield.getOperand(resultIdx), visited);
+        FailureOr<Value> elseRoot =
+            resolveLoadAlignRootImpl(elseYield.getOperand(resultIdx), visited);
+        if (failed(thenRoot) || failed(elseRoot) || *thenRoot != *elseRoot)
+          return failure();
+        return *thenRoot;
+      }
     }
 
     return failure();
   }
+}
+
+static FailureOr<Value> resolveLoadAlignRoot(Value value, Operation *user) {
+  (void)user;
+  return resolveLoadAlignRootImpl(value, {});
 }
 
 static LogicalResult verifyLoadAlignLoopThreading(Value align, Operation *user,
@@ -403,6 +519,8 @@ static LogicalResult verifyLoadAlignLoopThreading(Value align, Operation *user,
   Operation *cursor = user;
   while (auto forOp = cursor->getParentOfType<scf::ForOp>()) {
     Region *body = &forOp.getRegion();
+    if (isValueOwnedByRegion(align, body))
+      return success();
     if (!isValueOwnedByRegion(align, body)) {
       return user->emitOpError()
              << roleDescription
@@ -420,11 +538,13 @@ static LogicalResult verifyLoadAlignLinearUses(Value value, Operation *user) {
 
   while (visited.insert(current.getAsOpaquePointer()).second) {
     SmallVector<Value> nextValues;
+    SmallVector<Operation *> branchUsers;
 
     for (OpOperand &use : current.getUses()) {
       Operation *owner = use.getOwner();
       if (auto stateOp = dyn_cast<VldusOp>(owner)) {
         nextValues.push_back(stateOp.getUpdatedAlign());
+        branchUsers.push_back(owner);
         continue;
       }
       if (auto forOp = dyn_cast<scf::ForOp>(owner)) {
@@ -460,6 +580,27 @@ static LogicalResult verifyLoadAlignLinearUses(Value value, Operation *user) {
     }
 
     if (nextValues.size() > 1) {
+      scf::IfOp commonIf;
+      for (Operation *branchUser : branchUsers) {
+        scf::IfOp enclosingIf = getEnclosingBranchIf(branchUser);
+        if (!enclosingIf) {
+          commonIf = nullptr;
+          break;
+        }
+        if (!commonIf)
+          commonIf = enclosingIf;
+        else if (commonIf != enclosingIf) {
+          commonIf = nullptr;
+          break;
+        }
+      }
+      if (commonIf) {
+        FailureOr<Value> mergedValue = resolveSingleAlignIfResult(commonIf);
+        if (succeeded(mergedValue)) {
+          current = *mergedValue;
+          continue;
+        }
+      }
       return user->emitOpError()
              << "!pto.align value must form a single linear load-state chain";
     }

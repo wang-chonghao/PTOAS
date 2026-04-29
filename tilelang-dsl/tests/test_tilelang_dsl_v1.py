@@ -6844,6 +6844,50 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
         self.assertIn("scf.for %lane_", text)
         self.assertIn("pto.barrier #pto.pipe<PIPE_ALL>", text)
 
+    def test_if_else_with_two_merged_bindings_lowers_to_multi_result_scf_if(self) -> None:
+        @pto.vkernel(op="eltwise", dtypes=[(pto.f32, pto.i32)], advanced=True)
+        def kernel(tile: pto.Tile, flag: pto.i32):
+            step = 64
+            upper = 256
+            if flag:
+                step = 32
+                upper = upper - step
+            else:
+                step = 64
+                upper = 128
+            with pto.strict_vecscope(tile, tile, 0, upper, step) as (src, dst, lb, ub, vec_step):
+                for lane in range(lb, ub, vec_step):
+                    mask = pto.make_mask(pto.f32, pto.PAT.ALL)
+                    vec = pto.vlds(src, lane)
+                    pto.vsts(vec, dst, lane, mask)
+            return None
+
+        specialized = kernel.specialize(
+            tile=pto.TileSpecialization(
+                shape=(16, 16),
+                memory_space=pto.MemorySpace.UB,
+            )
+        )
+
+        semantic_kernel = analyze_frontend_kernel(build_frontend_kernel_node(specialized))
+        if_stmt = next(stmt for stmt in semantic_kernel.body if isinstance(stmt, SemanticIfStmt))
+        self.assertIsInstance(if_stmt, SemanticIfStmt)
+        self.assertEqual([result.result_binding.name for result in if_stmt.results], ["step", "upper"])
+
+        text = specialized.mlir_text()
+        self.assertRegex(
+            text,
+            r"%step_\d+, %upper_\d+ = scf\.if %tmp_\d+ -> \(index, index\) \{",
+        )
+        self.assertRegex(
+            text,
+            r"scf\.yield %step_\d+, %upper_\d+ : index, index",
+        )
+        self.assertRegex(
+            text,
+            r"pto\.strict_vecscope\(%tmp_\d+, %tmp_\d+, %c0, %upper_\d+, %step_\d+\)",
+        )
+
     def test_extended_sync_buffer_ops_lower_to_authoring_surface(self) -> None:
         Pipe = pto.Pipe
         Event = pto.Event

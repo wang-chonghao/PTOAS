@@ -2431,40 +2431,56 @@ class _AuthoringRenderer:
             lines.append(self._indent(indent) + "}")
             return lines
 
-        if len(stmt.results) != 1:
-            raise NotImplementedError(
-                "TileLang DSL v1 lowering currently supports at most one merged if/else binding"
-            )
-
-        result = stmt.results[0]
         lines = list(cond_lines)
+        result_names = ", ".join(result.result_binding.ssa_name for result in stmt.results)
+        result_types = ", ".join(
+            self._render_type(result.result_binding.type) for result in stmt.results
+        )
         lines.append(
             self._indent(indent)
-            + f"{result.result_binding.ssa_name} = scf.if {condition.name} -> "
-            + f"({self._render_type(result.result_binding.type)}) {{"
+            + f"{result_names} = scf.if {condition.name} -> ({result_types}) {{"
         )
         lines.extend(self._render_block(stmt.then_body, then_env, indent=indent + 2))
-        then_value = then_env.get(result.result_binding.name, then_env.get(result.then_binding.name))
-        if then_value is None:
-            then_value = _RenderedValue(result.then_binding.ssa_name, result.then_binding.type)
+        then_values = []
+        for result in stmt.results:
+            then_value = then_env.get(
+                result.result_binding.name,
+                then_env.get(result.then_binding.name),
+            )
+            if then_value is None:
+                then_value = _RenderedValue(result.then_binding.ssa_name, result.then_binding.type)
+            then_values.append(then_value)
         lines.append(
             self._indent(indent + 2)
-            + f"scf.yield {then_value.name} : {self._render_type(then_value.type)}"
+            + "scf.yield "
+            + ", ".join(value.name for value in then_values)
+            + " : "
+            + ", ".join(self._render_type(value.type) for value in then_values)
         )
         lines.append(self._indent(indent) + "} else {")
         lines.extend(self._render_block(stmt.else_body, else_env, indent=indent + 2))
-        else_value = else_env.get(result.result_binding.name, else_env.get(result.else_binding.name))
-        if else_value is None:
-            else_value = _RenderedValue(result.else_binding.ssa_name, result.else_binding.type)
+        else_values = []
+        for result in stmt.results:
+            else_value = else_env.get(
+                result.result_binding.name,
+                else_env.get(result.else_binding.name),
+            )
+            if else_value is None:
+                else_value = _RenderedValue(result.else_binding.ssa_name, result.else_binding.type)
+            else_values.append(else_value)
         lines.append(
             self._indent(indent + 2)
-            + f"scf.yield {else_value.name} : {self._render_type(else_value.type)}"
+            + "scf.yield "
+            + ", ".join(value.name for value in else_values)
+            + " : "
+            + ", ".join(self._render_type(value.type) for value in else_values)
         )
         lines.append(self._indent(indent) + "}")
-        env[result.result_binding.name] = _RenderedValue(
-            name=result.result_binding.ssa_name,
-            type=result.result_binding.type,
-        )
+        for result in stmt.results:
+            env[result.result_binding.name] = _RenderedValue(
+                name=result.result_binding.ssa_name,
+                type=result.result_binding.type,
+            )
         return lines
 
     def _lower_condition(
