@@ -121,7 +121,7 @@ pto.dma_store %ub_in, %gm_out, %len_burst
 - **syntax:**
 ```mlir
 pto.dma_copy %ub_src, %dst, %len_burst
-  nburst(%n_burst, %src_stride, %dst_stride)
+  nburst(%n_burst, %src_gap, %dst_gap)
   : !pto.ptr<T, ub>, !pto.ptr<T, ub|mat>, i64, i64, i64, i64
 ```
 - **semantics:** Grouped UB→destination raw copy. When `%dst` is in UB, the transfer is UB→UB. When `%dst` is in MAT/CBUF, the transfer is UB→CBUF.
@@ -133,18 +133,18 @@ pto.dma_copy %ub_src, %dst, %len_burst
 | `%ub_src` | ptr | UB source pointer (`!pto.ptr<T, ub>`, 32B-aligned) |
 | `%dst` | ptr | Destination pointer (`!pto.ptr<T, ub>` or `!pto.ptr<T, mat>`, 32B-aligned) |
 | `%len_burst` | 16 bits | Burst length in units of 32 bytes |
-| `nburst(%n_burst, %src_stride, %dst_stride)` | 16 bits / 16 bits / 16 bits | Required copy burst group: count, source step field, destination step field |
+| `nburst(%n_burst, %src_gap, %dst_gap)` | 16 bits / 16 bits / 16 bits | Required copy burst group: count, source gap, destination gap |
 
 **Constraints:**
 
 - UB source and destination addresses must be 32B-aligned.
-- `%len_burst`, `%src_stride`, and `%dst_stride` are encoded in units of 32 bytes.
+- `%len_burst`, `%src_gap`, and `%dst_gap` are encoded in units of 32 bytes.
 
 **Example:**
 
 ```mlir
 pto.dma_copy %ub_src, %dst, %len32b
-  nburst(%rows, %src_stride, %dst_stride)
+  nburst(%rows, %src_gap, %dst_gap)
   : !pto.ptr<i16, ub>, !pto.ptr<i16, ub|mat>, i64, i64, i64, i64
 ```
 
@@ -185,11 +185,11 @@ For `pto.dma_copy`, each burst copies `len_burst * 32` bytes.
 The next burst starts at:
 
 ```text
-src_next = src_curr + (len_burst + src_stride) * 32 bytes
-dst_next = dst_curr + (len_burst + dst_stride) * 32 bytes
+src_next = src_curr + (len_burst + src_gap) * 32 bytes
+dst_next = dst_curr + (len_burst + dst_gap) * 32 bytes
 ```
 
-So `src_stride` and `dst_stride` are step fields that advance to the next burst
+So `src_gap` and `dst_gap` are gap fields that advance to the next burst
 after the copied 32B blocks.
 
 ### 2D Diagram: GM→UB (`pto.dma_load`)

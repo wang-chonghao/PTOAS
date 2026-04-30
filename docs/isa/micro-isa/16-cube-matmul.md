@@ -1,116 +1,11 @@
 # 16. Cube Matrix Multiply (MAT)
 
-> **Category:** Cube unit — GM/L1 staging, L0A/L0B loads, L0C accumulate, and matrix-side side-buffer moves
+> **Category:** Cube unit ops — staged load/store and matrix multiply
+> **Raw-op reference:** See `16-cube-matmul-raw.md` for low-level bridge/raw ops
 
 ---
 
-## Core Data Path Ops
-
-### `pto.copy_gm_to_cbuf`
-
-- **syntax:**
-```mlir
-pto.copy_gm_to_cbuf %src, %dst, %n_burst, %len_burst, %src_stride, %dst_stride
-  : !pto.ptr<T, gm>, !pto.ptr<T, mat>, i64, i64, i64, i64
-```
-- **semantics:** Copy matrix tile data from GM to L1 (`cbuf`).
-
-**Parameter Table:**
-
-| Parameter | Width | Description |
-|-----------|-------|-------------|
-| `%src` | ptr | GM source pointer (`!pto.ptr<T, gm>`) |
-| `%dst` | ptr | L1 destination pointer (`!pto.ptr<T, mat>`) |
-| `%n_burst` | i64 | Burst count |
-| `%len_burst` | i64 | Bytes per burst row |
-| `%src_stride` | i64 | Source row stride |
-| `%dst_stride` | i64 | Destination row stride |
-
-**Constraints:**
-
-- Source/destination element types must match.
-- Address spaces must be `gm -> mat`.
-
-**Example:**
-
-```mlir
-pto.copy_gm_to_cbuf %a_gm, %l1_a, %c1_i64, %c16_i64, %c0_i64, %c0_i64
-  : !pto.ptr<f16, gm>, !pto.ptr<f16, mat>, i64, i64, i64, i64
-```
-
----
-
-### `pto.load_cbuf_to_ca`
-
-- **syntax:**
-```mlir
-pto.load_cbuf_to_ca %src, %dst, %m_start, %k_start, %m_step, %k_step, %src_stride, %dst_stride
-  : !pto.ptr<T, mat>, !pto.ptr<T, left>, i64, i64, i64, i64, i64, i64
-```
-- **semantics:** Load L1 (`cbuf`) tile to L0A.
-
-**Parameter Table:**
-
-| Parameter | Width | Description |
-|-----------|-------|-------------|
-| `%src` | ptr | L1 source pointer (`!pto.ptr<T, mat>`) |
-| `%dst` | ptr | L0A destination pointer (`!pto.ptr<T, left>`) |
-| `%m_start` | i64 | M start index |
-| `%k_start` | i64 | K start index |
-| `%m_step` | i64 | M step |
-| `%k_step` | i64 | K step |
-| `%src_stride` | i64 | Source stride control |
-| `%dst_stride` | i64 | Destination stride control |
-
-**Constraints:**
-
-- Address spaces must be `mat -> left`.
-- Optional `transpose` attribute controls transpose mode.
-
-**Example:**
-
-```mlir
-pto.load_cbuf_to_ca %l1_a, %l0a, %c0_i64, %c0_i64, %c1_i64, %c1_i64, %c1_i64, %c1_i64
-  : !pto.ptr<f16, mat>, !pto.ptr<f16, left>, i64, i64, i64, i64, i64, i64
-```
-
----
-
-### `pto.load_cbuf_to_cb`
-
-- **syntax:**
-```mlir
-pto.load_cbuf_to_cb %src, %dst, %m_start, %k_start, %m_step, %k_step, %src_stride, %dst_stride
-  : !pto.ptr<T, mat>, !pto.ptr<T, right>, i64, i64, i64, i64, i64, i64
-```
-- **semantics:** Load L1 (`cbuf`) tile to L0B.
-
-**Parameter Table:**
-
-| Parameter | Width | Description |
-|-----------|-------|-------------|
-| `%src` | ptr | L1 source pointer (`!pto.ptr<T, mat>`) |
-| `%dst` | ptr | L0B destination pointer (`!pto.ptr<T, right>`) |
-| `%m_start` | i64 | M start index |
-| `%k_start` | i64 | K start index |
-| `%m_step` | i64 | M step |
-| `%k_step` | i64 | K step |
-| `%src_stride` | i64 | Source stride control |
-| `%dst_stride` | i64 | Destination stride control |
-
-**Constraints:**
-
-- Address spaces must be `mat -> right`.
-- Optional `transpose` attribute controls transpose mode.
-
-**Example:**
-
-```mlir
-pto.load_cbuf_to_cb %l1_b, %l0b, %c0_i64, %c0_i64, %c1_i64, %c1_i64, %c1_i64, %c1_i64
-  : !pto.ptr<f16, mat>, !pto.ptr<f16, right>, i64, i64, i64, i64, i64, i64
-```
-
----
+## Wrapper-Layer Compute Ops
 
 ### `pto.mad`
 
@@ -271,213 +166,6 @@ pto.mad_mx_bias %l0a, %l0b, %l0c, %bt, %c16_i64, %c16_i64, %c64_i64
 
 ---
 
-### `pto.copy_matrix_cc_to_gm`
-
-- **syntax:**
-```mlir
-pto.copy_matrix_cc_to_gm %src, %dst, %xm, %xt
-  : !pto.ptr<T, acc>, !pto.ptr<T, gm>, i64, i64
-```
-- **semantics:** Write L0C (`acc`) tile back to GM.
-
-**Parameter Table:**
-
-| Parameter | Width | Description |
-|-----------|-------|-------------|
-| `%src` | ptr | L0C source pointer (`acc`) |
-| `%dst` | ptr | GM destination pointer |
-| `%xm` | i64 | Matrix writeback config field |
-| `%xt` | i64 | Matrix writeback config field |
-
-**Constraints:**
-
-- Address spaces must be `acc -> gm`.
-
-**Example:**
-
-```mlir
-pto.copy_matrix_cc_to_gm %l0c, %c_gm, %xm, %xt
-  : !pto.ptr<f32, acc>, !pto.ptr<f32, gm>, i64, i64
-```
-
----
-
-### `pto.copy_matrix_cc_to_cbuf`
-
-- **syntax:**
-```mlir
-pto.copy_matrix_cc_to_cbuf %src, %dst, %config0, %config1
-  : !pto.ptr<T, acc>, !pto.ptr<T, mat>, i64, i64
-```
-- **semantics:** Move L0C (`acc`) tile to L1 (`cbuf`).
-
-**Parameter Table:** `%src`, `%dst`, `%config0`, `%config1`.
-
-**Constraints:**
-
-- Address spaces must be `acc -> mat`.
-
-**Example:**
-
-```mlir
-pto.copy_matrix_cc_to_cbuf %l0c, %l1_out, %cfg0, %cfg1
-  : !pto.ptr<f32, acc>, !pto.ptr<f32, mat>, i64, i64
-```
-
----
-
-### `pto.copy_matrix_cc_to_ub`
-
-- **syntax:**
-```mlir
-pto.copy_matrix_cc_to_ub %src, %dst, %config0, %config1
-  : !pto.ptr<T, acc>, !pto.ptr<T, ub>, i64, i64
-```
-- **semantics:** Move L0C (`acc`) tile to UB.
-
-**Parameter Table:** `%src`, `%dst`, `%config0`, `%config1`.
-
-**Constraints:**
-
-- Address spaces must be `acc -> ub`.
-
-**Example:**
-
-```mlir
-pto.copy_matrix_cc_to_ub %l0c, %ub_out, %cfg0, %cfg1
-  : !pto.ptr<f32, acc>, !pto.ptr<f32, ub>, i64, i64
-```
-
----
-
-### `pto.copy_cbuf_to_bt`
-
-- **syntax:**
-```mlir
-pto.copy_cbuf_to_bt %src, %dst, %len_burst, %n_burst, %src_gap, %dst_gap
-  : !pto.ptr<T, mat>, !pto.ptr<U, bias>, i64, i64, i64, i64
-```
-- **semantics:** Move L1 (`cbuf`) data to BT buffer.
-
-**Parameter Table:** `%src`, `%dst`, `%len_burst`, `%n_burst`, `%src_gap`, `%dst_gap`.
-
-**Constraints:**
-
-- Destination must be bias/BT address space.
-
-**Example:**
-
-```mlir
-pto.copy_cbuf_to_bt %l1_bias, %bt, %c16_i64, %c1_i64, %c0_i64, %c0_i64
-  : !pto.ptr<f16, mat>, !pto.ptr<f32, bias>, i64, i64, i64, i64
-```
-
----
-
-### `pto.copy_cbuf_to_fbuf`
-
-- **syntax:**
-```mlir
-pto.copy_cbuf_to_fbuf %src, %dst, %n_burst, %len_burst, %src_gap, %dst_gap
-  : !pto.ptr<T, mat>, !pto.ptr<T, ub>, i64, i64, i64, i64
-```
-- **semantics:** Move L1 (`cbuf`) data to FB-related destination path.
-
-**Parameter Table:** `%src`, `%dst`, `%n_burst`, `%len_burst`, `%src_gap`, `%dst_gap`.
-
-**Constraints:**
-
-- Source must be `mat` address space.
-
-**Example:**
-
-```mlir
-pto.copy_cbuf_to_fbuf %l1_src, %ub_dst, %c1_i64, %c16_i64, %c0_i64, %c0_i64
-  : !pto.ptr<f16, mat>, !pto.ptr<f16, ub>, i64, i64, i64, i64
-```
-
----
-
-### `pto.bias_load`
-
-- **syntax:**
-```mlir
-pto.bias_load %src, %dst, %len_burst
-  nburst(%count, %src_gap, %dst_gap)
-  : !pto.ptr<T, mat>, !pto.ptr<U, bias>, i64, i64, i64, i64
-```
-- **semantics:** Structured helper for L1 (`cbuf`) to bias-table load.
-
-**Parameter Table:**
-
-| Parameter | Width | Description |
-|-----------|-------|-------------|
-| `%src` | ptr | L1 source pointer (`mat`) |
-| `%dst` | ptr | Bias destination pointer (`bias`) |
-| `%len_burst` | i64 | Burst length |
-| `%count` | i64 | Burst count |
-| `%src_gap` | i64 | Source gap |
-| `%dst_gap` | i64 | Destination gap |
-
-**Constraints:**
-
-- Supported type pairs: `f32->f32`, `i32->i32`, `f16->f32`, `bf16->f32`.
-
-**Example:**
-
-```mlir
-pto.bias_load %l1_bias, %bt, %c16_i64 nburst(%c1_i64, %c0_i64, %c0_i64)
-  : !pto.ptr<f16, mat>, !pto.ptr<f32, bias>, i64, i64, i64, i64
-```
-
----
-
-### `pto.copy_gm_to_cbuf_multi_nd2nz`
-
-- **syntax:**
-```mlir
-pto.copy_gm_to_cbuf_multi_nd2nz %src, %dst, %sid, %loop1_src_stride, %l2_cache_ctrl, %n_value, %d_value, %loop4_src_stride, %smallc0_en
-  : !pto.ptr<T, gm>, !pto.ptr<T, mat>, i64, i64, i64, i64, i64, i64, i1
-```
-- **semantics:** Multi-fractal `ND2NZ` staging from GM to L1 (`cbuf`).
-
-**Parameter Table:** `%src`, `%dst`, `%sid`, `%loop1_src_stride`, `%l2_cache_ctrl`, `%n_value`, `%d_value`, `%loop4_src_stride`, `%smallc0_en`.
-
-**Constraints:**
-
-- `smallc0_en` is valid only when `d_value <= 4`.
-
-**Example:**
-
-```mlir
-pto.copy_gm_to_cbuf_multi_nd2nz %src, %dst, %sid, %l1s, %l2, %n, %d, %l4s, %small
-  : !pto.ptr<f16, gm>, !pto.ptr<f16, mat>, i64, i64, i64, i64, i64, i64, i1
-```
-
----
-
-### `pto.copy_gm_to_cbuf_multi_dn2nz`
-
-- **syntax:**
-```mlir
-pto.copy_gm_to_cbuf_multi_dn2nz %src, %dst, %sid, %loop1_src_stride, %l2_cache_ctrl, %n_value, %d_value, %loop4_src_stride, %smallc0_en
-  : !pto.ptr<T, gm>, !pto.ptr<T, mat>, i64, i64, i64, i64, i64, i64, i1
-```
-- **semantics:** Multi-fractal `DN2NZ` staging from GM to L1 (`cbuf`).
-
-**Parameter Table:** same as `pto.copy_gm_to_cbuf_multi_nd2nz`.
-
-**Constraints:** same as `pto.copy_gm_to_cbuf_multi_nd2nz`.
-
-**Example:**
-
-```mlir
-pto.copy_gm_to_cbuf_multi_dn2nz %src, %dst, %sid, %l1s, %l2, %n, %d, %l4s, %small
-  : !pto.ptr<f16, gm>, !pto.ptr<f16, mat>, i64, i64, i64, i64, i64, i64, i1
-```
-
----
-
 ## Cube Bridge Wrapper Ops
 
 ### `pto.cube_load`
@@ -558,6 +246,40 @@ pto.cube_load_frac %src, %dst, nd2nz,
   dst_group(%g, %l2s, %l3s, %l4s),
   ctrl(%l2, %small)
   : !pto.ptr<f16, gm>, !pto.ptr<f16, mat>, nd2nz, shape i64, i64, src_layout(i64), dst_group i64, i64, i64, i64, ctrl i64, i1
+```
+
+---
+
+### `pto.bias_load`
+
+- **syntax:**
+```mlir
+pto.bias_load %src, %dst, %len_burst
+  nburst(%count, %src_gap, %dst_gap)
+  : !pto.ptr<T, mat>, !pto.ptr<U, bias>, i64, i64, i64, i64
+```
+- **semantics:** Structured helper for L1 (`cbuf`) to bias-table load.
+
+**Parameter Table:**
+
+| Parameter | Width | Description |
+|-----------|-------|-------------|
+| `%src` | ptr | L1 source pointer (`mat`) |
+| `%dst` | ptr | Bias destination pointer (`bias`) |
+| `%len_burst` | i64 | Burst length |
+| `%count` | i64 | Burst count |
+| `%src_gap` | i64 | Source gap |
+| `%dst_gap` | i64 | Destination gap |
+
+**Constraints:**
+
+- Supported type pairs: `f32->f32`, `i32->i32`, `f16->f32`, `bf16->f32`.
+
+**Example:**
+
+```mlir
+pto.bias_load %l1_bias, %bt, %c16_i64 nburst(%c1_i64, %c0_i64, %c0_i64)
+  : !pto.ptr<f16, mat>, !pto.ptr<f32, bias>, i64, i64, i64, i64
 ```
 
 ---

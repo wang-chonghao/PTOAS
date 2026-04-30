@@ -7,19 +7,19 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // -----------------------------------------------------------------------------
-// case: vpto/cube-bridge-store-nz2dn-ncdhw
+// case: vpto/cube-bridge-store-nz2dn-nchw
 // family: vpto
-// target_ops: pto.cube_load, pto.left_load, pto.right_load, pto.acc_store
-// scenarios: canonical nz2dn write-back configured as an NCDHW-style store
+// target_ops: pto.cube_load, pto.left_load, pto.right_load, pto.acc_store_gm
+// scenarios: canonical nz2dn write-back configured as an NCHW-style store
 // -----------------------------------------------------------------------------
 module attributes {pto.target_arch = "a5"} {
-  func.func @cube_bridge_store_nz2dn_ncdhw_kernel(%a_gm: !pto.ptr<f16, gm>,
-                                                  %b_gm: !pto.ptr<f16, gm>,
-                                                  %c_gm: !pto.ptr<f32, gm>) {
+  func.func @cube_bridge_store_nz2dn_nchw_kernel(%a_gm: !pto.ptr<f16, gm>,
+                                                 %b_gm: !pto.ptr<f16, gm>,
+                                                 %c_gm: !pto.ptr<f32, gm>) {
     %c0_i64 = arith.constant 0 : i64
     %c1_i64 = arith.constant 1 : i64
     %c16_i64 = arith.constant 16 : i64
-    %c48_i64 = arith.constant 48 : i64
+    %c32_i64 = arith.constant 32 : i64
 
     %l1_a = pto.castptr %c0_i64 : i64 -> !pto.ptr<f16, mat>
     %l1_b = pto.castptr %c0_i64 : i64 -> !pto.ptr<f16, mat>
@@ -52,9 +52,9 @@ module attributes {pto.target_arch = "a5"} {
     pto.set_flag["PIPE_M", "PIPE_FIX", "EVENT_ID1"]
     pto.wait_flag["PIPE_M", "PIPE_FIX", "EVENT_ID1"]
 
-    pto.acc_store %l0c, %c_gm, %c16_i64, %c16_i64, %c16_i64, %c48_i64,
-                      %c0_i64, %c0_i64, %c0_i64, nz2dn(%c1_i64)
-      : !pto.ptr<f32, acc>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64, i64, i64, nz2dn(i64)
+    pto.acc_store_gm %l0c, %c_gm, %c16_i64, %c16_i64, %c16_i64, %c32_i64,
+      %c0_i64, %c0_i64, %c0_i64, %c0_i64, %c0_i64, nz2dn(%c1_i64)
+      : !pto.ptr<f32, acc>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64, i64, i64, i64, i64, nz2dn(i64)
     pto.barrier #pto.pipe<PIPE_ALL>
     return
   }
