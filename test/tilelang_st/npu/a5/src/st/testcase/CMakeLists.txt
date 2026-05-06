@@ -140,6 +140,9 @@ set(ALL_TESTCASES
     tand
     tor
     txor
+    tcmp
+    tfmod
+    trem
     tcvt
     tload
     tlrelu
