@@ -132,11 +132,11 @@ PTOAS + TileLib 已经全部打通。
 | 源类型 | 目标类型 | A5 helper 覆盖 | 备注 | TileLib是否支持 |
 |---|---|---|---|---|
 | `f16` | `f32` | 1D+2D，`vcvt + part` | type expand | `已支持` |
-| `bf16` | `f32` | 1D+2D，`vcvt + part` | type expand | |
-| `i16` | `f32` / `i32` / `u32` | 1D+2D，expand helper | widening path | |
-| `i32` | `i64` | 1D+2D，expand helper | | |
-| `u8` | `f16` / `u16` | 1D only，expand helper | 当前只看到 1D helper | |
-| `i8` | `f16` / `i16` / `i32` | 1D only，expand helper | 当前只看到 1D helper | |
+| `bf16` | `f32` | 1D+2D，`vcvt + part` | type expand | `已支持` |
+| `i16` | `f32` / `i32` / `u32` | 1D+2D，expand helper | widening path | `已支持` |
+| `i32` | `i64` | 1D+2D，expand helper | | `已支持` |
+| `u8` | `f16` / `u16` | 1D only，expand helper | 当前只看到 1D helper | `已支持` |
+| `i8` | `f16` / `i16` / `i32` | 1D only，expand helper | 当前只看到 1D helper | `已支持` |
 | `fp8_e4m3` / `fp8_e5m2` / `h8` | `f32` | 1D+2D，expand helper | source 8-bit float | |
 | `fp4_e1m2x2` / `fp4_e2m1x2` | `bf16` | 1D+2D，专用 unpack helper | 4-bit packed source | |
 
@@ -146,11 +146,11 @@ PTOAS + TileLib 已经全部打通。
 
 | 源类型 | 目标类型 | A5 helper 覆盖 | 备注 | TileLib是否支持 |
 |---|---|---|---|---|
-| `f32` | `f32` | 1D+2D，`vtrc` | 保持 `f32`，做 integer-valued float rounding | |
-| `f16` | `i32` | 1D+2D，`vcvt + part` | | |
-| `i16` | `f16` | 1D+2D，`vcvt` | | |
+| `f32` | `f32` | 1D+2D，`vtrc` | 保持 `f32`，做 integer-valued float rounding | `已支持` |
+| `f16` | `i32` | 1D+2D，`vcvt + part` | | `已支持` |
+| `i16` | `f16` | 1D+2D，`vcvt` | | `已支持` |
 | `i32` | `f32` | 1D+2D，`vcvt` | | `已支持` |
-| `i64` | `f32` | 1D+2D，`vcvt + part` | | |
+| `i64` | `f32` | 1D+2D，`vcvt + part` | | `已支持` |
 | `bf16` | `fp4_e1m2x2` / `fp4_e2m1x2` | 1D+2D，专用 packed helper | 不是普通 `vcvt` 套餐，但不吃 `sat_mode` | |
 
 #### 3.2.3 不受 `round_mode` 影响，受 `sat_mode` 影响，不需要 `NonSatTorch`
@@ -159,11 +159,11 @@ PTOAS + TileLib 已经全部打通。
 
 | 源类型 | 目标类型 | A5 helper 覆盖 | 默认 `effective_sat_mode` | 备注 | TileLib是否支持 |
 |---|---|---|---|---|---|
-| `i16` | `u8` | 1D+2D，`vcvt + part` | `ON` | | |
-| `i32` | `i16` | 1D+2D，`vcvt + part` | `OFF` | | |
-| `i32` | `u16` / `u8` | 1D+2D，`vcvt + part` | `ON` | | |
-| `u32` | `i16` / `u16` / `u8` | 1D+2D，`vcvt + part` | `ON` | | |
-| `i64` | `i32` | 1D+2D，`vcvt + part` | `OFF` | | |
+| `i16` | `u8` | 1D+2D，`vcvt + part` | `ON` | | `已支持` |
+| `i32` | `i16` | 1D+2D，`vcvt + part` | `OFF` | | `已支持` |
+| `i32` | `u16` / `u8` | 1D+2D，`vcvt + part` | `ON` | | `已支持` |
+| `u32` | `i16` / `u16` / `u8` | 1D+2D，`vcvt + part` | `ON` | | `已支持` |
+| `i64` | `i32` | 1D+2D，`vcvt + part` | `OFF` | | `已支持` |
 
 #### 3.2.4 同时受 `round_mode` 和 `sat_mode` 影响，但不需要 `NonSatTorch`
 
@@ -171,13 +171,13 @@ PTOAS + TileLib 已经全部打通。
 
 | 源类型 | 目标类型 | A5 helper 覆盖 | 默认 `effective_sat_mode` | 备注 | TileLib是否支持 |
 |---|---|---|---|---|---|
-| `f32` | `f16` / `bf16` | 1D+2D，`vcvt + part` | `ON` | 窄化 float | `f32 -> f16` 已支持 |
+| `f32` | `f16` / `bf16` | 1D+2D，`vcvt + part` | `ON` | 窄化 float | `已支持` |
 | `f32` | `i32` | 1D+2D，`vcvt` | `ON` | 当前已先打通这一类普通路径 | `已支持` |
-| `f32` | `i64` | 1D+2D，`vcvt + part` | `ON` | | |
+| `f32` | `i64` | 1D+2D，`vcvt + part` | `ON` | | `已支持` |
 | `f32` | `fp8_e4m3` / `fp8_e5m2` | 1D+2D，`vcvt + part` | `ON` | | |
-| `f16` | `u8` | 1D+2D，`vcvt + part` | `OFF` | | |
-| `bf16` | `i32` | 1D+2D，`vcvt + part` | `ON` | | |
-| `bf16` | `f16` | 1D+2D，`vcvt` | `ON` | helper 内部是 `SAT_ROUND` 顺序 | |
+| `f16` | `u8` | 1D+2D，`vcvt + part` | `OFF` | | `已支持` |
+| `bf16` | `i32` | 1D+2D，`vcvt + part` | `ON` | | `已支持` |
+| `bf16` | `f16` | 1D+2D，`vcvt` | `ON` | helper 内部是 `SAT_ROUND` 顺序 | `已支持` |
 
 #### 3.2.5 同时受 `round_mode` 和 `sat_mode` 影响，且需要 `NonSatTorch`
 
@@ -185,9 +185,9 @@ PTOAS + TileLib 已经全部打通。
 
 | 源类型 | 目标类型 | A5 helper 覆盖 | 默认 `effective_sat_mode` | `NonSatTorch` | 备注 | TileLib是否支持 |
 |---|---|---|---|---|---|---|
-| `f32` | `i16` | 1D+2D，`vcvt + part` | `OFF` | 是 | `OFF` 时走 `NonSatTorch` | |
-| `f16` | `i16` | 1D+2D，`vcvt` | `OFF` | 是 | | |
-| `f16` | `i8` | 1D+2D，`vcvt + part` | `OFF` | 是 | | |
+| `f32` | `i16` | 1D+2D，`vcvt + part` | `OFF` | 是 | `OFF` 时走 `NonSatTorch` | `已支持` |
+| `f16` | `i16` | 1D+2D，`vcvt` | `OFF` | 是 | | `已支持` |
+| `f16` | `i8` | 1D+2D，`vcvt + part` | `OFF` | 是 | | `已支持` |
 
 #### 3.2.6 专用 helper，`round_mode` 受限
 
