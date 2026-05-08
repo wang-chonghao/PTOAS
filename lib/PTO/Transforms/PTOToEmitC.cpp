@@ -5326,8 +5326,8 @@ struct PTOHistogramToEmitC : public OpConversionPattern<pto::THistogramOp> {
     Value idx = peelUnrealized(adaptor.getIdx());
     Value dst = peelUnrealized(adaptor.getDst());
 
-    auto templateArgs = rewriter.getArrayAttr(
-        {emitc::OpaqueAttr::get(ctx, op.getIsMSB() ? "true" : "false")});
+    auto templateArgs = rewriter.getArrayAttr({emitc::OpaqueAttr::get(
+        ctx, op.getIsMSB() ? "HistByte::BYTE_1" : "HistByte::BYTE_0")});
     rewriter.create<emitc::CallOpaqueOp>(
         loc, TypeRange{}, "THISTOGRAM",
         /*args=*/ArrayAttr{}, /*templateArgs=*/templateArgs,
