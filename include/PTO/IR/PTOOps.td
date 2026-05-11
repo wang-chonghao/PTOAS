@@ -1709,6 +1709,11 @@ def TPutOp : PTO_Op<"comm.tput", [
   );
   let results = (outs);
   let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $dst `,` $src `,` `buf` `(` $ping (`,` $pong^)? `)`
+    `:` type($dst) `,` type($src) `,` type($ping) (`,` type($pong)^)? `)`
+    attr-dict
+  }];
 }
 
 def TGetOp : PTO_Op<"comm.tget", [
@@ -1723,6 +1728,11 @@ def TGetOp : PTO_Op<"comm.tget", [
   );
   let results = (outs);
   let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $dst `,` $src `,` `buf` `(` $ping (`,` $pong^)? `)`
+    `:` type($dst) `,` type($src) `,` type($ping) (`,` type($pong)^)? `)`
+    attr-dict
+  }];
 }
 
 def TNotifyOp : PTO_Op<"comm.tnotify", [
@@ -1736,6 +1746,10 @@ def TNotifyOp : PTO_Op<"comm.tnotify", [
   );
   let results = (outs);
   let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $signal `,` $value `:` type($signal) `,` type($value) `)`
+    attr-dict
+  }];
 }
 
 def TWaitOp : PTO_Op<"comm.twait", [
@@ -1749,6 +1763,10 @@ def TWaitOp : PTO_Op<"comm.twait", [
   );
   let results = (outs);
   let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $signal `,` $cmpValue `:` type($signal) `,` type($cmpValue) `)`
+    attr-dict
+  }];
 }
 
 def TTestOp : PTO_Op<"comm.ttest", [
@@ -1762,6 +1780,10 @@ def TTestOp : PTO_Op<"comm.ttest", [
   );
   let results = (outs I1:$result);
   let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $signal `,` $cmpValue `:` type($signal) `,` type($cmpValue) `)`
+    attr-dict `->` type($result)
+  }];
 }
 
 def TBroadcastOp : PTO_Op<"comm.tbroadcast", [
@@ -1778,9 +1800,10 @@ def TBroadcastOp : PTO_Op<"comm.tbroadcast", [
   );
   let results = (outs);
   let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
 }
 
-def CommTGatherOp : PTO_Op<"comm.comm_tgather", [
+def CommTGatherOp : PTO_Op<"comm.tgather", [
     AttrSizedOperandSegments,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
@@ -1794,9 +1817,10 @@ def CommTGatherOp : PTO_Op<"comm.comm_tgather", [
   );
   let results = (outs);
   let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
 }
 
-def CommTScatterOp : PTO_Op<"comm.comm_tscatter", [
+def CommTScatterOp : PTO_Op<"comm.tscatter", [
     AttrSizedOperandSegments,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
@@ -1810,6 +1834,7 @@ def CommTScatterOp : PTO_Op<"comm.comm_tscatter", [
   );
   let results = (outs);
   let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
 }
 
 def TReduceOp : PTO_Op<"comm.treduce", [
@@ -1828,6 +1853,7 @@ def TReduceOp : PTO_Op<"comm.treduce", [
   );
   let results = (outs);
   let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
 }
 
 def InitializeL2G2LPipeOp : PTO_Op<"initialize_l2g2l_pipe", [
