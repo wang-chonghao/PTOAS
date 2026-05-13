@@ -32,7 +32,7 @@ def build():
             fractal_ab_size = pto.TileConfig.fractalABSize
             cfg = pto.TileBufConfigAttr.get(bl, sl, fractal_ab_size, pd, ctx)
             tile_buf_data_i32 = pto.TileBufType.get([32, 32], i32, vec, [32, 32], cfg, ctx)
-            tile_buf_idx_i32 = pto.TileBufType.get([32, 1], i32, vec, [32, 1], cfg, ctx)
+            tile_buf_idx_i32 = pto.TileBufType.get([32, 32], i32, vec, [32, 1], cfg, ctx)
 
             fn_ty = func.FunctionType.get([ptr_i32, ptr_i32, ptr_i32], [])
             with InsertionPoint(m.body):
