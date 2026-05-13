@@ -149,31 +149,57 @@ static bool isKnownUnitExtentForMGather(int64_t value) {
   return value == ShapedType::kDynamic || value == 1;
 }
 
+struct GatherScatterShapeLayoutInfo {
+  SmallVector<int64_t, 2> shape;
+  bool rowMajor = false;
+  bool colMajor = false;
+};
+
+static std::optional<GatherScatterShapeLayoutInfo>
+getGatherScatterShapeLayoutInfo(Type ty) {
+  if (auto tileTy = dyn_cast<pto::TileBufType>(ty)) {
+    ArrayRef<int64_t> validShape = tileTy.getValidShape();
+    if (validShape.size() != 2)
+      return std::nullopt;
+
+    GatherScatterShapeLayoutInfo info;
+    info.shape.assign(validShape.begin(), validShape.end());
+    int32_t blayout = tileTy.getBLayoutValueI32();
+    info.rowMajor = blayout == static_cast<int32_t>(pto::BLayout::RowMajor);
+    info.colMajor = blayout == static_cast<int32_t>(pto::BLayout::ColMajor);
+    return info;
+  }
+
+  auto memRefTy = dyn_cast<MemRefType>(ty);
+  if (!memRefTy || memRefTy.getRank() != 2)
+    return std::nullopt;
+
+  SmallVector<int64_t, 4> strides;
+  int64_t offset = ShapedType::kDynamic;
+  if (failed(getStridesAndOffset(memRefTy, strides, offset)) ||
+      strides.size() != 2)
+    return std::nullopt;
+
+  GatherScatterShapeLayoutInfo info;
+  info.shape.assign(memRefTy.getShape().begin(), memRefTy.getShape().end());
+  info.rowMajor = strides[1] == 1;
+  info.colMajor = strides[0] == 1;
+  return info;
+}
+
 static bool isRowCoalescedMGatherIndexType(Type dataTy, Type idxTy) {
-  auto dataTile = dyn_cast<pto::TileBufType>(dataTy);
-  auto idxTile = dyn_cast<pto::TileBufType>(idxTy);
-  if (!dataTile || !idxTile)
+  auto dataInfo = getGatherScatterShapeLayoutInfo(dataTy);
+  auto idxInfo = getGatherScatterShapeLayoutInfo(idxTy);
+  if (!dataInfo || !idxInfo)
     return false;
-
-  ArrayRef<int64_t> dataValid = dataTile.getValidShape();
-  ArrayRef<int64_t> idxValid = idxTile.getValidShape();
-  if (dataValid.size() != 2 || idxValid.size() != 2)
-    return false;
-
-  const bool idxRowMajor =
-      idxTile.getBLayoutValueI32() ==
-      static_cast<int32_t>(pto::BLayout::RowMajor);
-  const bool idxColMajor =
-      idxTile.getBLayoutValueI32() ==
-      static_cast<int32_t>(pto::BLayout::ColMajor);
 
   const bool rowCoalesce1xR =
-      idxRowMajor && isKnownUnitExtentForMGather(idxValid[0]) &&
-      hasCompatibleKnownExtentForMGather(idxValid[1], dataValid[0]);
+      idxInfo->rowMajor && isKnownUnitExtentForMGather(idxInfo->shape[0]) &&
+      hasCompatibleKnownExtentForMGather(idxInfo->shape[1], dataInfo->shape[0]);
   const bool rowCoalesceRx1 =
-      idxColMajor &&
-      hasCompatibleKnownExtentForMGather(idxValid[0], dataValid[0]) &&
-      isKnownUnitExtentForMGather(idxValid[1]);
+      idxInfo->colMajor &&
+      hasCompatibleKnownExtentForMGather(idxInfo->shape[0], dataInfo->shape[0]) &&
+      isKnownUnitExtentForMGather(idxInfo->shape[1]);
   return rowCoalesce1xR || rowCoalesceRx1;
 }
 
