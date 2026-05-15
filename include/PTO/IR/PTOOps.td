@@ -5557,28 +5557,29 @@ def TScatterOp: PTO_TOp<"tscatter", [
   OpPipeInterface,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
-  let summary = "TSCATTER: Scatter elements of a source tile into a destination tile using per-element indices.";
+  let summary = "TSCATTER: Scatter elements of a source tile into a destination tile using indices or a mask pattern.";
 
   let arguments = (ins
     PTODpsType:$src,
-    PTODpsType:$indexes,
-    PTODpsType:$dst
+    PTODpsType:$dst,
+    Optional<PTODpsType>:$indexes,
+    OptionalAttr<PTO_MaskPatternAttr>:$maskPattern
   );
 
   let results = (outs);
 
   let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    `ins` `(` $src `,` $indexes `:` qualified(type($src)) `,` qualified(type($indexes) ) `)`
-    `outs` `(` $dst `:` qualified(type($dst) ) `)`
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
+    bool hasIndexForm() { return static_cast<bool>(getIndexes()); }
+    bool hasMaskForm() { return static_cast<bool>(getMaskPatternAttr()); }
     ::mlir::pto::PIPE getPipe() {
+      if (hasMaskForm())
+        return ::mlir::pto::PIPE::PIPE_V;
+
       // NOTE:
-      // - On A2/A3, pto-isa TSCATTER is a scalar UB loop (PIPE_S).
+      // - On A2/A3, indexed TSCATTER lowers to a scalar UB loop (PIPE_S).
       // - On A5, pto-isa TSCATTER is vector scatter (PIPE_V).
       // We accept either `pto.target_arch=a5` or A5 `pto.device-spec`.
       auto isA5Target = [&]() -> bool {

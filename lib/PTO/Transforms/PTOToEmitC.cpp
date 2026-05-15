@@ -9674,14 +9674,24 @@ struct PTOScatterToEmitC : public OpConversionPattern<pto::TScatterOp> {
     auto loc = op.getLoc();
 
     Value src = peelUnrealized(adaptor.getSrc());
-    Value idx = peelUnrealized(adaptor.getIndexes());
     Value dst = peelUnrealized(adaptor.getDst());
 
-    SmallVector<Value, 3> operands{dst, src, idx};
-    rewriter.create<emitc::CallOpaqueOp>(
-        loc, TypeRange{}, "TSCATTER",
-        /*args=*/ArrayAttr{}, /*templateArgs=*/ArrayAttr{},
-        /*operands=*/operands);
+    if (auto mp = op.getMaskPatternAttr()) {
+      auto *ctx = rewriter.getContext();
+      auto targs = rewriter.getArrayAttr({
+          emitc::OpaqueAttr::get(ctx, maskPatternTok(mp)),
+      });
+      rewriter.create<emitc::CallOpaqueOp>(
+          loc, TypeRange{}, "TSCATTER",
+          /*args=*/ArrayAttr{}, /*templateArgs=*/targs,
+          /*operands=*/ValueRange{dst, src});
+    } else {
+      Value idx = peelUnrealized(adaptor.getIndexes());
+      rewriter.create<emitc::CallOpaqueOp>(
+          loc, TypeRange{}, "TSCATTER",
+          /*args=*/ArrayAttr{}, /*templateArgs=*/ArrayAttr{},
+          /*operands=*/ValueRange{dst, src, idx});
+    }
 
     rewriter.eraseOp(op);
     return success();

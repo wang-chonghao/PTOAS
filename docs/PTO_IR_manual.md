@@ -6837,6 +6837,15 @@ pto.tscatter ins(%src, %idx : !pto.tile_buf<...>, !pto.tile_buf<...>)
             outs(%dst : !pto.tile_buf<...>)
 ```
 
+Mask form:
+
+```mlir
+pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<P0101>} : !pto.tile_buf<...>)
+            outs(%dst : !pto.tile_buf<...>)
+```
+
+`maskPattern` form is currently intended for A3 / CPU-sim style backends. A5 rejects this form.
+
 ---
 
 ##### `pto.mgather` - Gather-Load from Global Memory

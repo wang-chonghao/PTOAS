@@ -791,6 +791,83 @@ void mlir::pto::TGatherOp::print(OpAsmPrinter &p) {
   }
 }
 
+ParseResult mlir::pto::TScatterOp::parse(OpAsmParser &parser,
+                                         OperationState &result) {
+  OpAsmParser::UnresolvedOperand src, indexes, dst;
+  Type srcTy, idxTy, dstTy;
+  bool hasMask = false;
+  bool hasIndexes = false;
+
+  if (parser.parseKeyword("ins") || parser.parseLParen() ||
+      parser.parseOperand(src))
+    return failure();
+
+  if (!succeeded(parser.parseOptionalComma()))
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected ',' after src operand in ins(...)");
+
+  if (succeeded(parser.parseOptionalLBrace())) {
+    if (parser.parseKeyword("maskPattern") || parser.parseEqual())
+      return failure();
+    Attribute rawMaskAttr;
+    if (parser.parseAttribute(rawMaskAttr) || parser.parseRBrace())
+      return failure();
+    auto mp = llvm::dyn_cast<mlir::pto::MaskPatternAttr>(rawMaskAttr);
+    if (!mp)
+      return parser.emitError(parser.getCurrentLocation(),
+                              "expected #pto.mask_pattern<Pxxxx> for maskPattern");
+    result.addAttribute("maskPattern", mp);
+    hasMask = true;
+    if (parser.parseColonType(srcTy) || parser.parseRParen())
+      return failure();
+  } else {
+    if (parser.parseOperand(indexes))
+      return failure();
+    hasIndexes = true;
+    if (parser.parseColon() || parser.parseType(srcTy) || parser.parseComma() ||
+        parser.parseType(idxTy) || parser.parseRParen())
+      return failure();
+  }
+
+  if (parser.parseKeyword("outs") || parser.parseLParen() ||
+      parser.parseOperand(dst) || parser.parseColonType(dstTy) ||
+      parser.parseRParen())
+    return failure();
+
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  if (result.attributes.get("maskPattern"))
+    hasMask = true;
+
+  if (hasMask && hasIndexes)
+    return parser.emitError(parser.getCurrentLocation(),
+                            "mask-pattern tscatter does not take indexes");
+  if (!hasMask && !hasIndexes)
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected indexes operand or maskPattern for tscatter");
+
+  if (parser.resolveOperand(src, srcTy, result.operands) ||
+      parser.resolveOperand(dst, dstTy, result.operands) ||
+      (hasIndexes && parser.resolveOperand(indexes, idxTy, result.operands)))
+    return failure();
+  return success();
+}
+
+void mlir::pto::TScatterOp::print(OpAsmPrinter &p) {
+  p << " ins(" << getSrc() << ", ";
+  if (getMaskPatternAttr()) {
+    p << "{maskPattern = " << getMaskPatternAttr() << "} : "
+      << getSrc().getType();
+  } else {
+    p << getIndexes() << " : " << getSrc().getType() << ", "
+      << getIndexes().getType();
+  }
+  p << ") outs(" << getDst() << " : " << getDst().getType() << ")";
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          /*elidedAttrs=*/{"maskPattern"});
+}
+
 namespace {
 
 struct CommRecvClause {
@@ -8592,7 +8669,30 @@ mlir::LogicalResult mlir::pto::TRsqrtOp::verify() {
 
 
 mlir::LogicalResult mlir::pto::TScatterOp::verify() {
-  auto verifyCommon = [&]() -> LogicalResult {
+  auto isAllowedDataElem = [&](mlir::Type t) -> bool {
+    if (t.isF16() || t.isF32() || t.isBF16()) return true;
+    if (auto it = mlir::dyn_cast<mlir::IntegerType>(t))
+      return (it.getWidth() == 8 || it.getWidth() == 16 || it.getWidth() == 32);
+    return false;
+  };
+  auto isAllowedIndexElem = [&](mlir::Type t) -> bool {
+    if (auto it = mlir::dyn_cast<mlir::IntegerType>(t))
+      return (it.getWidth() == 16 || it.getWidth() == 32);
+    return false;
+  };
+  auto getMaskScatterTimes = [&](mlir::pto::MaskPatternAttr mp) -> unsigned {
+    switch (mp.getValue()) {
+    case mlir::pto::MaskPattern::P1111:
+      return 1;
+    case mlir::pto::MaskPattern::P0101:
+    case mlir::pto::MaskPattern::P1010:
+      return 2;
+    default:
+      return 4;
+    }
+  };
+
+  auto verifyIndexedForm = [&]() -> LogicalResult {
     Type ts = getSrc().getType();
     Type ti = getIndexes().getType();
     Type td = getDst().getType();
@@ -8607,17 +8707,6 @@ mlir::LogicalResult mlir::pto::TScatterOp::verify() {
     if (srcElem != dstElem)
       return emitOpError("expects src/dst to have the same element type");
 
-    auto isAllowedDataElem = [&](mlir::Type t) -> bool {
-      if (t.isF16() || t.isF32() || t.isBF16()) return true;
-      if (auto it = mlir::dyn_cast<mlir::IntegerType>(t))
-        return (it.getWidth() == 8 || it.getWidth() == 16 || it.getWidth() == 32);
-      return false;
-    };
-    auto isAllowedIndexElem = [&](mlir::Type t) -> bool {
-      if (auto it = mlir::dyn_cast<mlir::IntegerType>(t))
-        return (it.getWidth() == 16 || it.getWidth() == 32);
-      return false;
-    };
     if (!isAllowedDataElem(srcElem))
       return emitOpError("expects src/dst element type to be i8/i16/i32/f16/bf16/f32");
     if (!isAllowedIndexElem(idxElem))
@@ -8635,8 +8724,56 @@ mlir::LogicalResult mlir::pto::TScatterOp::verify() {
       return emitOpError("expects indexes element size to match the documented scatter rule");
     return mlir::success();
   };
-  auto verifyA2A3 = [&]() -> LogicalResult { return verifyCommon(); };
-  auto verifyA5 = [&]() -> LogicalResult { return verifyCommon(); };
+
+  auto verifyMaskForm = [&]() -> LogicalResult {
+    Type ts = getSrc().getType();
+    Type td = getDst().getType();
+    if (failed(verifyVecTileCommon(*this, ts, "src")) ||
+        failed(verifyVecTileCommon(*this, td, "dst")))
+      return failure();
+
+    auto srcTB = dyn_cast<pto::TileBufType>(ts);
+    auto dstTB = dyn_cast<pto::TileBufType>(td);
+    if (!srcTB || !dstTB)
+      return emitOpError("expects src and dst to be tile_buf types");
+
+    if (getElemTy(ts) != getElemTy(td))
+      return emitOpError("expects src and dst to have the same element type");
+    if (!isAllowedDataElem(getElemTy(ts)))
+      return emitOpError("expects src/dst element type to be i8/i16/i32/f16/bf16/f32");
+
+    auto srcValid = getValidShapeVec(ts);
+    auto dstValid = getValidShapeVec(td);
+    if (srcValid.size() != 2 || dstValid.size() != 2)
+      return emitOpError("expects src and dst to have rank-2 valid_shape");
+
+    auto mp = getMaskPatternAttr();
+    if (!mp)
+      return emitOpError("expects mask-pattern tscatter to provide maskPattern");
+    const unsigned times = getMaskScatterTimes(mp);
+    if (srcValid[0] != ShapedType::kDynamic && dstValid[0] != ShapedType::kDynamic &&
+        srcValid[0] != dstValid[0])
+      return emitOpError("expects src and dst to have the same valid rows");
+    if (srcValid[1] != ShapedType::kDynamic && dstValid[1] != ShapedType::kDynamic &&
+        srcValid[1] != static_cast<int64_t>(dstValid[1] * times))
+      return emitOpError("expects src valid cols to equal dst valid cols times the mask expansion factor");
+
+    if (srcTB.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
+        dstTB.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor))
+      return emitOpError("expects mask-pattern tscatter to use row_major blayout");
+    return mlir::success();
+  };
+
+  auto verifyA2A3 = [&]() -> LogicalResult {
+    if (getMaskPatternAttr())
+      return verifyMaskForm();
+    return verifyIndexedForm();
+  };
+  auto verifyA5 = [&]() -> LogicalResult {
+    if (getMaskPatternAttr())
+      return emitOpError("mask-pattern tscatter is not supported on A5 yet");
+    return verifyIndexedForm();
+  };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
@@ -10634,7 +10771,16 @@ void TRsqrtOp::getEffects(
   PTO_ADD_WRITE(getDstMutable());
 }
 
-PTO_DEFINE_BINARY_EFFECTS(TScatterOp, getSrcMutable(), getIndexesMutable(), getDstMutable())
+void TScatterOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  PTO_ADD_READ(getSrcMutable());
+  if (getIndexes()) {
+    auto idx = getIndexesMutable();
+    if (!idx.empty())
+      PTO_ADD_READ(idx[0]);
+  }
+  PTO_ADD_WRITE(getDstMutable());
+}
 
 // Select: Read(mask, src0, src1) -> Write(tmp, dst)
 void TSelOp::getEffects(
