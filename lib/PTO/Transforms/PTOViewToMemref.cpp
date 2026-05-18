@@ -64,6 +64,8 @@ static void markForceDynamicValidShape(Operation *op, bool force,
 static Type convertPTOTypeToMemRef(Type t);
 
 constexpr size_t kTileRank2D = 2;
+constexpr size_t kRowDimensionIndex = 0;
+constexpr size_t kColumnDimensionIndex = 1;
 constexpr unsigned kShapeVectorInlineCapacity = 4;
 constexpr unsigned kOperationVectorInlineCapacity = 8;
 
@@ -454,10 +456,11 @@ static void materializeStaticValidDims(IRRewriter &rewriter, Location loc,
   ArrayRef<int64_t> validShape = tbTy.getValidShape();
   if (tbTy.hasDynamicValid())
     return;
-  if (validShape.size() >= 1 && validShape[0] >= 0)
-    vRow = makeIndexConstant(rewriter, loc, validShape[0]);
-  if (validShape.size() >= 2 && validShape[1] >= 0)
-    vCol = makeIndexConstant(rewriter, loc, validShape[1]);
+  if (!validShape.empty() && validShape[kRowDimensionIndex] >= 0)
+    vRow = makeIndexConstant(rewriter, loc, validShape[kRowDimensionIndex]);
+  if (validShape.size() >= kTileRank2D &&
+      validShape[kColumnDimensionIndex] >= 0)
+    vCol = makeIndexConstant(rewriter, loc, validShape[kColumnDimensionIndex]);
 }
 
 static bool checkMultipleOf(Operation *op, int64_t value, int64_t divisor,
@@ -1294,24 +1297,10 @@ struct PTOViewToMemrefPass
         // runtime operands if present.
         Value vRow = op.getValidRow();
         Value vCol = op.getValidCol();
-        ArrayRef<int64_t> validShape = tbTy.getValidShape();
-        if (!tbTy.hasDynamicValid()) {
-          // TileBuf valid dims use a negative sentinel (e.g. '?' / -1), which is
-          // distinct from MLIR's ShapedType::kDynamic (INT64_MIN). Treat any
-          // negative value as dynamic here.
-          if (validShape.size() >= 1 && validShape[0] >= 0) {
-            vRow = rewriter
-                       .create<arith::ConstantOp>(loc, rewriter.getIndexType(),
-                                                  rewriter.getIndexAttr(validShape[0]))
-                       .getResult();
-          }
-          if (validShape.size() >= 2 && validShape[1] >= 0) {
-            vCol = rewriter
-                       .create<arith::ConstantOp>(loc, rewriter.getIndexType(),
-                                                  rewriter.getIndexAttr(validShape[1]))
-                       .getResult();
-          }
-        }
+        // TileBuf valid dims use a negative sentinel (e.g. '?' / -1), which is
+        // distinct from MLIR's ShapedType::kDynamic (INT64_MIN). Treat any
+        // negative value as dynamic here.
+        materializeStaticValidDims(rewriter, loc, tbTy, vRow, vCol);
 
         // 5. 获取 Config (保持不变)
         auto configAttr = tbTy.getConfigAttr();
@@ -1382,21 +1371,7 @@ struct PTOViewToMemrefPass
 
         Value vRow;
         Value vCol;
-        ArrayRef<int64_t> validShape = tbTy.getValidShape();
-        if (!tbTy.hasDynamicValid()) {
-          if (validShape.size() >= 1 && validShape[0] >= 0) {
-            vRow = rewriter
-                       .create<arith::ConstantOp>(loc, rewriter.getIndexType(),
-                                                  rewriter.getIndexAttr(validShape[0]))
-                       .getResult();
-          }
-          if (validShape.size() >= 2 && validShape[1] >= 0) {
-            vCol = rewriter
-                       .create<arith::ConstantOp>(loc, rewriter.getIndexType(),
-                                                  rewriter.getIndexAttr(validShape[1]))
-                       .getResult();
-          }
-        }
+        materializeStaticValidDims(rewriter, loc, tbTy, vRow, vCol);
 
         auto declaredMemRef =
             rewriter.create<pto::DeclareTileMemRefOp>(loc, targetType);
