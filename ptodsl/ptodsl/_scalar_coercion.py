@@ -11,6 +11,13 @@ from __future__ import annotations
 
 from ._runtime_scalar_ops import classify_runtime_scalar_type
 from ._surface_values import unwrap_surface_value
+from ._types import (
+    _integer_signedness,
+    _materialize_integer_literal,
+    _restore_integer_signedness,
+    _signless_integer_type,
+    _strip_integer_signedness,
+)
 
 from mlir.dialects import arith
 from mlir.ir import BF16Type, F16Type, F32Type, FloatAttr, IndexType, IntegerType
@@ -31,7 +38,7 @@ def coerce_scalar_to_type(value, target_type, *, context: str):
     if source_kind == "index" and target_kind == "integer":
         return _coerce_integer_like(raw_value, target_type)
     if source_kind == "integer" and target_kind == "index":
-        return arith.IndexCastOp(target_type, raw_value).result
+        return arith.IndexCastOp(target_type, _strip_integer_signedness(raw_value)).result
     if source_kind == "integer" and target_kind == "integer":
         return _coerce_integer_like(raw_value, target_type)
     if source_kind == "float" and target_kind == "float":
@@ -51,6 +58,8 @@ def materialize_scalar_literal(value, target_type, *, context: str):
     target_kind = classify_runtime_scalar_type(target_type)
     if target_kind == "float":
         return arith.ConstantOp(target_type, FloatAttr.get(target_type, float(value))).result
+    if target_kind == "index":
+        return arith.ConstantOp(target_type, int(value)).result
 
     if isinstance(value, float):
         raise TypeError(
@@ -58,19 +67,32 @@ def materialize_scalar_literal(value, target_type, *, context: str):
             f"target type {target_type}"
         )
 
-    return arith.ConstantOp(target_type, int(value)).result
+    return _materialize_integer_literal(target_type, value)
 
 
 def _coerce_integer_like(raw_value, target_type):
     if IndexType.isinstance(raw_value.type):
-        return arith.IndexCastOp(target_type, raw_value).result
-    source_width = IntegerType(raw_value.type).width
+        signless_target = _signless_integer_type(target_type)
+        adapted = arith.IndexCastOp(signless_target, raw_value).result
+        return _restore_integer_signedness(adapted, target_type)
+
+    source_type = raw_value.type
+    source_width = IntegerType(source_type).width
     target_width = IntegerType(target_type).width
+    signless_source = _strip_integer_signedness(raw_value)
+    signless_target = _signless_integer_type(target_type)
+
     if source_width < target_width:
-        return arith.ExtSIOp(target_type, raw_value).result
+        source_signedness = _integer_signedness(source_type)
+        if source_signedness == "unsigned":
+            widened = arith.ExtUIOp(signless_target, signless_source).result
+        else:
+            widened = arith.ExtSIOp(signless_target, signless_source).result
+        return _restore_integer_signedness(widened, target_type)
     if source_width > target_width:
-        return arith.TruncIOp(target_type, raw_value).result
-    return raw_value
+        truncated = arith.TruncIOp(signless_target, signless_source).result
+        return _restore_integer_signedness(truncated, target_type)
+    return _restore_integer_signedness(signless_source, target_type)
 
 
 def _coerce_float_like(raw_value, target_type):

@@ -42,6 +42,7 @@ The recommended front door for creating masks is `pto.make_mask`. It dispatches 
 
 **Example** — chunked SIMD loop with tail handling:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"tail.chunked_inner_loop","symbol":"tail_chunked_inner_loop_probe","compile":{"BLOCK":128}} -->
 ```python
 VEC = pto.elements_per_vreg(pto.f32)
 col_loop = pto.for_(0, cols, step=VEC).carry(remained=cols)
@@ -61,6 +62,7 @@ with col_loop:
 
 When the mask pattern is known at compile time, pass a `MaskPattern` instead:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"mask_ops.creation","symbol":"mask_ops_creation_probe","compile":{}} -->
 ```python
 full_mask = pto.make_mask(pto.f32, pto.MaskPattern.ALL)
 ```
@@ -76,6 +78,17 @@ When you need explicit control over the mask granularity, use these ops directly
 ### 9.3.1 Pattern-based: `pset_b*` and `pge_b*`
 
 `pset` generates a mask from a named pattern. `pge` generates a tail mask where the first N lanes are active (N encoded in the pattern).
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"mask_ops.creation","symbol":"mask_ops_creation_probe","compile":{}} -->
+```python
+full_mask = pto.pset_b32(pto.MaskPattern.ALL)
+```
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"mask_ops.creation","symbol":"mask_ops_creation_probe","compile":{}} -->
+```python
+mask8 = pto.pset_b8(pto.MaskPattern.ALL)
+mask16 = pto.pset_b16(pto.MaskPattern.ALL)
+```
 
 #### `pto.pset_b8(pattern: MaskPattern) -> pto.mask_b8`
 #### `pto.pset_b16(pattern: MaskPattern) -> pto.mask_b16`
@@ -109,6 +122,11 @@ When you need explicit control over the mask granularity, use these ops directly
 
 `plt` generates a tail mask from a live `i32` scalar — the idiomatic choice for dynamic tail handling when not using `make_mask`.
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"mask_ops.creation","symbol":"mask_ops_creation_probe","compile":{}} -->
+```python
+mask, remained = pto.plt_b32(remained)
+```
+
 #### `pto.plt_b8(scalar: pto.i32) -> (pto.mask_b8, pto.i32)`
 #### `pto.plt_b16(scalar: pto.i32) -> (pto.mask_b16, pto.i32)`
 #### `pto.plt_b32(scalar: pto.i32) -> (pto.mask_b32, pto.i32)`
@@ -133,6 +151,11 @@ When you need explicit control over the mask granularity, use these ops directly
 ---
 
 ## 9.4 Mask logical operations
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"mask_ops.logical","symbol":"mask_ops_logical_probe","compile":{}} -->
+```python
+merged = pto.pand(src0, src1, gate)
+```
 
 Once created, masks can be combined with bitwise logical ops. All take a gating mask that selects which lanes participate; inactive lanes are zeroed in the result.
 
@@ -180,6 +203,7 @@ These ops reshape masks between granularities and layouts without changing the u
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.mask_bitcast","symbol":"type_system_mask_bitcast_probe","compile":{}} -->
 ```python
 # Reinterpret a b16 mask as b32
 mask32 = pto.pbitcast(mask16, pto.mask_b32)
@@ -194,6 +218,12 @@ mask32 = pto.pbitcast(mask16, pto.mask_b32)
 #### `pto.punpack(mask: MaskType, part: PredicatePart) -> MaskType`
 
 **Description**: Widening unpack — reads the selected half of the source, zero-extends each 1-bit element into a 2-bit group in the result.
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"mask_ops.reorg","symbol":"mask_ops_reorg_probe","compile":{}} -->
+```python
+packed_hi = pto.ppack(mask32, pto.PredicatePart.HIGHER)
+unpacked_hi = pto.punpack(packed_hi, pto.PredicatePart.HIGHER)
+```
 
 ---
 
@@ -242,6 +272,7 @@ Vector comparisons produce predicate masks from vector data. The result can feed
 
 **Example** — threshold a vector:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"mask_ops.compare","symbol":"mask_ops_compare_probe","compile":{}} -->
 ```python
 big = pto.vcmps(scores, threshold, seed, pto.CmpMode.GT)
 # big[i] = 1 where scores[i] > threshold
@@ -249,7 +280,7 @@ big = pto.vcmps(scores, threshold, seed, pto.CmpMode.GT)
 
 ---
 
-**Tile-level comparisons** (`pto.tcmp`, `pto.tcmps`) compare two tiles and write packed predicate bytes into an `i8` destination tile. They are used when the comparison result needs to be stored to UB for later selection (`tsel`) or cross-kernel communication.
+**Tile-level comparisons** (`pto.tile.cmp`, `pto.tile.cmps`) compare two tiles and write packed predicate bytes into an `i8` destination tile. They are used when the comparison result needs to be stored to UB for later selection (`tile.sel`) or cross-kernel communication.
 
 ---
 
@@ -261,7 +292,7 @@ Masks can be persisted to and loaded from UB memory, enabling cross-stage predic
 
 #### `pto.plds(buf: PtrType, offset: Index, *, dist: PredicateDist = PredicateDist.NORM) -> MaskType`
 
-**Description**: Load a predicate mask from UB memory at the given byte offset. The mask granularity is inferred from context.
+**Description**: Load a predicate mask from UB memory at the given byte offset. The mask granularity is determined by the pointer element type of `buf` (`ui8`/`ui16`/`ui32` -> `mask_b8`/`mask_b16`/`mask_b32`).
 
 **Parameters**:
 
@@ -302,14 +333,14 @@ Masks can be persisted to and loaded from UB memory, enabling cross-stage predic
 
 #### `pto.pstu(align_in: AlignType, mask: MaskType, buf: PtrType) -> (AlignType, PtrType)`
 
-**Description**: Unaligned predicate store with alignment state threading. Threads the `align` state through a stream of stores, ensuring tail bytes are correctly buffered. The base pointer type is determined by the mask granularity (`ui16` for `b16`, `ui32` for `b32`).
+**Description**: Unaligned predicate store with alignment state threading. Threads the `align` state through a stream of stores, ensuring tail bytes are correctly buffered. This op currently supports only `mask_b16` and `mask_b32`; the base pointer type is determined by the mask granularity (`ui16` for `b16`, `ui32` for `b32`).
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `align_in` | `AlignType` | Incoming alignment state (from `init_align` or previous `pstu`) |
-| `mask` | `MaskType` | Predicate mask to store |
+| `mask` | `MaskType` | Predicate mask to store (`mask_b16` or `mask_b32` only) |
 | `buf` | `PtrType` (UB) | Destination buffer |
 
 **Returns**:
@@ -333,6 +364,7 @@ The mask granularity must match the vector element type. Using a `mask_b16` with
 
 **Typical pattern** — tail-safe vector processing:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"tail.vector_pattern","symbol":"tail_vector_pattern_probe","compile":{"BLOCK":128}} -->
 ```python
 VEC = pto.elements_per_vreg(pto.f32)
 with pto.for_(0, rows, step=1) as r:
@@ -355,11 +387,11 @@ The `mask` gates the `vexp` (masked-off lanes produce 0) and the `vsts` (masked-
 
 ## 9.9 Tile-level mask operations
 
-When working at the tile level (L1, `@pto.jit`), masks are carried in `i8` tile buffers holding packed predicate bytes. The key consumer of tile-level masks is `tsel`.
+When working at the tile level (L1, `@pto.jit`), masks are carried in `i8` tile buffers holding packed predicate bytes. The key consumer of tile-level masks is `tile.sel`.
 
-#### `pto.tsel(mask: Tile, src0: Tile, src1: Tile, tmp: Tile, dst: Tile) -> None`
+#### `pto.tile.sel(mask: Tile, src0: Tile, src1: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
 
-**Description**: Element-wise ternary select: `dst[i,j] = mask[i,j] ? src0[i,j] : src1[i,j]`. `mask` is an integer tile (typically `i8`) where zero means false. `tmp` is a scratch tile for the underlying implementation.
+**Description**: Element-wise ternary select: `dst[i,j] = mask[i,j] ? src0[i,j] : src1[i,j]`. `mask` is an integer tile (typically `i8`) where zero means false. `tmp` is an optional scratch tile override; when omitted, PTODSL synthesizes any architecture-specific scratch tile automatically.
 
 **Parameters**:
 
@@ -368,16 +400,16 @@ When working at the tile level (L1, `@pto.jit`), masks are carried in `i8` tile 
 | `mask` | `Tile` | Integer mask tile (zero = false) |
 | `src0` | `Tile` | True-branch source tile |
 | `src1` | `Tile` | False-branch source tile |
-| `tmp` | `Tile` | Scratch tile |
+| `tmp` | `Tile \| None` | Optional scratch tile override |
 | `dst` | `Tile` | Destination tile |
 
 **Returns**: None.
 
 ---
 
-#### `pto.tsels(mask: Tile, src: Tile, scalar: ScalarType, tmp: Tile, dst: Tile) -> None`
+#### `pto.tile.sels(mask: Tile, src: Tile, scalar: ScalarType, dst: Tile, *, tmp: Tile | None = None) -> None`
 
-**Description**: Element-wise select with scalar fallback: `dst[i,j] = mask[i,j] ? src[i,j] : scalar`.
+**Description**: Element-wise select with scalar fallback: `dst[i,j] = mask[i,j] ? src[i,j] : scalar`. As with `tile.sel`, `tmp` is optional and PTODSL synthesizes any required scratch tile automatically when it is omitted.
 
 ---
 

@@ -19,7 +19,7 @@ The Python maps almost line-for-line to the target MLIR:
       %arg0: !pto.ptr<f32, gm>, …, %arg7: i32, …)     # arg0: pto.ptr(…), …
 
   scf.if %has_rows {                                   # with pto.if_(has_rows):
-    pto.tload ins(…) outs(…)                           #   pto.tload(part, tile)
+    pto.tload ins(…) outs(…)                           #   pto.tile.load(part, tile)
     pto.vecscope {                                      #   with pto.vecscope():
       scf.for %row = … {                               #     with pto.for_(…) as row:
         %final_max, %final_sum =                       #
@@ -37,9 +37,9 @@ The Python maps almost line-for-line to the target MLIR:
   pto.barrier <PIPE_ALL>                               # pto.pipe_barrier(pto.Pipe.ALL)
 """
 
-from ptodsl import pto
+from ptodsl import pto, scalar
 
-s = pto.scalar  # arith shorthand alias
+s = scalar  # arith shorthand alias
 
 
 @pto.jit(
@@ -94,8 +94,8 @@ def online_softmax_update_kernel_2d(
     _             = s.index_cast(pto.int32, c8)                     # block_rows_i32
     row_base_i32  = s.index_cast(pto.int32, row_base)
     remaining_rows= s.subi(arg8, row_base_i32)
-    has_rows      = s.cmpi_sgt(remaining_rows, c0_i32)
-    too_many_rows = s.cmpi_sgt(remaining_rows, c8_i32)
+    has_rows      = remaining_rows > c0_i32
+    too_many_rows = remaining_rows > c8_i32
     row_count_i32 = s.select(too_many_rows, c8_i32, remaining_rows)
     row_count     = s.index_cast(row_count_i32)                     # → index
     seq           = s.index_cast(arg7)                              # → index
@@ -143,9 +143,9 @@ def online_softmax_update_kernel_2d(
         expmax_tile = pto.alloc_tile(tile_col, addr=c16896_i64, valid_row=row_count)
 
         # ── Tile loads from GM ────────────────────────────────────────────────
-        pto.tload(oldmax_part, oldmax_tile)
-        pto.tload(oldsum_part, oldsum_tile)
-        pto.tload(qk_part,     qk_tile)
+        pto.tile.load(oldmax_part, oldmax_tile)
+        pto.tile.load(oldsum_part, oldsum_tile)
+        pto.tile.load(qk_part,     qk_tile)
 
         pto.set_flag("MTE2", "V", event_id=0)
         pto.wait_flag("MTE2", "V", event_id=0)
@@ -178,7 +178,7 @@ def online_softmax_update_kernel_2d(
 
                     chunk_i32      = s.index_cast(pto.int32, chunk)
                     remaining_cols = s.subi(arg7, chunk_i32)
-                    has_chunk      = s.cmpi_sgt(remaining_cols, c0_i32)
+                    has_chunk      = remaining_cols > c0_i32
 
                     # scf.if with results – produce (next_max, next_sum)
                     with pto.if_(has_chunk, results=(vf32, vf32)) as br:
@@ -216,7 +216,7 @@ def online_softmax_update_kernel_2d(
                 # Output normalisation loop
                 with pto.for_(c0, c128, step=c64) as chunk2:
                     rem2      = s.subi(arg7, s.index_cast(pto.int32, chunk2))
-                    has_chunk2= s.cmpi_sgt(rem2, c0_i32)
+                    has_chunk2= rem2 > c0_i32
                     with pto.if_(has_chunk2):
                         cmask2, _ = pto.plt_b32(rem2)
                         cbase2    = s.addi(row_qk, chunk2)
@@ -229,10 +229,10 @@ def online_softmax_update_kernel_2d(
         pto.wait_flag("V", "MTE3", event_id=0)
 
         # Tile stores to GM
-        pto.tstore(newmax_tile, newmax_part)
-        pto.tstore(newsum_tile, newsum_part)
-        pto.tstore(expmax_tile, expmax_part)
-        pto.tstore(out_tile,    out_part)
+        pto.tile.store(newmax_tile, newmax_part)
+        pto.tile.store(newsum_tile, newsum_part)
+        pto.tile.store(expmax_tile, expmax_part)
+        pto.tile.store(out_tile,    out_part)
 
     pto.pipe_barrier(pto.Pipe.ALL)
 

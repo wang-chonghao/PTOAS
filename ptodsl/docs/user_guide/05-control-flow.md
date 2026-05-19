@@ -26,9 +26,9 @@ def unrolled_kernel(A, O, *, N: pto.constexpr):
         o_part = pto.partition_view(o_view, offsets=[i], sizes=[1])
         a_tile = pto.alloc_tile(shape=[1], dtype=pto.f32)
         o_tile = pto.alloc_tile(shape=[1], dtype=pto.f32)
-        pto.tload(a_part, a_tile)
-        pto.tadd(a_tile, a_tile, o_tile)
-        pto.tstore(o_tile, o_part)
+        pto.tile.load(a_part, a_tile)
+        pto.tile.add(a_tile, a_tile, o_tile)
+        pto.tile.store(o_tile, o_part)
 ```
 
 This works when the loop bound is a compile-time constant (like a `constexpr` parameter). But if `N` comes from a tensor shape and varies per launch, `range(N)` would trace a different number of iterations each time — you would get a cache miss and recompilation on every new value. For dynamic bounds, use `pto.for_`.
@@ -39,10 +39,10 @@ This works when the loop bound is a compile-time constant (like a `constexpr` pa
 
 ### Basic form
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"control_flow.basic_for","symbol":"control_flow_basic_for_probe","compile":{"BLOCK":8}} -->
 ```python
-with pto.for_(start, stop, step) as iv:
-    # iv is the loop index (0-based relative to start)
-    ...
+with pto.for_(start, stop, step=step) as iv:
+    pto.tile.load(pto.partition_view(a_view, offsets=[iv, 0], sizes=[1, cols]), tile)
 ```
 
 - `start`, `stop`, `step` are PTO scalar expressions. They are evaluated on the device.
@@ -51,60 +51,63 @@ with pto.for_(start, stop, step) as iv:
 
 Compare the two approaches:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"control_flow.compare_loops","symbol":"control_flow_compare_loops_probe","compile":{"BLOCK":8}} -->
 ```python
 # Trace-time unrolling — BLOCK must be constexpr
 for i in range(BLOCK):
-    ...
+    pto.tile.load(pto.partition_view(a_view, offsets=[0, 0], sizes=[1, cols]), tile)
 
 # Device-side loop — num_blocks can be dynamic
 with pto.for_(0, num_blocks, step=1) as i:
-    offset = i * BLOCK
-    ...
+    pto.tile.load(pto.partition_view(a_view, offsets=[i, 0], sizes=[1, cols]), tile)
 ```
 
 ### Nested loops
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"control_flow.nested_loops","symbol":"control_flow_nested_loops_probe","compile":{"BLOCK":8}} -->
 ```python
 with pto.for_(0, rows, step=1) as r:
     with pto.for_(0, cols, step=1) as c:
         val = scalar.load(tile[r, c])
-        ...
 ```
 
 Both loops execute on the device. The outer loop bound `rows` and inner loop bound `cols` can be runtime values.
 
 ### Loop with carry state
 
-When a loop needs to propagate state from one iteration to the next, use the `.carry(...)` method. This is the PTODSL equivalent of a loop that accumulates or updates variables across iterations:
+When a loop needs to propagate state from one iteration to the next, use the `.carry(...)` method. This is the PTODSL equivalent of a loop that accumulates or updates variables across iterations. The following self-contained kernel is the smallest compileable carry example used by the docs-as-test harness:
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"carry_loop_probe","compile":{"BLOCK":128}} -->
 ```python
-kv_loop = pto.for_(0, num_blocks, step=1).carry(
-    m=m_prev_tile,
-    l=l_prev_tile,
-    o=o_prev_tile,
-)
-with kv_loop:
-    i = kv_loop.iv         # current iteration index
-    m_cur = kv_loop.m      # value carried in from previous iteration
-    l_cur = kv_loop.l
-    o_cur = kv_loop.o
+@pto.jit(target="a5")
+def carry_loop_probe(*, BLOCK: pto.constexpr = 128):
+    m_prev = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    l_prev = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    o_prev = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    m_next = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    l_next = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    o_next = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
-    # ... compute m_next, l_next, o_next from m_cur, l_cur, o_cur ...
+    m_prev.fill(0.0)
+    l_prev.fill(0.0)
+    o_prev.fill(0.0)
 
-    kv_loop.update(
-        m=m_next_tile,
-        l=l_next_tile,
-        o=o_next_tile,
-    )
+    kv_loop = pto.for_(0, 4, step=1).carry(m=m_prev, l=l_prev, o=o_prev)
+    with kv_loop:
+        kv_loop.m.fill(1.0)
+        kv_loop.l.fill(2.0)
+        kv_loop.o.fill(3.0)
+        kv_loop.update(m=m_next, l=l_next, o=o_next)
 
-# After the loop, retrieve the final carried values
-final_o = kv_loop.final("o")
+    final_o = kv_loop.final("o")
+    final_o.fill(4.0)
 ```
 
 `.carry(name=initial_value)` declares named state variables that are passed from one iteration to the next. Inside the loop body, access the current value with `loop.name`. At the end of the body, call `loop.update(name=new_value)` to set what the next iteration receives. After the loop exits, `loop.final("name")` retrieves the value from the last iteration.
 
 This pattern is central to algorithms like online softmax, where each KV block updates running statistics (row max, sum, output accumulator). The ping-pong tile pattern — allocating two tiles and swapping them each iteration — is the idiomatic way to manage this state:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"control_flow.carry_pingpong","symbol":"control_flow_carry_pingpong_probe","compile":{"Br":16,"num_blocks":4}} -->
 ```python
 # Allocate ping-pong state tiles
 m_prev = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, blayout="ColMajor")
@@ -121,7 +124,8 @@ with loop:
     m_cur = loop.m
     l_cur = loop.l
 
-    # ... compute new m and l into m_next, l_next ...
+    m_next.fill(1.0)
+    l_next.fill(2.0)
 
     loop.update(m=m_next, l=l_next)
 ```
@@ -130,6 +134,7 @@ with loop:
 
 For SIMD kernels that process data in vector-width chunks, use a carry loop to track the remaining element count across column iterations:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"tail.chunked_inner_loop","symbol":"tail_chunked_inner_loop_probe","compile":{"BLOCK":128}} -->
 ```python
 VEC = pto.elements_per_vreg(pto.f32)
 col_loop = pto.for_(0, cols, step=VEC).carry(remained=cols)
@@ -149,11 +154,29 @@ with col_loop:
 
 `pto.if_` records a device-side conditional branch. Unlike a Python `if`, the condition can be a runtime PTO scalar, and both branches are recorded into the program so the hardware can choose at runtime.
 
-The condition must be a PTO scalar value (e.g., the result of a comparison like `scalar.gt(a, b)` or a value loaded from a tile). Python booleans evaluated at trace time should use a plain `if` instead.
+The condition must be a PTO scalar value (e.g., the result of a comparison like `a > b` or a value loaded from a tile). Python booleans evaluated at trace time should use a plain `if` instead.
 
-### Value merge across branches
+### Recommended block structure
 
-When a variable is assigned inside both branches of `pto.if_`/`pto.else_`, the assignments are recorded and the variable holds the merged value after the conditional block. This is the standard SSA-style merge — the downstream code sees whichever value was produced by the taken branch:
+PTODSL should treat one device-side conditional as one explicit branch object.
+The recommended surface is:
+
+```python
+with pto.if_(cond) as br:
+    with br.then_:
+        ...
+    with br.else_:
+        ...
+```
+
+This keeps the `if` / `else` pairing explicit. The `else_` branch is optional
+for side-effect-only conditionals.
+
+### Automatic named merge across branches
+
+When a value must flow out of both branches, PTODSL should merge by explicit
+name. Each branch assigns the same output names with `br.assign(...)`, and the
+merged results are read back from the branch handle after the conditional:
 
 ```python
 @pto.simt
@@ -167,32 +190,22 @@ def conditional_scale(
     with pto.for_(0, rows, step=1) as r:
         with pto.for_(0, cols, step=1) as c:
             val = scalar.load(tile[r, c])
-            big = scalar.gt(val, threshold)
+            big = val > threshold
 
-            with pto.if_(big):
-                # Branch A: scale the value up
-                val = val * scale
-            with pto.else_():
-                # Branch B: leave it as-is
-                pass
+            with pto.if_(big) as br:
+                with br.then_:
+                    br.assign(val=val * scale)
+                with br.else_:
+                    br.assign(val=val)
 
-            # val is usable here — it is the merged result from both branches.
-            # If big was true,  val = original * scale.
-            # If big was false, val = original (passed through unchanged).
+            val = br.val
             scalar.store(val, tile[r, c])
 ```
 
-In this example, `val` is reassigned in the `if_` branch but left untouched in the `else_` branch. After the conditional block, `val` correctly represents the merged result and is stored back to the tile. You can reassign the same variable in both branches as well — the downstream code always sees the correct value.
-
-### Expression form
-
-For simple either-or selection, `pto.if_` also works as an expression that directly returns the merged value:
-
-```python
-result = pto.if_(cond, then_value, else_value)
-```
-
-This is equivalent to the block form above and is convenient when each branch simply produces a different scalar or tile reference.
+In this example, both branches define the merged value named `val`. After the
+conditional closes, `br.val` is the SSA-merged result seen by downstream code.
+This surface avoids explicit result-type declarations and explicit
+`pto.yield_(...)` in user code while still keeping the merge contract explicit.
 
 ## 5.4 `pto.constexpr` and tracing
 
@@ -200,22 +213,35 @@ This is equivalent to the block form above and is convenient when each branch si
 
 ```python
 @pto.jit(target="a5")
-def kernel(A, *, BLOCK: pto.constexpr = 128, UNROLL: pto.constexpr = False):
+def kernel(
+    A,
+    *,
+    BLOCK: pto.constexpr = 128,
+    NUM_BLOCKS: pto.constexpr = 8,
+    UNROLL: pto.constexpr = False,
+):
     N = A.shape[0]
     num_blocks = (N + BLOCK - 1) // BLOCK
 
+    # N and num_blocks are runtime values derived from tensor metadata.
+    # They can drive device-side control flow such as pto.for_(...),
+    # but they are not Python integers and cannot be used in range(...).
+    with pto.for_(0, num_blocks, step=1) as i:
+        ...
+
     if UNROLL:
-        # Trace-time: UNROLL is known, so this branch resolves at compile time.
-        # Each iteration records separately — the loop is fully unrolled.
-        for i in range(num_blocks):
+        # Trace-time: UNROLL and NUM_BLOCKS are both known during tracing.
+        # Each iteration records separately, so the loop is fully unrolled.
+        for i in range(NUM_BLOCKS):
             ...
     else:
-        # Device-side: a single loop instruction is recorded.
-        with pto.for_(0, num_blocks, step=1) as i:
+        # The non-unrolled path can still use a device-side loop whose bound
+        # is a constexpr value captured into the traced program.
+        with pto.for_(0, NUM_BLOCKS, step=1) as i:
             ...
 ```
 
-This lets you write a single kernel that specializes into different strategies based on constexpr knobs.
+This lets you write a single kernel that specializes into different strategies based on constexpr knobs, while still using runtime tensor metadata for device-side control flow.
 
 ## 5.5 Summary
 

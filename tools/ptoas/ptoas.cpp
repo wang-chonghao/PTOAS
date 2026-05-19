@@ -23,6 +23,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include <cctype>
 #include <cstring>
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -1555,6 +1556,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::cf::ControlFlowDialect>();
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::scf::SCFDialect>();
+  registry.insert<mlir::math::MathDialect>();
 
   registry.insert<mlir::pto::PTODialect>();
   arith::registerBufferizableOpInterfaceExternalModels(registry);
@@ -1614,6 +1616,7 @@ int main(int argc, char **argv) {
   context.getOrLoadDialect<mlir::pto::PTODialect>();
   context.getOrLoadDialect<func::FuncDialect>();
   context.getOrLoadDialect<arith::ArithDialect>();
+  context.getOrLoadDialect<math::MathDialect>();
   context.getOrLoadDialect<memref::MemRefDialect>();
   context.getOrLoadDialect<affine::AffineDialect>();
   context.getOrLoadDialect<mlir::LLVM::LLVMDialect>();

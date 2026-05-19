@@ -66,6 +66,17 @@ def nested_simt_from_simd_entry(*, TRACE_TOKEN: pto.constexpr = 0):
 
 
 @pto.simd
+def illegal_inline_simt_placement_probe():
+    with pto.simt():
+        pto.get_tid_x()
+
+
+@pto.jit(target="a5")
+def nested_inline_simt_from_simd_entry(*, TRACE_TOKEN: pto.constexpr = 0):
+    illegal_inline_simt_placement_probe()
+
+
+@pto.simd
 def simd_value_escape_probe():
     return pto.pset_b32("PAT_ALL")
 
@@ -92,6 +103,12 @@ def main() -> None:
         nested_simt_from_simd_entry.compile,
         RuntimeError,
         "@pto.simt helper materialization is only supported from the top-level @pto.jit body or inside @pto.ukernel",
+        "inside @pto.simd",
+    )
+    expect_raises(
+        nested_inline_simt_from_simd_entry.compile,
+        RuntimeError,
+        "inline pto.simt() may only be used from the top-level @pto.jit body or inside @pto.ukernel",
         "inside @pto.simd",
     )
     expect_raises(

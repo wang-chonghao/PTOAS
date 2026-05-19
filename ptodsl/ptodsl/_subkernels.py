@@ -15,6 +15,7 @@ from functools import update_wrapper
 import inspect
 
 from ._diagnostics import (
+    illegal_inline_subkernel_placement_error,
     illegal_subkernel_placement_error,
     simd_value_escape_error,
     subkernel_host_tensor_boundary_error,
@@ -79,9 +80,7 @@ class SubkernelTemplate:
     def _validate_invocation(self, *args, **kwargs) -> None:
         session = current_session()
         outer = session.current_subkernel if session is not None else None
-        if outer is not None:
-            if self.spec.role == KernelRole.UKERNEL or outer.role != KernelRole.UKERNEL.value:
-                raise illegal_subkernel_placement_error(self.spec.role.value, outer.role)
+        _validate_subkernel_placement(self.spec.role, outer)
 
         bound = self.signature.bind_partial(*args, **kwargs)
         for name, value in bound.arguments.items():
@@ -121,18 +120,62 @@ def _find_transient_simd_escape(value):
     return None
 
 
-def _subkernel_decorator(role: KernelRole, *, name: str | None = None, target: str = "a5"):
-    def decorator(fn):
+def _validate_subkernel_placement(role: KernelRole, outer_frame, *, inline: bool = False) -> None:
+    if outer_frame is None:
+        return
+    if role == KernelRole.UKERNEL or outer_frame.role != KernelRole.UKERNEL.value:
+        if inline:
+            raise illegal_inline_subkernel_placement_error(role.value, outer_frame.role)
+        raise illegal_subkernel_placement_error(role.value, outer_frame.role)
+
+
+class _SubkernelSurface:
+    """Dual-use surface that supports both decorators and inline context-manager scopes."""
+
+    def __init__(self, role: KernelRole, *, name: str | None = None, target: str = "a5"):
+        self._role = role
+        self._name = name
+        self._target = target
+        self._session_cm = None
+
+    def __call__(self, fn):
         return SubkernelTemplate(
             SubkernelSpec(
-                role=role,
-                symbol_name=name or fn.__name__,
-                target=target,
+                role=self._role,
+                symbol_name=self._name or fn.__name__,
+                target=self._target,
             ),
             fn,
         )
 
-    return decorator
+    def __enter__(self):
+        runtime = current_runtime()
+        if runtime is None:
+            raise RuntimeError(
+                f"inline pto.{self._role.value}() may only be used while tracing "
+                "a compatible PTODSL kernel"
+            )
+        session = current_session()
+        outer = session.current_subkernel if session is not None else None
+        _validate_subkernel_placement(self._role, outer, inline=True)
+        symbol_name = self._name or f"inline_{self._role.value}"
+        self._session_cm = session.enter_inline_subkernel(
+            self._role.value,
+            symbol_name,
+            self._target,
+        )
+        self._session_cm.__enter__()
+        return None
+
+    def __exit__(self, *exc):
+        try:
+            return self._session_cm.__exit__(*exc)
+        finally:
+            self._session_cm = None
+
+
+def _subkernel_decorator(role: KernelRole, *, name: str | None = None, target: str = "a5"):
+    return _SubkernelSurface(role, name=name, target=target)
 
 
 def _decorate_subkernel(role: KernelRole, fn=None, *, name: str | None = None, target: str = "a5"):

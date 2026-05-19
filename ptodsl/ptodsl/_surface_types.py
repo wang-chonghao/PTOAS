@@ -74,6 +74,104 @@ class Pipe:
     ALL = _pto.PIPE.PIPE_ALL
 
 
+class MaskPattern:
+    """Public PTODSL mask-pattern tokens."""
+
+    ALL = "PAT_ALL"
+    ALLF = "PAT_ALLF"
+    H = "PAT_H"
+    Q = "PAT_Q"
+    M3 = "PAT_M3"
+    M4 = "PAT_M4"
+
+
+for _vl in range(1, 129):
+    setattr(MaskPattern, f"VL{_vl}", f"PAT_VL{_vl}")
+
+
+class CmpMode:
+    """Public PTODSL compare-mode tokens."""
+
+    EQ = "eq"
+    NE = "ne"
+    LT = "lt"
+    LE = "le"
+    GT = "gt"
+    GE = "ge"
+
+
+class PredicatePart:
+    """Public PTODSL predicate pack/unpack part tokens."""
+
+    LOWER = "LOWER"
+    HIGHER = "HIGHER"
+
+
+class PredicateDist:
+    """Public PTODSL predicate load/store distribution tokens."""
+
+    NORM = "NORM"
+    US = "US"
+    DS = "DS"
+    PK = "PK"
+
+
+class VStoreDist:
+    """Public PTODSL vector-store distribution tokens."""
+
+    NORM_B8 = "NORM_B8"
+    NORM_B16 = "NORM_B16"
+    NORM_B32 = "NORM_B32"
+    _1PT_B8 = "1PT_B8"
+    _1PT_B16 = "1PT_B16"
+    _1PT_B32 = "1PT_B32"
+    PK_B16 = "PK_B16"
+    PK_B32 = "PK_B32"
+    PK_B64 = "PK_B64"
+    PK4_B32 = "PK4_B32"
+    MRG4CHN_B8 = "MRG4CHN_B8"
+    MRG2CHN_B8 = "MRG2CHN_B8"
+    MRG2CHN_B16 = "MRG2CHN_B16"
+
+
+setattr(VStoreDist, "1PT_B8", VStoreDist._1PT_B8)
+setattr(VStoreDist, "1PT_B16", VStoreDist._1PT_B16)
+setattr(VStoreDist, "1PT_B32", VStoreDist._1PT_B32)
+
+
+class DeinterleaveDist:
+    """Public PTODSL dual-load distribution tokens."""
+
+    DINTLV_B8 = "DINTLV_B8"
+    DINTLV_B16 = "DINTLV_B16"
+    DINTLV_B32 = "DINTLV_B32"
+    BDINTLV = "BDINTLV"
+
+
+class InterleaveDist:
+    """Public PTODSL dual-store distribution tokens."""
+
+    INTLV_B8 = "INTLV_B8"
+    INTLV_B16 = "INTLV_B16"
+    INTLV_B32 = "INTLV_B32"
+
+
+class PostUpdate:
+    """Public PTODSL post-update mode tokens for stateful stores."""
+
+    OFF = "NO_POST_UPDATE"
+    ON = "POST_UPDATE"
+
+
+AlignType = _pto.AlignType
+DivPrecision = _pto.DivPrecision
+ExpPrecision = _pto.ExpPrecision
+LogPrecision = _pto.LogPrecision
+RecipPrecision = _pto.RecipPrecision
+RsqrtPrecision = _pto.RsqrtPrecision
+SqrtPrecision = _pto.SqrtPrecision
+
+
 class TensorView:
     """Authoring-time marker for a tensor-view descriptor value."""
 
@@ -92,6 +190,21 @@ __all__ = [
     "MemorySpace",
     "BarrierType",
     "Pipe",
+    "MaskPattern",
+    "CmpMode",
+    "PredicatePart",
+    "PredicateDist",
+    "VStoreDist",
+    "DeinterleaveDist",
+    "InterleaveDist",
+    "PostUpdate",
+    "AlignType",
+    "DivPrecision",
+    "ExpPrecision",
+    "LogPrecision",
+    "RecipPrecision",
+    "RsqrtPrecision",
+    "SqrtPrecision",
     "TensorView",
     "PartitionTensorView",
     "Tile",

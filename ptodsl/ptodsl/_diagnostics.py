@@ -67,6 +67,14 @@ def illegal_subkernel_placement_error(role: str, outer_role: str | None) -> Runt
     )
 
 
+def illegal_inline_subkernel_placement_error(role: str, outer_role: str | None) -> RuntimeError:
+    """Return one diagnostic for an inline subkernel scope placed outside the supported layer graph."""
+    return RuntimeError(
+        f"inline pto.{role}() may only be used from the top-level @pto.jit body or inside @pto.ukernel; "
+        f"nested use inside @pto.{outer_role} is not part of the PTODSL layer contract."
+    )
+
+
 def simd_value_escape_error(type_text: str) -> RuntimeError:
     """Return one diagnostic for transient SIMD values escaping a simd subkernel boundary."""
     return RuntimeError(
@@ -90,6 +98,7 @@ def tile_row_alignment_error(*, shape, dtype, row_bytes: int, required_alignment
 __all__ = [
     "PTODSLTracingMisuseError",
     "host_tensor_metadata_error",
+    "illegal_inline_subkernel_placement_error",
     "illegal_subkernel_placement_error",
     "native_python_control_flow_error",
     "simd_value_escape_error",

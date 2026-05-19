@@ -56,7 +56,7 @@ PTODSL organizes kernel code into three layers, each building on the one below i
 ```
 Python Wrapper              L0  user-facing wrapper (NumPy, torch-npu, pure Python)
   └─ @pto.jit                     L1  compile + cache + launch
-       ├─ Tile Ops                     tile-level: tload, tstore, tadd, ...
+       ├─ Tile Ops                     tile-level: tile.load, tile.store, tile.add, ...
        └─ @pto.ukernel                 L2  micro-instruction orchestration
             ├─ MTE Ops                 mte_load / mte_store / copy_gm_to_ubuf / ...
             ├─ @pto.cube               matrix products (mad, mte_l1_l0a, mte_l0c_ub, ...)
@@ -68,6 +68,7 @@ Python Wrapper              L0  user-facing wrapper (NumPy, torch-npu, pure Pyth
 
 The outermost layer is plain Python. It handles ergonomic runtime concerns: allocating output tensors, extracting shapes and strides from framework tensors, compiling the JIT kernel, and launching it. Because L0 is just Python, you can freely mix in NumPy, torch-npu, or any other Python framework for pre- and post-processing, data preparation, or composing multiple kernel launches. This layer knows nothing about NPU internals — it is just a convenience function that most end users will call.
 
+<!-- ptodsl-doc-pending: host-side compile-and-launch wrapper is documented but not covered by compile-only docs contract -->
 ```python
 def flash_attention(Q, K, V, *, O=None, causal=False):
     if O is None:
@@ -89,7 +90,11 @@ Decorating a function with `@pto.jit` marks it as a launchable PTO kernel. This 
 
 The parameters of a `@pto.jit` function are Python-native tensors (not PTODSL-specific descriptors). In PTODSL v1, their ABI contract is declared with `pto.tensor_spec(...)` in the function signature; this is a compile-time annotation, not a runtime object the Python wrapper must construct. The kernel body materializes `TensorView` descriptors from the runtime tensors via `make_tensor_view`, then partitions the problem with `partition_view`. Compile-time constants are declared as keyword-only arguments with `pto.constexpr`:
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"flash_attention_kernel","compile":{"BLOCK_Q":128,"BLOCK_KV":128,"CAUSAL":false}} -->
 ```python
+from ptodsl import pto
+
+
 @pto.jit(target="a5")
 def flash_attention_kernel(
     Q: pto.tensor_spec(rank=4, dtype=pto.f32),
@@ -101,10 +106,11 @@ def flash_attention_kernel(
     BLOCK_KV: pto.constexpr = 128,
     CAUSAL: pto.constexpr = False,
 ):
-    ...
+    # ... tile allocation, block partitioning, and sub-kernel dispatch ...
+    return
 ```
 
-L1 is the primary layer for expressing **tile-level semantics**. Inside `@pto.jit`, you allocate tile buffers (`alloc_tile`), move data between GM and UB at block granularity (`tload`, `tstore`), and perform tile-level compute (`tadd`, `texp`, `trowsum`, etc.). When the built-in Tile Ops are not sufficient, you can drop down to `@pto.ukernel` to write custom tile-level semantics with micro-instructions.
+L1 is the primary layer for expressing **tile-level semantics**. Inside `@pto.jit`, you allocate tile buffers (`alloc_tile`), move data between GM and UB at block granularity (`tile.load`, `tile.store`), and perform tile-level compute (`tile.add`, `tile.exp`, `tile.rowsum`, etc.). When the built-in Tile Ops are not sufficient, you can drop down to `@pto.ukernel` to write custom tile-level semantics with micro-instructions.
 
 The SPMD launch contract is also owned here: the runtime grid (e.g., `batch * heads` blocks) is declared at the call site, and block/subblock indices are queried via `pto.get_block_idx()` and friends.
 
@@ -129,7 +135,7 @@ These are hardware-bound compute sub-kernels, each mapped to a specific NPU comp
 
 - **`@pto.simt`** is a scalar-programmable processor group that executes scalar instructions across many work-items in parallel. Typical operations: `lds`, `sts`, scalar arithmetic and comparison. Well-suited for per-element tile walks, boundary metadata, and pointwise blends.
 
-L3 sub-kernels can be invoked in two ways: as named decorated functions (`@pto.cube` / `@pto.simd` / `@pto.simt`) — reusable and callable from `@pto.ukernel` or directly from `@pto.jit` — or inline as context managers (`with pto.cube():` / `with pto.simd():` / `with pto.simt():`) for quick prototyping. When called directly from `@pto.jit`, you stage data with `tload`/`tstore` instead of `mte_load`/`mte_store`; PTOAS handles the synchronization between Tile Ops and L3 compute automatically.
+L3 sub-kernels can be invoked in two ways: as named decorated functions (`@pto.cube` / `@pto.simd` / `@pto.simt`) — reusable and callable from `@pto.ukernel` or directly from `@pto.jit` — or inline as context managers (`with pto.cube():` / `with pto.simd():` / `with pto.simt():`) for quick prototyping. When called directly from `@pto.jit`, you stage data with `tile.load`/`tile.store` instead of `mte_load`/`mte_store`; PTOAS handles the synchronization between Tile Ops and L3 compute automatically.
 
 The boundary contract is strict: vreg values do not escape a simd kernel, cube-local state does not leak into UB, and data crosses layer boundaries only through UB-backed tiles or typed UB pointers.
 
@@ -153,9 +159,9 @@ Chapter 5 (Control Flow) and Chapter 6 (Scalar & Pointer Operations) cover this 
 
 ## 1.4 A worked example
 
-The flash attention kernel from Section 1.2 is not just an architectural diagram — it is a complete, runnable design sketch distributed with PTODSL (`demos/flash_attention_sketch.py`). Here is how the layers map to actual code:
+The flash attention kernel from Section 1.2 is not just an architectural diagram — it is a complete, runnable design sketch distributed with PTODSL (`examplesflash_attention_sketch.py`). Here is how the layers map to actual code:
 
-**L1 (`@pto.jit`)** allocates tiles for the Q block, KV block, online-softmax state (m/l/o ping-pong tiles), and cube-local scratch. It loops over Q blocks (outer `pto.for_`) and KV blocks (inner `pto.for_` with carry state), calling `kv_block_process` for each KV block and using `tload`/`tstore` at the GM boundary.
+**L1 (`@pto.jit`)** allocates tiles for the Q block, KV block, online-softmax state (m/l/o ping-pong tiles), and cube-local scratch. It loops over Q blocks (outer `pto.for_`) and KV blocks (inner `pto.for_` with carry state), calling `kv_block_process` for each KV block and using `tile.load`/`tile.store` at the GM boundary.
 
 **L2 (`@pto.ukernel`)** stages the current K and V blocks with `mte_load`, issues `pipe_barrier(Pipe.ALL)` at phase boundaries, then sequences four sub-kernel calls: `qk_matmul` (cube), `online_softmax_rows` (simd), `pv_matmul` (cube), `blend_output_rows` (simt).
 

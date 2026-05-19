@@ -15,9 +15,9 @@ PTODSL provides five decorators that mark functions as PTO kernels, plus three c
 L3 sub-kernels can be invoked in two ways:
 
 1. **As decorated functions** (`@pto.cube` / `@pto.simd` / `@pto.simt`) — reusable, named sub-kernels that can be called from `@pto.ukernel` or directly from `@pto.jit`.
-2. **As context managers** (`with pto.cube():` / `with pto.simd():` / `with pto.simt():`) — inline L3 blocks for quick prototyping or one-off compute snippets inside any kernel.
+2. **As context managers** (`with pto.cube():` / `with pto.simd():` / `with pto.simt():`) — inline L3 blocks for quick prototyping or one-off compute snippets inside `@pto.jit` or `@pto.ukernel`.
 
-Calling an L3 sub-kernel directly from `@pto.jit` skips the ukernel layer: you stage data with `tload`/`tstore` instead of `mte_load`/`mte_store`, and PTOAS handles the synchronization between Tile Ops and L3 compute automatically. This is the recommended path for most users — drop down to `@pto.ukernel` only when you need explicit control over micro-instruction ordering and synchronization.
+Calling an L3 sub-kernel directly from `@pto.jit` skips the ukernel layer: you stage data with `tile.load`/`tile.store` instead of `mte_load`/`mte_store`, and PTOAS handles the synchronization between Tile Ops and L3 compute automatically. This is the recommended path for most users — drop down to `@pto.ukernel` only when you need explicit control over micro-instruction ordering and synchronization.
 
 ## 3.2 `@pto.jit` — top-level JIT entry
 
@@ -27,16 +27,18 @@ Calling an L3 sub-kernel directly from `@pto.jit` skips the ukernel layer: you s
 
 ### Signature
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel_name","compile":{"CONST_A":128,"CONST_B":64}} -->
 ```python
 @pto.jit(target="a5")
 def kernel_name(
-    tensor_arg_1,           # Python-native tensor (positional)
-    tensor_arg_2,           # Python-native tensor (positional)
-    ...,
+    tensor_arg_1: pto.tensor_spec(rank=1, dtype=pto.f32),  # Python-native tensor (positional)
+    tensor_arg_2: pto.tensor_spec(rank=1, dtype=pto.f32),  # Python-native tensor (positional)
     *,
-    CONST_A: pto.constexpr = default,  # compile-time constant (keyword-only)
-    CONST_B: pto.constexpr = default,  # compile-time constant (keyword-only)
+    CONST_A: pto.constexpr = 128,  # compile-time constant (keyword-only)
+    CONST_B: pto.constexpr = 64,   # compile-time constant (keyword-only)
 ):
+    # ... tensor views, tile allocation, and kernel logic ...
+    return
 ```
 
 **Positional parameters** are Python-native tensors — they arrive from NumPy, torch-npu, or any framework with `.shape` and `.strides`. Inside the body, wrap them with `make_tensor_view` to create GM descriptors.
@@ -45,6 +47,7 @@ def kernel_name(
 
 ### Compilation and launch
 
+<!-- ptodsl-doc-pending: host-side compile-and-launch flow is documented but not covered by compile-only docs contract -->
 ```python
 # Compile (traces the body, lowers through PTOAS, caches the result)
 compiled = kernel_name.compile(CONST_A=128, CONST_B=64)
@@ -71,73 +74,93 @@ Available inside a `@pto.jit` body:
 
 ```python
 @pto.jit(target="a5")
-def my_kernel(A, B, O, *, BLOCK: pto.constexpr):
-    N = A.shape[0]
-    a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=[N], strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=[N], strides=O.strides)
+def my_kernel(
+    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    B: pto.tensor_spec(rank=2, dtype=pto.f32),
+    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    *,
+    BLOCK: pto.constexpr = 128,
+):
+    rows = A.shape[0]
+    cols = A.shape[1]
+    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+    b_view = pto.make_tensor_view(B, shape=B.shape, strides=B.strides)
+    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
 
-    a_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
-    b_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
-    o_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
+    a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    b_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
-    num_blocks = (N + BLOCK - 1) // BLOCK
-    with pto.for_(0, num_blocks, step=1) as i:
-        offset = i * BLOCK
-        a_part = pto.partition_view(a_view, offsets=[offset], sizes=[BLOCK])
-        b_part = pto.partition_view(b_view, offsets=[offset], sizes=[BLOCK])
-        o_part = pto.partition_view(o_view, offsets=[offset], sizes=[BLOCK])
+    with pto.for_(0, rows, step=1) as row:
+        a_part = pto.partition_view(a_view, offsets=[row, 0], sizes=[1, cols])
+        b_part = pto.partition_view(b_view, offsets=[row, 0], sizes=[1, cols])
+        o_part = pto.partition_view(o_view, offsets=[row, 0], sizes=[1, cols])
 
-        pto.tload(a_part, a_tile)
-        pto.tload(b_part, b_tile)
-        pto.tadd(a_tile, b_tile, o_tile)
-        pto.tstore(o_tile, o_part)
+        pto.tile.load(a_part, a_tile)
+        pto.tile.load(b_part, b_tile)
+        pto.tile.add(a_tile, b_tile, o_tile)
+        pto.tile.store(o_tile, o_part)
 ```
 
 ### Calling L3 sub-kernels directly
 
-When you call an L3 sub-kernel directly from `@pto.jit`, data movement is handled by Tile Ops (`tload`/`tstore`) instead of MTE micro-instructions. PTOAS handles the synchronization between Tile Ops and L3 compute — the sub-kernel itself is unchanged:
+When you call an L3 sub-kernel directly from `@pto.jit`, data movement is handled by Tile Ops (`tile.load`/`tile.store`) instead of MTE micro-instructions. PTOAS handles the synchronization between Tile Ops and L3 compute — the sub-kernel itself is unchanged:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.direct_l3_call","symbol":"kernel_entry_direct_l3_call_probe","compile":{"BLOCK":128}} -->
 ```python
-@pto.cube
-def my_matmul(a_tile, b_tile, l0a, l0b, acc, o_tile):
-    m = a_tile.valid_shape[0]
-    k = a_tile.valid_shape[1]
-    n = b_tile.valid_shape[0]
-    pto.mte_l1_l0a(a_tile.as_ptr(), l0a.as_ptr(), m, k)
-    pto.mte_l1_l0b(b_tile.as_ptr(), l0b.as_ptr(), k, n, transpose=True)
-    pto.mad(l0a.as_ptr(), l0b.as_ptr(), acc.as_ptr(), m, n, k)
-    pto.mte_l0c_ub(acc.as_ptr(), o_tile.as_ptr(), m, n, n, n, 0)
+@pto.simd
+def add_rows(
+    a_tile: pto.Tile,
+    b_tile: pto.Tile,
+    o_tile: pto.Tile,
+    rows: pto.index,
+    cols: pto.index,
+):
+    VEC = pto.elements_per_vreg(pto.f32)
+    initial_remained = scalar.index_cast(pto.i32, cols)
+    with pto.for_(0, rows, step=1) as r:
+        col_loop = pto.for_(0, cols, step=VEC).carry(remained=initial_remained)
+        with col_loop:
+            c = col_loop.iv
+            remained = col_loop.remained
+            mask, remained = pto.make_mask(pto.f32, remained)
+            a_vec = pto.vlds(a_tile[r, c:])
+            b_vec = pto.vlds(b_tile[r, c:])
+            o_vec = pto.vadd(a_vec, b_vec, mask)
+            pto.vsts(o_vec, o_tile[r, c:], mask)
+            col_loop.update(remained=remained)
 
 @pto.jit(target="a5")
-def my_kernel(A, B, O, *, BLOCK: pto.constexpr):
-    N = A.shape[0]
-    a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=[N], strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=[N], strides=O.strides)
+def my_kernel(
+    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    B: pto.tensor_spec(rank=2, dtype=pto.f32),
+    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    *,
+    BLOCK: pto.constexpr = 128,
+):
+    rows = A.shape[0]
+    cols = A.shape[1]
+    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+    b_view = pto.make_tensor_view(B, shape=B.shape, strides=B.strides)
+    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
 
-    a_tile = pto.alloc_tile(shape=[BLOCK, BLOCK], dtype=pto.f32)
-    b_tile = pto.alloc_tile(shape=[BLOCK, BLOCK], dtype=pto.f32)
-    o_tile = pto.alloc_tile(shape=[BLOCK, BLOCK], dtype=pto.f32)
-    l0a = pto.alloc_tile(shape=[BLOCK, BLOCK], dtype=pto.f32, memory_space=pto.MemorySpace.LEFT)
-    l0b = pto.alloc_tile(shape=[BLOCK, BLOCK], dtype=pto.f32, memory_space=pto.MemorySpace.RIGHT)
-    acc = pto.alloc_tile(shape=[BLOCK, BLOCK], dtype=pto.f32, memory_space=pto.MemorySpace.ACC)
+    a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    b_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
-    num_blocks = (N + BLOCK - 1) // BLOCK
-    with pto.for_(0, num_blocks, step=1) as i:
-        offset = i * BLOCK
-        a_part = pto.partition_view(a_view, offsets=[offset, 0], sizes=[BLOCK, BLOCK])
-        b_part = pto.partition_view(b_view, offsets=[offset, 0], sizes=[BLOCK, BLOCK])
-        o_part = pto.partition_view(o_view, offsets=[offset, 0], sizes=[BLOCK, BLOCK])
+    with pto.for_(0, rows, step=1) as row:
+        a_part = pto.partition_view(a_view, offsets=[row, 0], sizes=[1, cols])
+        b_part = pto.partition_view(b_view, offsets=[row, 0], sizes=[1, cols])
+        o_part = pto.partition_view(o_view, offsets=[row, 0], sizes=[1, cols])
 
         # Tile Ops stage data from GM to UB (replaces mte_load at L1)
-        pto.tload(a_part, a_tile)
-        pto.tload(b_part, b_tile)
+        pto.tile.load(a_part, a_tile)
+        pto.tile.load(b_part, b_tile)
 
-        # Direct L3 call — PTOAS handles sync between tload and compute
-        my_matmul(a_tile, b_tile, l0a, l0b, acc, o_tile)
+        # Direct L3 call — PTOAS handles sync between tile.load and compute
+        add_rows(a_tile, b_tile, o_tile, 1, cols)
 
-        pto.tstore(o_tile, o_part)
+        pto.tile.store(o_tile, o_part)
 ```
 
 This is the recommended path for users who want hardware-unit compute without writing explicit MTE Ops and manual sync. Mixing direct L3 calls with Tile Ops and ukernel calls in the same `@pto.jit` body is supported — the compiler unifies the lowering.
@@ -146,32 +169,42 @@ This is the recommended path for users who want hardware-unit compute without wr
 
 ### Role
 
-`@pto.ukernel` (short for *micro-instruction kernel*) is the entry point for writing PTO micro-instructions directly. Unlike `@pto.jit` where you work with tile-level ops (`tload`, `tadd`, etc.), a ukernel lets you write explicit MTE, SIMD, SIMT, and Cube instructions — staging data with `mte_load`, synchronizing with `mem_bar`, and dispatching L3 sub-kernels. This is an advanced programming mode for expert users who need precise control over instruction ordering and hardware-level data movement.
+`@pto.ukernel` (short for *micro-instruction kernel*) is the entry point for writing PTO micro-instructions directly. Unlike `@pto.jit` where you work with tile-level ops (`tile.load`, `tile.add`, etc.), a ukernel lets you write explicit MTE, SIMD, SIMT, and Cube instructions — staging data with `mte_load`, synchronizing with `mem_bar`, and dispatching L3 sub-kernels. This is an advanced programming mode for expert users who need precise control over instruction ordering and hardware-level data movement.
 
 ### Signature
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.ukernel_signature","symbol":"kernel_entry_ukernel_signature_probe","compile":{"BLOCK":16}} -->
 ```python
 @pto.ukernel
 def my_ukernel(
     part: pto.PartitionTensorView,   # GM partition descriptors
     tile: pto.Tile,                  # UB tile buffers
     scratch: pto.Tile,               # cube-local scratch (LEFT, RIGHT, ...)
-    ptr: pto.ptr(dtype, space),      # typed UB pointers
-    scalar: pto.i32,                 # PTO scalar values
+    ptr: pto.ptr(pto.f32, pto.MemorySpace.UB),  # typed UB pointers
+    scalar_value: pto.i32,           # PTO scalar values
 ):
+    return
 ```
 
 Parameters are PTO-specific types — `Tile`, `PartitionTensorView`, `pto.ptr`, and PTO scalar types. Unlike `@pto.jit`, a ukernel does not accept Python-native tensors.
 
 ### Typical body
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.ukernel_body","symbol":"kernel_entry_ukernel_body_probe","compile":{"ROWS":8,"COLS":16}} -->
 ```python
 @pto.ukernel
-def process_block(k_part, v_part, k_tile, v_tile,
-                  s_tile, o_tile, rows: pto.i32, cols: pto.i32):
+def process_block(q_tile, k_part, v_part, k_tile, v_tile,
+                  s_tile, o_tile, o_part, rows: pto.i32, cols: pto.i32):
+    in_row_bytes = cols * pto.bytewidth(pto.f16)
+    out_row_bytes = cols * pto.bytewidth(pto.f32)
+    gm_row_stride = k_part.strides[0] * pto.bytewidth(pto.f16)
+    ub_row_stride = k_tile.shape[1] * pto.bytewidth(pto.f16)
+
     # Stage current block from GM to UB
-    pto.mte_load(k_part, k_tile)
-    pto.mte_load(v_part, v_tile)
+    pto.mte_load(k_part.as_ptr(), k_tile.as_ptr(), 0, in_row_bytes,
+                 nburst=(rows, gm_row_stride, ub_row_stride))
+    pto.mte_load(v_part.as_ptr(), v_tile.as_ptr(), 0, in_row_bytes,
+                 nburst=(rows, gm_row_stride, ub_row_stride))
     pto.pipe_barrier(pto.Pipe.ALL)
 
     # Dispatch sub-kernels
@@ -182,10 +215,11 @@ def process_block(k_part, v_part, k_tile, v_tile,
     pto.pipe_barrier(pto.Pipe.ALL)
 
     # Write result back
-    pto.mte_store(o_tile, o_part)
+    pto.mte_store(o_tile.as_ptr(), o_part.as_ptr(), out_row_bytes,
+                  nburst=(rows, ub_row_stride, gm_row_stride))
 ```
 
-A ukernel stays below the tile-op boundary — GM↔UB movement is expressed with `mte_load`/`mte_store` (MTE Ops) rather than `tload`/`tstore`.
+A ukernel stays below the tile-op boundary — GM↔UB movement is expressed with ptr-based `mte_load`/`mte_store` (MTE Ops) rather than `tile.load`/`tile.store`.
 
 ## 3.4 `@pto.cube` — Cube unit sub-kernel
 
@@ -195,6 +229,7 @@ A ukernel stays below the tile-op boundary — GM↔UB movement is expressed wit
 
 ### Signature
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.cube_signature","symbol":"kernel_entry_cube_signature_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16}} -->
 ```python
 @pto.cube
 def my_cube_kernel(
@@ -204,12 +239,14 @@ def my_cube_kernel(
     right_scratch: pto.Tile,         # RIGHT buffer (cube-local)
     acc_scratch: pto.Tile,           # ACC buffer (cube-local)
 ):
+    return
 ```
 
 All parameters are `Tile` references. Tiles marked as cube-local must be allocated with the appropriate `memory_space` (e.g., `pto.MemorySpace.LEFT`, `pto.MemorySpace.ACC`).
 
 ### Typical body
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.cube_helper","symbol":"data_movement_cube_helper_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16}} -->
 ```python
 @pto.cube
 def qk_matmul(
@@ -222,7 +259,7 @@ def qk_matmul(
 ):
     m = q_tile.valid_shape[0]
     k = q_tile.valid_shape[1]
-    n = k_tile.valid_shape[0]
+    n = k_tile.valid_shape[1]
 
     pto.mte_l1_l0a(q_tile.as_ptr(), q_l0a.as_ptr(), m, k)
     pto.mte_l1_l0b(k_tile.as_ptr(), k_l0b.as_ptr(), k, n, transpose=True)
@@ -245,6 +282,7 @@ Cube-local state (LEFT, RIGHT, ACC, BIAS) never leaks into UB — it is the call
 
 ### Signature
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.simd_signature","symbol":"kernel_entry_simd_signature_probe","compile":{"BLOCK":128}} -->
 ```python
 @pto.simd
 def my_simd_kernel(
@@ -253,19 +291,22 @@ def my_simd_kernel(
     rows: pto.i32,                   # PTO scalar
     cols: pto.i32,                   # PTO scalar
 ):
+    return
 ```
 
 Parameters are UB `Tile` references and PTO scalar values (`pto.i32`, `pto.f32`, etc.). Scalar parameters may come from `lds` reads or compile-time constants.
 
 ### Typical body
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.simd_body","symbol":"kernel_entry_simd_body_probe","compile":{"BLOCK":128}} -->
 ```python
 @pto.simd
 def add_rows(a_tile: pto.Tile, b_tile: pto.Tile, o_tile: pto.Tile,
-             rows: pto.i32, cols: pto.i32):
+             rows: pto.index, cols: pto.index):
     VEC = pto.elements_per_vreg(pto.f32)
+    initial_remained = scalar.index_cast(pto.i32, cols)
     with pto.for_(0, rows, step=1) as r:
-        col_loop = pto.for_(0, cols, step=VEC).carry(remained=cols)
+        col_loop = pto.for_(0, cols, step=VEC).carry(remained=initial_remained)
         with col_loop:
             c = col_loop.iv
             remained = col_loop.remained
@@ -292,17 +333,20 @@ The boundary contract: `vreg` values (`a_vec`, `b_vec`, `o_vec`) are local to th
 
 ### Signature
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.simt_signature","symbol":"kernel_entry_simt_signature_probe","compile":{"BLOCK":8}} -->
 ```python
 @pto.simt
 def my_simt_kernel(
     tile: pto.Tile,                  # UB tile
-    ptr: pto.ptr(dtype, space),      # typed UB pointer
-    scalar: pto.i32,                 # PTO scalar
+    ptr: pto.ptr(pto.f32, pto.MemorySpace.UB),  # typed UB pointer
+    scalar_value: pto.i32,           # PTO scalar
 ):
+    return
 ```
 
 ### Typical body
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.simt_blend","symbol":"flash_attention_simt_blend_probe","compile":{"BLOCK":8}} -->
 ```python
 @pto.simt
 def blend_output_rows(
@@ -330,10 +374,11 @@ SIMT kernels read and write individual scalar elements from tiles. The unit exec
 
 ## 3.7 Context manager syntax for L3 sub-kernels
 
-In addition to the decorator form, each L3 sub-kernel unit provides a context manager: `with pto.cube():`, `with pto.simd():`, and `with pto.simt():`. These open an inline L3 block without requiring a separate named function — useful for quick prototyping, one-off compute snippets, or when the logic is too trivial to extract.
+In addition to the decorator form, each L3 sub-kernel unit provides a context manager: `with pto.cube():`, `with pto.simd():`, and `with pto.simt():`. These open an inline L3 block without requiring a separate named function — useful for quick prototyping, one-off compute snippets, or when the logic is too trivial to extract. The inline form is supported in top-level `@pto.jit` bodies and inside `@pto.ukernel`.
 
 ### Syntax
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.inline_simd_scope","symbol":"kernel_entry_inline_simd_scope_probe","compile":{"BLOCK":128}} -->
 ```python
 with pto.simd():
     # Direct L3 instructions — vreg ops, scalar loads/stores
@@ -343,6 +388,7 @@ with pto.simd():
     pto.vsts(o_vec, o_tile[r, c:], mask)
 ```
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.inline_simt_scope","symbol":"kernel_entry_inline_simt_scope_probe","compile":{"BLOCK":8}} -->
 ```python
 with pto.simt():
     alpha = scalar.load(alpha_tile[row, 0])
@@ -351,6 +397,7 @@ with pto.simt():
     scalar.store(o_next, o_next_tile[row, col])
 ```
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.inline_cube_scope","symbol":"kernel_entry_inline_cube_scope_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16}} -->
 ```python
 with pto.cube():
     pto.mte_l1_l0a(q_tile.as_ptr(), q_l0a.as_ptr(), m, k)
@@ -396,10 +443,17 @@ Data crosses decorator boundaries only through UB-backed tiles or typed UB point
 
 `pto.constexpr` marks a `@pto.jit` keyword-only parameter as a compile-time constant. The compiler specializes the kernel for each combination of constexpr values, and the compiled artifact is cached by specialization key together with the kernel's tensor ABI contract.
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel","compile":{}} -->
 ```python
 @pto.jit(target="a5")
-def kernel(A, *, BLOCK: pto.constexpr = 128, DTYPE: pto.constexpr = pto.f32):
-    ...
+def kernel(
+    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    *,
+    BLOCK: pto.constexpr = 128,
+    DTYPE: pto.constexpr = pto.f32,
+):
+    # ... use BLOCK / DTYPE in tile shapes, loop bounds, or dtype-specialized paths ...
+    return
 ```
 
 - Must appear as a keyword-only argument (after `*`).

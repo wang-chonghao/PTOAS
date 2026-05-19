@@ -46,22 +46,16 @@ Hardware pipeline identifiers used with `pto.set_flag`, `pto.wait_flag`, and `pt
 
 The most commonly used pipes in synchronization are `MTE2` (GM ↔ UB DMA), `MTE3` (UB ↔ UB DMA), `V` (vector compute), and `M` (matrix compute).
 
-### `Event`
+### `event_id`
 
-Event identifiers for pipeline synchronization flags. The hardware provides 8 event IDs (0–7) per pipeline pair, supporting up to 8 concurrent in-flight DMA/compute sequences.
+Event identifiers for pipeline synchronization flags. The hardware provides 8 event IDs (`0`–`7`) per pipeline pair, supporting up to 8 concurrent in-flight DMA/compute sequences.
 
-| Member | Value |
-|--------|-------|
-| `ID0` | Event 0 |
-| `ID1` | Event 1 |
-| `ID2` | Event 2 |
-| `ID3` | Event 3 |
-| `ID4` | Event 4 |
-| `ID5` | Event 5 |
-| `ID6` | Event 6 |
-| `ID7` | Event 7 |
+In PTODSL, `event_id` may be either:
 
-Events are per-pipeline-pair: the same `ID0` used between `MTE2 → V` is independent from `ID0` used between `MTE3 → V`.
+- a Python integer literal in `0`–`7`
+- a runtime index-like PTO scalar value
+
+Events are per-pipeline-pair: the same `event_id=0` used between `MTE2 → V` is independent from `event_id=0` used between `MTE3 → V`.
 
 ---
 
@@ -69,7 +63,7 @@ Events are per-pipeline-pair: the same `ID0` used between `MTE2 → V` is indepe
 
 Pipeline synchronization is the primary mechanism for ordering work across pipelines. The pattern is always **signal then wait**: the producer pipeline sets a flag when its work is done; the consumer pipeline waits on that flag before proceeding.
 
-### `pto.set_flag(pipe_from, pipe_to, event_id)`
+### `pto.set_flag(pipe_from, pipe_to, *, event_id=0)`
 
 **Description**: Sets a synchronization flag between two hardware pipelines. The producing pipeline signals that work up to this point is complete.
 
@@ -79,20 +73,19 @@ Pipeline synchronization is the primary mechanism for ordering work across pipel
 |-----------|------|-------------|
 | `pipe_from` | `Pipe` | Source pipeline — the pipeline that has completed its work |
 | `pipe_to` | `Pipe` | Destination pipeline — the pipeline being notified |
-| `event_id` | `Event` | Event identifier for this specific synchronization point |
+| `event_id` | `int` or index-like PTO scalar | Event identifier for this specific synchronization point (`0`–`7`) |
 
 **Returns**: None (side-effect operation).
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
 ```python
-from pto import Pipe, Event
-
 # MTE2 has finished loading tile data — signal Vector pipeline
-pto.set_flag(Pipe.MTE2, Pipe.V, Event.ID0)
+pto.set_flag(pto.Pipe.MTE2, pto.Pipe.V, event_id=0)
 ```
 
-### `pto.wait_flag(pipe_from, pipe_to, event_id)`
+### `pto.wait_flag(pipe_from, pipe_to, *, event_id=0)`
 
 **Description**: Waits for a synchronization flag. The consuming pipeline blocks until the flag is set by the producing pipeline.
 
@@ -102,17 +95,16 @@ pto.set_flag(Pipe.MTE2, Pipe.V, Event.ID0)
 |-----------|------|-------------|
 | `pipe_from` | `Pipe` | Source pipeline that set the flag |
 | `pipe_to` | `Pipe` | Destination pipeline — the pipeline that is waiting |
-| `event_id` | `Event` | Event identifier matching the corresponding `set_flag` |
+| `event_id` | `int` or index-like PTO scalar | Event identifier matching the corresponding `set_flag` (`0`–`7`) |
 
 **Returns**: None (side-effect operation).
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
 ```python
-from pto import Pipe, Event
-
 # Vector pipeline waits for MTE2 to finish loading
-pto.wait_flag(Pipe.MTE2, Pipe.V, Event.ID0)
+pto.wait_flag(pto.Pipe.MTE2, pto.Pipe.V, event_id=0)
 ```
 
 ### `pto.pipe_barrier(pipes)`
@@ -129,41 +121,60 @@ pto.wait_flag(Pipe.MTE2, Pipe.V, Event.ID0)
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
 ```python
-from pto import Pipe
-
 # Full hardware barrier — all pipelines synchronize
-pto.pipe_barrier(Pipe.ALL)
+pto.pipe_barrier(pto.Pipe.ALL)
 ```
 
 ### Typical usage pattern
 
 A common ukernel pattern interleaves DMA and compute with `set_flag` / `wait_flag` pairs:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.flag_pattern_ukernel","symbol":"sync_ops_flag_pattern_ukernel_probe","compile":{"ROWS":8,"COLS":16}} -->
 ```python
 @pto.ukernel
-def gemm_block(q_tile, k_tile, v_tile, o_tile, ...):
+def gemm_block(
+    q_tile: pto.Tile,
+    k_part: pto.PartitionTensorView,
+    v_part: pto.PartitionTensorView,
+    k_tile: pto.Tile,
+    v_tile: pto.Tile,
+    p_tile: pto.Tile,
+    o_tile: pto.Tile,
+    o_part: pto.PartitionTensorView,
+    rows: pto.i32,
+    cols: pto.i32,
+):
     # DMA: load K and V tiles from GM to UB
-    # mte_load derives strides, burst sizes, etc. from k_part / k_tile types
-    pto.mte_load(k_part, k_tile)
-    pto.mte_load(v_part, v_tile)
+    row_bytes = cols * pto.bytewidth(pto.f16)
+    gm_row_stride = k_part.strides[0] * pto.bytewidth(pto.f16)
+    ub_row_stride = k_tile.shape[1] * pto.bytewidth(pto.f16)
+    out_row_bytes = cols * pto.bytewidth(pto.f32)
+    out_gm_row_stride = o_part.strides[0] * pto.bytewidth(pto.f32)
+    out_ub_row_stride = o_tile.shape[1] * pto.bytewidth(pto.f32)
+    pto.mte_load(k_part.as_ptr(), k_tile.as_ptr(), 0, row_bytes,
+                 nburst=(rows, gm_row_stride, ub_row_stride))
+    pto.mte_load(v_part.as_ptr(), v_tile.as_ptr(), 0, row_bytes,
+                 nburst=(rows, gm_row_stride, ub_row_stride))
 
     # Signal: DMA done, UB data ready
-    pto.set_flag(Pipe.MTE2, Pipe.V, Event.ID0)
+    pto.set_flag(pto.Pipe.MTE2, pto.Pipe.V, event_id=0)
 
     # Wait: vector pipeline stalls until data arrives
-    pto.wait_flag(Pipe.MTE2, Pipe.V, Event.ID0)
+    pto.wait_flag(pto.Pipe.MTE2, pto.Pipe.V, event_id=0)
 
     # Compute: now safe to use k_tile and v_tile
-    qk_matmul(q_tile, k_tile, ...)
-    pv_matmul(p_tile, v_tile, ...)
+    qk_matmul(q_tile, k_tile, p_tile)
+    pv_matmul(p_tile, v_tile, o_tile)
 
     # Signal: compute done, results ready for store
-    pto.set_flag(Pipe.V, Pipe.MTE3, Event.ID1)
-    pto.wait_flag(Pipe.V, Pipe.MTE3, Event.ID1)
+    pto.set_flag(pto.Pipe.V, pto.Pipe.MTE3, event_id=1)
+    pto.wait_flag(pto.Pipe.V, pto.Pipe.MTE3, event_id=1)
 
     # DMA: store results back to GM
-    pto.mte_store(o_tile, o_part)
+    pto.mte_store(o_tile.as_ptr(), o_part.as_ptr(), out_row_bytes,
+                  nburst=(rows, out_ub_row_stride, out_gm_row_stride))
 ```
 
 ---
@@ -202,23 +213,22 @@ Double-buffering is a common optimization in NPU kernels: while one buffer is be
 
 ### Double-buffering example
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
 ```python
-from pto import Pipe
-
 # Pipeline V acquires buffer 0 for compute
-pto.get_buf(Pipe.V, 0, 0)
+pto.get_buf(pto.Pipe.V, 0, 0)
 
 # ... compute into buffer 0 ...
 
 # Release buffer 0 — DMA can now refill it
-pto.rls_buf(Pipe.V, 0, 0)
+pto.rls_buf(pto.Pipe.V, 0, 0)
 
 # Pipeline MTE2 acquires buffer 0 for reload
-pto.get_buf(Pipe.MTE2, 0, 0)
+pto.get_buf(pto.Pipe.MTE2, 0, 0)
 
 # ... DMA loads next block into buffer 0 ...
 
-pto.rls_buf(Pipe.MTE2, 0, 0)
+pto.rls_buf(pto.Pipe.MTE2, 0, 0)
 ```
 
 ---
@@ -241,11 +251,10 @@ Within a single pipeline, load and store instructions may be reordered by the ha
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
 ```python
-from pto import BarrierType
-
 # Ensure all prior vector stores are visible before any subsequent vector loads
-pto.mem_bar(BarrierType.VST_VLD)
+pto.mem_bar(pto.BarrierType.VST_VLD)
 ```
 
 The most commonly used barrier types in practice:
@@ -262,29 +271,49 @@ The most commonly used barrier types in practice:
 In flash attention, phase boundaries use `pipe_barrier(Pipe.ALL)`, while
 `mem_bar` remains the tool for narrower intra-pipeline ordering:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.phase_barrier_ukernel","symbol":"sync_ops_phase_barrier_ukernel_probe","compile":{"ROWS":8,"COLS":16}} -->
 ```python
 @pto.ukernel
-def flash_attention_block(q_tile, k_tile, v_tile, ...):
+def flash_attention_block(
+    q_tile: pto.Tile,
+    k_part: pto.PartitionTensorView,
+    v_part: pto.PartitionTensorView,
+    k_tile: pto.Tile,
+    v_tile: pto.Tile,
+    s_tile: pto.Tile,
+    p_tile: pto.Tile,
+    pv_tile: pto.Tile,
+    o_prev_tile: pto.Tile,
+    o_next_tile: pto.Tile,
+    rows: pto.i32,
+    cols: pto.i32,
+):
     # Phase 1: load K/V
-    pto.mte_load(k_part, k_tile)
-    pto.mte_load(v_part, v_tile)
-    pto.pipe_barrier(Pipe.ALL)
+    row_bytes = cols * pto.bytewidth(pto.f16)
+    gm_row_stride = k_part.strides[0] * pto.bytewidth(pto.f16)
+    ub_row_stride = k_tile.shape[1] * pto.bytewidth(pto.f16)
+    pto.mte_load(k_part.as_ptr(), k_tile.as_ptr(), 0, row_bytes,
+                 nburst=(rows, gm_row_stride, ub_row_stride))
+    pto.mte_load(v_part.as_ptr(), v_tile.as_ptr(), 0, row_bytes,
+                 nburst=(rows, gm_row_stride, ub_row_stride))
+    pto.pipe_barrier(pto.Pipe.ALL)
 
     # Phase 2: S = Q @ K^T
-    qk_matmul(q_tile, k_tile, ...)
-    pto.pipe_barrier(Pipe.ALL)
+    qk_matmul(q_tile, k_tile, s_tile)
+    pto.pipe_barrier(pto.Pipe.ALL)
 
     # Phase 3: softmax(S)
-    online_softmax(s_tile, ...)
-    pto.pipe_barrier(Pipe.ALL)
+    online_softmax(s_tile, p_tile, rows, cols)
+    pto.mem_bar(pto.BarrierType.VV_ALL)
+    pto.pipe_barrier(pto.Pipe.ALL)
 
     # Phase 4: PV = P @ V
-    pv_matmul(p_tile, v_tile, ...)
-    pto.pipe_barrier(Pipe.ALL)
+    pv_matmul(p_tile, v_tile, pv_tile)
+    pto.pipe_barrier(pto.Pipe.ALL)
 
     # Phase 5: blend output
-    blend_output(o_prev_tile, pv_tile, ...)
-    pto.pipe_barrier(Pipe.ALL)
+    blend_output(o_prev_tile, pv_tile, o_next_tile, rows, cols)
+    pto.pipe_barrier(pto.Pipe.ALL)
 ```
 
 ---
@@ -293,85 +322,82 @@ def flash_attention_block(q_tile, k_tile, v_tile, ...):
 
 Section 10.2 covers the general pipe-to-pipe sync mechanism (`set_flag`/`wait_flag`). This section covers two additional sync domains that the pipe-flag mechanism does not address: **cross-core** communication between separate NPU cores, and **intra-block** synchronization between the Cube and Vector units within a block.
 
-### 10.5.1 Cross-core sync: `set_cross_core`, `wait_flag_dev`
+### 10.5.1 Cross-core sync: `set_cross_flag`, `wait_cross_flag`
 
-When a kernel spans multiple cores, cores need to coordinate through shared resources. `set_cross_core` sends a signal to another core; `wait_flag_dev` blocks the calling core until the expected signal arrives.
+When a kernel spans multiple cores, cores need to coordinate through shared resources. `set_cross_flag` sends a signal to another core; `wait_cross_flag` blocks the calling core until the expected signal arrives.
 
-These are core-level (SU) operations — `wait_flag_dev` stalls the entire core, not just a single pipeline. Use them sparingly: splitting work so that each core operates independently for as long as possible minimises cross-core sync overhead.
+These are core-level (SU) operations — `wait_cross_flag` stalls the entire core, not just a single pipeline. Use them sparingly: splitting work so that each core operates independently for as long as possible minimises cross-core sync overhead.
 
-#### `pto.set_cross_core(core_id, event_id)`
+#### `pto.set_cross_flag(pipe, event_id)`
 
-**Description**: Signal an event to another core, indicating that shared data or a pipeline stage is ready.
-
-**Parameters**:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `core_id` | `pto.i64` | Target core identifier (platform-specific mapping) |
-| `event_id` | `Event` | Cross-core event identifier |
-
-**Returns**: None (side-effect operation).
-
-**Example**:
-
-```python
-from pto import Event
-
-# Signal core 0 that our computation is complete
-pto.set_cross_core(0, Event.ID0)
-```
-
-#### `pto.wait_flag_dev(core_id, event_id)`
-
-**Description**: Wait for an event from another core. Core-level (SU) blocking — the entire core stalls until the event is received.
+**Description**: Signal an event on a synchronization endpoint. In the current PTODSL surface this is authored with a `Pipe`; the backend maps it to the architecture-specific cross-core / intra-block builtin during lowering.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `core_id` | `pto.i64` | Source core identifier |
-| `event_id` | `Event` | Event identifier to wait on |
+| `pipe` | `Pipe` | Producing endpoint for the synchronization event. The public DSL accepts `Pipe.FIX` here. |
+| `event_id` | `int` | Cross-core event identifier (`0`–`7`) |
 
 **Returns**: None (side-effect operation).
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
 ```python
-from pto import Event
-
-# Core 1 waits for core 0 to signal event ID0
-pto.wait_flag_dev(0, Event.ID0)
+# Signal from the FIX/Cube-side endpoint
+pto.set_cross_flag(pto.Pipe.FIX, 0)
 ```
 
-### 10.5.2 Intra-block sync: `set_intra_block`, `wait_intra_core`
+#### `pto.wait_cross_flag(pipe, event_id)`
 
-The Cube unit (matrix pipeline) has a dedicated synchronization channel separate from the standard pipe-flag mechanism used by MTE and Vector pipelines. `set_intra_block` and `wait_intra_core` synchronize Cube and Vector within the same block, ensuring that shared UB tile data is not accessed before the producer finishes.
-
-Unlike `wait_flag_dev`, `wait_intra_core` only stalls the specified pipeline — the SU and other pipelines continue executing.
-
-#### `pto.set_intra_block(block_id, event_id)`
-
-**Description**: Signal a synchronization event within a block. Specifies which trigger pipe fires the event.
+**Description**: Wait for an event on a synchronization endpoint. On architectures that lower this surface to the backend `sync.wait` primitive, the wait is core-level (SU) blocking.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `block_id` | `pto.i64` | Block or pipeline identifier for the trigger source |
-| `event_id` | `Event` | Event identifier |
+| `pipe` | `Pipe` | Waiting endpoint for the synchronization event. The public DSL accepts `Pipe.FIX` here. |
+| `event_id` | `int` | Event identifier to wait on (`0`–`7`) |
 
 **Returns**: None (side-effect operation).
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
 ```python
-from pto import Event
-
-# Signal event ID0 on block/pipeline 0
-pto.set_intra_block(0, Event.ID0)
+# Wait on the FIX/Cube-side endpoint
+pto.wait_cross_flag(pto.Pipe.FIX, 0)
 ```
 
-#### `pto.wait_intra_core(block_id, event_id)`
+### 10.5.2 Intra-block sync: `set_intra_flag`, `wait_intra_flag`
+
+The Cube unit (matrix pipeline) has a dedicated synchronization channel separate from the standard pipe-flag mechanism used by MTE and Vector pipelines. `set_intra_flag` and `wait_intra_flag` synchronize Cube and Vector within the same block, ensuring that shared UB tile data is not accessed before the producer finishes.
+
+Unlike `wait_cross_flag`, `wait_intra_flag` only stalls the specified pipeline — the SU and other pipelines continue executing.
+
+#### `pto.set_intra_flag(pipe, event_id)`
+
+**Description**: Signal a synchronization event within a block. The current PTODSL surface authors the trigger endpoint explicitly as a `Pipe`.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `pipe` | `Pipe` | Trigger endpoint for the synchronization event. The public DSL accepts `Pipe.MTE3` here. |
+| `event_id` | `int` | Event identifier (`0`–`7`) |
+
+**Returns**: None (side-effect operation).
+
+**Example**:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
+```python
+# Signal event ID0 from the MTE3-side endpoint
+pto.set_intra_flag(pto.Pipe.MTE3, 0)
+```
+
+#### `pto.wait_intra_flag(pipe, event_id)`
 
 **Description**: Wait for an intra-block event. Only the specified pipeline stalls — the SU and other pipelines continue executing independently.
 
@@ -379,41 +405,18 @@ pto.set_intra_block(0, Event.ID0)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `block_id` | `pto.i64` | Block or pipeline identifier specifying which pipeline waits |
-| `event_id` | `Event` | Event identifier to wait on |
+| `pipe` | `Pipe` | Waiting endpoint for the synchronization event. The public DSL accepts `Pipe.V` here. |
+| `event_id` | `int` | Event identifier to wait on (`0`–`7`) |
 
 **Returns**: None (side-effect operation).
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"sync_ops.basic","symbol":"sync_ops_basic_probe","compile":{}} -->
 ```python
-from pto import Event
-
-# Pipeline 1 waits for event ID0 from pipeline 0 within the same block
-pto.wait_intra_core(1, Event.ID0)
+# Vector-side endpoint waits for event ID0
+pto.wait_intra_flag(pto.Pipe.V, 0)
 ```
-
-### 10.5.3 Intra-core configuration: `set_intra_core`
-
-#### `pto.set_intra_core(config)`
-
-**Description**: Configures intra-core synchronization parameters. The meaning of `config` is hardware-specific.
-
-**Parameters**:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `config` | `pto.i32` | Hardware-specific configuration value |
-
-**Returns**: None (side-effect operation).
-
-**Example**:
-
-```python
-pto.set_intra_core(3)
-```
-
----
 
 ## 10.6 Synchronization in the abstraction hierarchy
 
@@ -429,17 +432,17 @@ Where do sync operations belong in PTODSL's layered model?
 
 ### Auto-sync at the tile level
 
-When writing `@pto.jit` code with tile ops (`tload`, `tstore`, `tadd`, etc.), each op carries a pipe assignment (e.g., `tload` → `PIPE_MTE2`, `tadd` → `PIPE_V`). PTOAS's sync-insertion pass analyzes the op sequence, infers the necessary `set_flag`/`wait_flag` pairs from the pipe transitions, and injects them into the lowered code. The tile ops themselves still require synchronization — the difference is that the compiler, not the user, writes it.
+When writing `@pto.jit` code with tile ops (`tile.load`, `tile.store`, `tile.add`, etc.), each op carries a pipe assignment (e.g., `tile.load` → `PIPE_MTE2`, `tile.add` → `PIPE_V`). PTOAS's sync-insertion pass analyzes the op sequence, infers the necessary `set_flag`/`wait_flag` pairs from the pipe transitions, and injects them into the lowered code. The tile ops themselves still require synchronization — the difference is that the compiler, not the user, writes it.
 
 ### Quick reference: which sync for which scenario
 
 | Scenario | Sync primitive |
 |----------|----------------|
-| DMA load must finish before compute | `set_flag(MTE2, V, id)` + `wait_flag(MTE2, V, id)` |
-| Compute must finish before DMA store | `set_flag(V, MTE3, id)` + `wait_flag(V, MTE3, id)` |
+| DMA load must finish before compute | `set_flag(MTE2, V, event_id=id)` + `wait_flag(MTE2, V, event_id=id)` |
+| Compute must finish before DMA store | `set_flag(V, MTE3, event_id=id)` + `wait_flag(V, MTE3, event_id=id)` |
 | Two compute phases must not overlap | `mem_bar(BarrierType.VV_ALL)` |
 | Store must be visible to later load (same UB) | `mem_bar(BarrierType.VST_VLD)` |
 | Full pipeline sync point | `pipe_barrier(Pipe.ALL)` |
 | Double-buffer handoff (compute → DMA) | `rls_buf(V, id)` + `get_buf(MTE2, id)` |
 | Double-buffer handoff (DMA → compute) | `rls_buf(MTE2, id)` + `get_buf(V, id)` |
-| Core A notifies core B | `set_cross_core(B, id)` + `wait_flag_dev(A, id)` |
+| Core A notifies core B | `set_cross_flag(B, id)` + `wait_cross_flag(A, id)` |

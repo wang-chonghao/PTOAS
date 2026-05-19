@@ -52,6 +52,12 @@ def float_loop_bound_probe():
 
 
 @pto.jit(target="a5")
+def float_addptr_offset_probe():
+    tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 4])
+    _ = pto.addptr(tile.as_ptr(), pto.const(1.5, dtype=pto.f32))
+
+
+@pto.jit(target="a5")
 def carry_update_mismatch_probe(*, BLOCK: pto.constexpr = 8):
     acc = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     loop = pto.for_(0, 1, step=1).carry(acc=acc)
@@ -98,6 +104,84 @@ def define_missing_constexpr_default_probe():
     return bad_probe
 
 
+@pto.jit(target="a5")
+def missing_if_branch_probe():
+    with pto.if_(pto.const(1, dtype=pto.i1)) as br:
+        _ = br
+
+
+@pto.jit(target="a5")
+def stray_if_body_op_probe():
+    with pto.if_(pto.const(1, dtype=pto.i1)) as br:
+        pto.pipe_barrier(pto.Pipe.ALL)
+        with br.then_:
+            pto.mem_bar(pto.BarrierType.VST_VLD)
+
+
+@pto.jit(target="a5")
+def assign_outside_branch_probe():
+    with pto.if_(pto.const(1, dtype=pto.i1)) as br:
+        br.assign(val=pto.const(1, dtype=pto.i32))
+
+
+@pto.jit(target="a5")
+def missing_else_assign_probe():
+    lhs = pto.const(4, dtype=pto.i32)
+    rhs = pto.const(2, dtype=pto.i32)
+    with pto.if_(lhs > rhs) as br:
+        with br.then_:
+            br.assign(val=lhs)
+        with br.else_:
+            pto.pipe_barrier(pto.Pipe.ALL)
+
+
+@pto.jit(target="a5")
+def assign_name_mismatch_probe():
+    lhs = pto.const(4, dtype=pto.i32)
+    rhs = pto.const(2, dtype=pto.i32)
+    with pto.if_(lhs > rhs) as br:
+        with br.then_:
+            br.assign(val=lhs)
+        with br.else_:
+            br.assign(other=rhs)
+
+
+@pto.jit(target="a5")
+def assign_type_mismatch_probe():
+    lhs = pto.const(4, dtype=pto.i32)
+    rhs = pto.const(2.0, dtype=pto.f32)
+    cond = lhs > pto.const(0, dtype=pto.i32)
+    with pto.if_(cond) as br:
+        with br.then_:
+            br.assign(val=lhs)
+        with br.else_:
+            br.assign(val=rhs)
+
+
+@pto.jit(target="a5")
+def duplicate_assign_probe():
+    lhs = pto.const(4, dtype=pto.i32)
+    cond = lhs > pto.const(0, dtype=pto.i32)
+    with pto.if_(cond) as br:
+        with br.then_:
+            br.assign(val=lhs)
+            br.assign(val=lhs)
+        with br.else_:
+            br.assign(val=lhs)
+
+
+@pto.jit(target="a5")
+def unknown_branch_result_probe():
+    lhs = pto.const(4, dtype=pto.i32)
+    rhs = pto.const(2, dtype=pto.i32)
+    with pto.if_(lhs > rhs) as br:
+        with br.then_:
+            br.assign(val=lhs)
+        with br.else_:
+            br.assign(val=rhs)
+    _ = br.other
+
+
 def main() -> None:
     expect_raises(
         native_python_if_runtime_const_probe.compile,
@@ -118,6 +202,13 @@ def main() -> None:
         TypeError,
         "pto.for_(...) loop bound",
         "expects an index or integer runtime scalar",
+        "f32",
+    )
+    expect_raises(
+        float_addptr_offset_probe.compile,
+        TypeError,
+        "addptr(ptr, offset)",
+        "expects an index-like scalar",
         "f32",
     )
     expect_raises(
@@ -146,6 +237,50 @@ def main() -> None:
         define_missing_constexpr_default_probe,
         TypeError,
         "@pto.jit constexpr parameter 'BLOCK' must declare a default value",
+    )
+    expect_raises(
+        missing_if_branch_probe.compile,
+        RuntimeError,
+        "requires at least one explicit branch block",
+        "with br.then_:",
+    )
+    expect_raises(
+        stray_if_body_op_probe.compile,
+        RuntimeError,
+        "body may only contain explicit 'with br.then_:' / 'with br.else_:' blocks",
+        "outer if body",
+    )
+    expect_raises(
+        assign_outside_branch_probe.compile,
+        RuntimeError,
+        "br.assign(...) may only be used inside br.then_ or br.else_",
+    )
+    expect_raises(
+        missing_else_assign_probe.compile,
+        RuntimeError,
+        "automatic branch merge requires both br.then_ and br.else_ to call br.assign(...)",
+    )
+    expect_raises(
+        assign_name_mismatch_probe.compile,
+        RuntimeError,
+        "br.assign(...) names must match across branches",
+        "missing in else: val",
+        "missing in then: other",
+    )
+    expect_raises(
+        assign_type_mismatch_probe.compile,
+        RuntimeError,
+        "br.assign(...) type mismatch for 'val'",
+    )
+    expect_raises(
+        duplicate_assign_probe.compile,
+        RuntimeError,
+        "br.then_ may call br.assign(...) at most once",
+    )
+    expect_raises(
+        unknown_branch_result_probe.compile,
+        AttributeError,
+        "br.other was not assigned by this conditional",
     )
     expect_raises(
         lambda: inspect_host_tensor_metadata(MissingDTypeTensor()),

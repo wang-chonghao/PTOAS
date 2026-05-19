@@ -1,12 +1,12 @@
 # 6. Scalar and Pointer Operations
 
-Chapter 5 established the rule: Python constructs are resolved at trace time, PTO constructs produce device-side behavior. This chapter applies that distinction to scalars and pointers — when to use a plain Python number, when to use a `scalar.*` operation, and how to work with typed pointers.
+Chapter 5 established the rule: Python constructs are resolved at trace time, PTO constructs produce device-side behavior. This chapter applies that distinction to scalars and pointers — when to use a plain Python number, when to use a top-level `scalar.*` helper, and how to work with typed pointers.
 
 ## 6.1 Python scalars vs PTO scalars
 
 A **Python scalar** is any value computed by Python during tracing: a literal (`3.14159`), a constexpr parameter (`BLOCK`), or an arithmetic expression built only from compile-time-known values (`1.0 / sqrt(128)`). These are evaluated at trace time and their results are baked into the device code as constants.
 
-A **PTO scalar** is a value that lives on the device at runtime. It comes from a `scalar.load` read, a device-side computation (`scalar.max`, `scalar.exp`), a runtime query (`pto.get_block_idx()`), or `@pto.jit` tensor metadata such as `A.shape[0]` / `A.strides[1]`. PTO scalars flow through the recorded program and are not resolved until the kernel executes.
+A **PTO scalar** is a value that lives on the device at runtime. It comes from a `scalar.load` read, a device-side computation (`scalar.max`, `scalar.exp`), a runtime query (`pto.get_block_idx()`), or `@pto.jit` tensor metadata such as `A.shape[0]` / `A.strides[1]`. PTO scalars flow through the recorded program and are not resolved until the kernel executes. The helper functions that operate on them live in the top-level `scalar` namespace, not under `pto.*`.
 
 ### The mixed expression
 
@@ -56,6 +56,7 @@ When in doubt, ask: *can this value change between launches of the same compiled
 
 **Tile-index form** — the preferred syntax when loading from a tile:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.tile_access","symbol":"scalar_ops_tile_access_probe","compile":{}} -->
 ```python
 val = scalar.load(tile[row, col])
 ```
@@ -64,6 +65,7 @@ val = scalar.load(tile[row, col])
 
 **Pointer forms**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.tile_access","symbol":"scalar_ops_tile_access_probe","compile":{}} -->
 ```python
 val = scalar.load(ptr, offset)       # explicit offset
 val = scalar.load(ptr + offset)      # pointer arithmetic shorthand
@@ -87,12 +89,14 @@ val = scalar.load(ptr + offset)      # pointer arithmetic shorthand
 
 **Tile-index form**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.tile_access","symbol":"scalar_ops_tile_access_probe","compile":{}} -->
 ```python
 scalar.store(value, tile[row, col])
 ```
 
 **Pointer forms**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.tile_access","symbol":"scalar_ops_tile_access_probe","compile":{}} -->
 ```python
 scalar.store(value, ptr, offset)
 ```
@@ -103,6 +107,7 @@ scalar.store(value, ptr, offset)
 
 `scalar.load` and `scalar.store` are the primary data access pattern inside `@pto.simt` kernels. Each `load`/`store` operates on one element per work-item, but the SIMT unit executes the same instruction across many work-items in parallel:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.simt_blend","symbol":"flash_attention_simt_blend_probe","compile":{"BLOCK":8}} -->
 ```python
 @pto.simt
 def blend_output_rows(
@@ -121,14 +126,29 @@ def blend_output_rows(
             scalar.store(o_next, o_next_tile[row, col])
 ```
 
-When writing to a raw pointer (e.g., a small metadata buffer obtained via `as_ptr()`), use the pointer-plus-offset form:
+When writing to a raw pointer (e.g., a small metadata buffer obtained via `as_ptr()`), use the pointer-plus-offset form. The following self-contained kernel is the smallest compileable pointer-offset example:
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"scalar_pointer_offset_probe","compile":{}} -->
 ```python
-meta_ptr = meta_tile.as_ptr()
-scalar.store(0, meta_ptr, 0)                    # store at element offset 0
-scalar.store(valid_rows, meta_ptr, 1)           # store at element offset 1
-row_start = scalar.load(meta_ptr, 0)
-row_stop  = scalar.load(meta_ptr, 1)
+from ptodsl import pto, scalar
+
+
+@pto.jit(target="a5")
+def scalar_pointer_offset_probe():
+    meta_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.i32, valid_shape=[1, 3])
+    meta_ptr = meta_tile.as_ptr()
+
+    scalar.store(0, meta_ptr, 0)
+    scalar.store(1, meta_ptr, 1)
+    scalar.store(2, meta_ptr + 2)
+
+    row_start = scalar.load(meta_ptr, 0)
+    row_stop = scalar.load(meta_ptr, 1)
+    valid_cols = scalar.load(meta_ptr + 2)
+
+    _ = row_start
+    _ = row_stop
+    _ = valid_cols
 ```
 
 ## 6.3 Scalar arithmetic and comparisons
@@ -137,6 +157,7 @@ row_stop  = scalar.load(meta_ptr, 1)
 
 Addition, subtraction, multiplication, and division of PTO scalars use standard Python syntax. The tracer records the corresponding device-side instructions automatically:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.math","symbol":"scalar_ops_math_probe","compile":{}} -->
 ```python
 o_next = alpha * o_prev + beta * pv_val      # multiply-add
 l_scaled = l_prev * scalar.exp(m_prev - m_next)  # subtraction inside exp
@@ -147,7 +168,7 @@ When both operands are PTO scalars (loaded from device memory or produced by ano
 
 ### Math functions: `scalar.*`
 
-Non-trivial scalar math functions live under the `scalar` namespace (imported as `from pto import scalar` or accessed as `pto.scalar`):
+Non-trivial scalar math functions live under the top-level `scalar` namespace (imported as `from ptodsl import scalar`). They are intentionally separate from the `pto.*` namespace:
 
 #### `scalar.max(a: ScalarType, b: ScalarType) -> ScalarType`
 
@@ -173,31 +194,42 @@ Non-trivial scalar math functions live under the `scalar` namespace (imported as
 
 **Description**: Absolute value.
 
-#### `scalar.gt(a: ScalarType, b: ScalarType) -> pto.i1`
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.math","symbol":"scalar_ops_math_probe","compile":{}} -->
+```python
+lo = scalar.min(m_prev, row_max)
+mag = scalar.abs(m_prev - row_max)
+ln = scalar.log(threshold + 1.0)
+root = scalar.sqrt(threshold + 4.0)
+```
 
-**Description**: Greater-than comparison. Returns `pto.i1`.
+### Comparisons
 
-#### `scalar.lt(a: ScalarType, b: ScalarType) -> pto.i1`
+**Description**: PTO scalars use Python's native comparison operators. The tracer records the corresponding device-side comparison instruction and returns a `pto.i1` result.
 
-**Description**: Less-than comparison. Returns `pto.i1`.
-
-#### `scalar.eq(a: ScalarType, b: ScalarType) -> pto.i1`
-
-**Description**: Equality comparison. Returns `pto.i1`.
+| Operator | Predicate (signed) | Predicate (unsigned) | Predicate (float) |
+|----------|---------------------|-----------------------|--------------------|
+| `>` | `sgt` | `ugt` | `ogt` |
+| `<` | `slt` | `ult` | `olt` |
+| `==` | `eq` | `eq` | `oeq` |
+| `!=` | `ne` | `ne` | `one` |
+| `>=` | `sge` | `uge` | `oge` |
+| `<=` | `sle` | `ule` | `ole` |
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.math","symbol":"scalar_ops_math_probe","compile":{}} -->
 ```python
 m_next = scalar.max(m_prev, row_max)
 l_scaled = l_prev * scalar.exp(m_prev - m_next)
-need_scale = scalar.gt(val, threshold)
+need_scale = val > threshold       # pto.i1 result
+is_zero_mask = val == threshold
+in_range = (val >= threshold) & (val <= row_max)
 ```
 
-For readability in files with many scalar operations, assign `pto.scalar` to a short local name:
+For readability in files with many scalar operations, use the top-level `scalar` namespace directly:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.math","symbol":"scalar_ops_math_probe","compile":{}} -->
 ```python
-scalar = pto.scalar
-
 m_next = scalar.max(m_prev, row_max)
 l_scaled = l_prev * scalar.exp(m_prev - m_next)
 ```
@@ -212,6 +244,7 @@ Typed pointers (Section 4.4) carry both an element type and a memory space. This
 
 Tiles and tensor views expose their base address via `as_ptr()`:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.pointer_sources","symbol":"scalar_ops_pointer_sources_probe","compile":{"BLOCK":8}} -->
 ```python
 gm_ptr = partition.as_ptr()    # GM pointer from a PartitionTensorView
 ub_ptr = tile.as_ptr()         # UB pointer from a Tile
@@ -240,8 +273,9 @@ ub_ptr = tile.as_ptr()         # UB pointer from a Tile
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.pointer_manip","symbol":"scalar_ops_pointer_manip_probe","compile":{}} -->
 ```python
-ptr = pto.addptr(base_ptr, 1024)  # advances by 1024 * sizeof(T) bytes
+ptr = pto.addptr(base_ptr, 1024)
 ```
 
 The `+` shorthand on pointers also counts in elements, not bytes.
@@ -267,6 +301,11 @@ The `+` shorthand on pointers also counts in elements, not bytes.
 
 This is an advanced operation. Prefer `as_ptr()` when the source already carries type information.
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.pointer_manip","symbol":"scalar_ops_pointer_manip_probe","compile":{}} -->
+```python
+ptr = pto.castptr(addr, pto.ptr(pto.i32, pto.MemorySpace.UB))
+```
+
 ## 6.5 Compile-time queries
 
 These functions return values that are known at trace time from type information or hardware constants.
@@ -289,6 +328,7 @@ These functions return values that are known at trace time from type information
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.helper_queries","symbol":"scalar_ops_helper_queries_probe","compile":{}} -->
 ```python
 bw = pto.bytewidth(pto.f32)   # 4
 bw = pto.bytewidth(pto.f16)   # 2
@@ -315,6 +355,7 @@ bw = pto.bytewidth(pto.i8)    # 1
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.helper_queries","symbol":"scalar_ops_helper_queries_probe","compile":{}} -->
 ```python
 vec = pto.elements_per_vreg(pto.f32)   # 64
 vec = pto.elements_per_vreg(pto.f16)   # 128
@@ -323,6 +364,7 @@ vec = pto.elements_per_vreg(pto.i8)    # 256
 
 This is the standard stride for chunking column loops in SIMD kernels:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.chunk_loop","symbol":"scalar_ops_chunk_loop_probe","compile":{"BLOCK":128}} -->
 ```python
 VEC = pto.elements_per_vreg(pto.f32)
 with pto.for_(0, cols, step=VEC) as c:
@@ -333,6 +375,7 @@ with pto.for_(0, cols, step=VEC) as c:
 
 `@pto.simt` kernels are the natural home for per-element scalar work. A typical pattern uses nested `pto.for_` loops to walk over a tile row by row, column by column:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.simt_scale","symbol":"scalar_ops_simt_scale_probe","compile":{"BLOCK":8}} -->
 ```python
 @pto.simt
 def elementwise_scale(
@@ -353,6 +396,7 @@ This reads each element from `src_tile`, multiplies by `scale`, and writes to `d
 
 For operations that need per-row metadata alongside per-element computation, lift the row-level scalar out of the inner loop:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.simt_row_coeffs","symbol":"scalar_ops_simt_row_coeffs_probe","compile":{"BLOCK":8}} -->
 ```python
 @pto.simt
 def blend_with_per_row_coeffs(

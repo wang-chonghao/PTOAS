@@ -115,6 +115,12 @@ static bool isMaskGranularityAdjacentWidening(StringRef inputGranularity,
          (inputGranularity == "b16" && resultGranularity == "b32");
 }
 
+static bool isMaskGranularityAdjacentNarrowing(StringRef inputGranularity,
+                                               StringRef resultGranularity) {
+  return (inputGranularity == "b16" && resultGranularity == "b8") ||
+         (inputGranularity == "b32" && resultGranularity == "b16");
+}
+
 LogicalResult PTOLoadOp::verify() {
   return verifyVPTOScalarAccessTypes(getOperation(), getPtr().getType(),
                                      getValue().getType(), "load");
@@ -4246,8 +4252,17 @@ LogicalResult PpackOp::verify() {
   if (failed(verifyMaskTypeLike(*this, getInput().getType(), "input type")) ||
       failed(verifyMaskTypeLike(*this, getResult().getType(), "result type")))
     return failure();
-  if (getPart() != "LOWER")
-    return emitOpError("currently supports only LOWER part");
+  if (!isSupportedPartToken(getPart()))
+    return emitOpError("requires part to be LOWER or HIGHER");
+  auto inputMaskType = cast<MaskType>(getInput().getType());
+  auto resultMaskType = cast<MaskType>(getResult().getType());
+  StringRef inputGranularity = inputMaskType.getGranularity();
+  StringRef resultGranularity = resultMaskType.getGranularity();
+  if (inputGranularity != resultGranularity &&
+      !isMaskGranularityAdjacentNarrowing(inputGranularity, resultGranularity)) {
+    return emitOpError(
+        "requires result mask granularity to match the input or narrow by one step");
+  }
   return success();
 }
 
@@ -4255,8 +4270,8 @@ LogicalResult PunpackOp::verify() {
   if (failed(verifyMaskTypeLike(*this, getInput().getType(), "input type")) ||
       failed(verifyMaskTypeLike(*this, getResult().getType(), "result type")))
     return failure();
-  if (getPart() != "LOWER")
-    return emitOpError("currently supports only LOWER part");
+  if (!isSupportedPartToken(getPart()))
+    return emitOpError("requires part to be LOWER or HIGHER");
   auto inputMaskType = cast<MaskType>(getInput().getType());
   auto resultMaskType = cast<MaskType>(getResult().getType());
   StringRef inputGranularity = inputMaskType.getGranularity();

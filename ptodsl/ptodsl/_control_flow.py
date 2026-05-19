@@ -15,7 +15,7 @@ Public API
 ``vecscope()``            – ``pto.vecscope { … }``
 ``for_(lo, hi, step, *, iter_args)``
                           – ``scf.for`` with optional iter_args or named carry state
-``if_(cond, *, results)`` – ``scf.if`` with optional results + else
+``if_(cond)``             – ``scf.if`` via explicit branch handle + automatic named merge
 ``yield_(*vals)``         – ``scf.yield``
 """
 
@@ -23,7 +23,6 @@ from ._bootstrap import make_context  # noqa: F401
 from ._runtime_index_ops import coerce_runtime_index
 from ._tracing.active import current_session
 from ._surface_values import unwrap_surface_value, wrap_like_surface_value, wrap_surface_value
-from ._types import _resolve
 
 from mlir.dialects import pto as _pto, scf
 from mlir.ir import InsertionPoint
@@ -284,96 +283,299 @@ def _coerce_index(value):
 
 # ── if_ ───────────────────────────────────────────────────────────────────────
 
-class _BlockCM:
-    """Enters the InsertionPoint of a single block for ``with br.then_:`` style."""
+def _find_parent_block(op_view):
+    """Return the block that directly contains *op_view*."""
+    parent_op = op_view.operation.parent
+    if parent_op is None:
+        raise RuntimeError("unable to locate the parent block for pto.if_(...)")
+    for region in parent_op.regions:
+        for block in region.blocks:
+            for candidate in block.operations:
+                if candidate.operation is op_view.operation:
+                    return block
+    raise RuntimeError("unable to locate the parent block for pto.if_(...)")
 
-    def __init__(self, block):
+
+def _move_block_ops(src_block, dst_block, *, yield_values):
+    """Move all non-terminator ops from *src_block* into *dst_block* and yield."""
+    with InsertionPoint(dst_block):
+        terminator = scf.YieldOp(list(yield_values))
+    yield_anchor = terminator.operation.opview
+    for op in list(src_block.operations):
+        if op.operation.name == "scf.yield":
+            continue
+        op.move_before(yield_anchor)
+
+
+class _IfBranchCM:
+    """Enters the insertion point of one branch block for ``with br.then_:`` style."""
+
+    def __init__(self, owner, branch_name, block):
+        self._owner = owner
+        self._branch_name = branch_name
         self._block = block
         self._ip = None
 
     def __enter__(self):
+        self._owner._enter_branch(self._branch_name)
         self._ip = InsertionPoint(self._block)
         self._ip.__enter__()
 
     def __exit__(self, *exc):
-        self._ip.__exit__(*exc)
+        try:
+            self._ip.__exit__(*exc)
+        finally:
+            self._owner._leave_branch(self._branch_name)
 
 
 class BranchHandle:
     """
-    Handle for ``scf.if`` with results and an else branch.
+    Handle for one authored ``pto.if_(...)`` branch pair.
 
     Usage::
 
-        with pto.if_(cond, results=(vf32, vf32)) as br:
+        with pto.if_(cond) as br:
             with br.then_:
-                ...
-                pto.yield_(a, b)
+                br.assign(val=x)
             with br.else_:
-                pto.yield_(c, d)
-        x, y = br.results
+                br.assign(val=y)
+        out = br.val
     """
 
-    def __init__(self, if_op):
-        self._op = if_op
-        self.then_ = _BlockCM(if_op.then_block)
-        self.else_ = _BlockCM(if_op.else_block)
+    def __init__(self, owner):
+        self._owner = owner
+        self.then_ = _IfBranchCM(owner, "then", owner._tmp_if.then_block)
+        self.else_ = _IfBranchCM(owner, "else", owner._tmp_if.else_block)
 
-    @property
-    def results(self):
-        return tuple(wrap_surface_value(result) for result in self._op.results)
+    def assign(self, **kwargs):
+        self._owner._assign_branch_values(kwargs)
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self._owner._get_merged_value(name)
 
 
 class _IfCM:
-    def __init__(self, cond, result_types):
+    def __init__(self, cond):
         self._cond = cond
-        self._result_types = [_resolve(t) for t in result_types] if result_types else []
-        self._if_op = None
-        self._ip = None
+        self._cond_value = None
+        self._tmp_if = None
+        self._parent_block = None
+        self._active_branch = None
+        self._branch_closed = {"then": False, "else": False}
+        self._branch_entered = {"then": False, "else": False}
+        self._branch_assignments = {"then": None, "else": None}
+        self._merged_values = None
+        self._finalized = False
+        self._handle = None
 
     def __enter__(self):
-        cond = unwrap_surface_value(self._cond)
-        if self._result_types:
-            # if/else with results: create IfOp but don't enter any block;
-            # the caller manages blocks via br.then_ / br.else_
-            self._if_op = scf.IfOp(cond, self._result_types, hasElse=True)
-            return BranchHandle(self._if_op)
-        else:
-            # simple if without results: enter then_block automatically
-            self._if_op = scf.IfOp(cond)
-            self._ip = InsertionPoint(self._if_op.then_block)
-            self._ip.__enter__()
+        self._cond_value = unwrap_surface_value(self._cond)
+        self._tmp_if = scf.IfOp(self._cond_value, hasElse=True)
+        self._parent_block = _find_parent_block(self._tmp_if)
+        self._handle = BranchHandle(self)
+        return self._handle
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            self._erase_tmp_if()
             return None
+        try:
+            self._finalize()
+        except Exception:
+            self._erase_tmp_if()
+            raise
+        return None
 
-    def __exit__(self, *exc):
-        if not self._result_types:
-            scf.YieldOp([])
-            self._ip.__exit__(*exc)
-        # for if/else with results: blocks are managed by BranchHandle; nothing to do
+    def _enter_branch(self, branch_name):
+        if self._finalized:
+            raise RuntimeError("pto.if_(...) branches are no longer available after the conditional closes")
+        if self._active_branch is not None:
+            raise RuntimeError(
+                "pto.if_(...) does not support nested branch entry; close the current "
+                f"br.{self._active_branch}_ block before entering br.{branch_name}_"
+            )
+        if self._branch_closed[branch_name]:
+            raise RuntimeError(f"br.{branch_name}_ may only be entered once per pto.if_(...)")
+        self._active_branch = branch_name
+        self._branch_entered[branch_name] = True
+
+    def _leave_branch(self, branch_name):
+        if self._active_branch == branch_name:
+            self._active_branch = None
+        self._branch_closed[branch_name] = True
+
+    def _assign_branch_values(self, kwargs):
+        if self._active_branch is None:
+            raise RuntimeError("br.assign(...) may only be used inside br.then_ or br.else_")
+        if not kwargs:
+            raise ValueError("br.assign(...) requires at least one named value")
+        branch_name = self._active_branch
+        if self._branch_assignments[branch_name] is not None:
+            raise RuntimeError(f"br.{branch_name}_ may call br.assign(...) at most once")
+        raw_values = {}
+        templates = {}
+        order = tuple(kwargs.keys())
+        for name, value in kwargs.items():
+            raw_value = unwrap_surface_value(value)
+            if not hasattr(raw_value, "type"):
+                raise TypeError(
+                    "br.assign(...) expects PTO runtime values or authored surface values; "
+                    f"'{name}' received {type(value).__name__}"
+                )
+            raw_values[name] = raw_value
+            templates[name] = value
+        self._branch_assignments[branch_name] = {
+            "order": order,
+            "raw_values": raw_values,
+            "templates": templates,
+        }
+
+    def _get_merged_value(self, name):
+        if not self._finalized:
+            raise RuntimeError(f"br.{name} is only available after the pto.if_(...) block closes")
+        if self._merged_values is None or name not in self._merged_values:
+            expected = ()
+            if self._merged_values:
+                expected = tuple(self._merged_values.keys())
+            if expected:
+                raise AttributeError(
+                    f"br.{name} was not assigned by this conditional; "
+                    f"expected one of: {', '.join(expected)}"
+                )
+            raise AttributeError(f"br.{name} was not assigned by this conditional")
+        return self._merged_values[name]
+
+    def _finalize(self):
+        self._validate_no_stray_ops()
+        if not any(self._branch_entered.values()):
+            raise RuntimeError(
+                "pto.if_(...) requires at least one explicit branch block; "
+                "use 'with br.then_:' and optionally 'with br.else_:'"
+            )
+        merge_spec = self._validate_merge_spec()
+        if merge_spec is None:
+            self._finalize_side_effect_if()
+        else:
+            self._finalize_merged_if(merge_spec)
+        self._finalized = True
+
+    def _validate_no_stray_ops(self):
+        parent_ops = list(self._parent_block.operations)
+        if not parent_ops or parent_ops[-1].operation is not self._tmp_if.operation:
+            raise RuntimeError(
+                "pto.if_(...) body may only contain explicit 'with br.then_:' / "
+                "'with br.else_:' blocks; PTODSL found operations emitted directly "
+                "in the outer if body"
+            )
+
+    def _validate_merge_spec(self):
+        then_assignment = self._branch_assignments["then"]
+        else_assignment = self._branch_assignments["else"]
+        if then_assignment is None and else_assignment is None:
+            return None
+        if then_assignment is None or else_assignment is None:
+            raise RuntimeError(
+                "automatic branch merge requires both br.then_ and br.else_ to call br.assign(...)"
+            )
+
+        then_names = set(then_assignment["raw_values"].keys())
+        else_names = set(else_assignment["raw_values"].keys())
+        if then_names != else_names:
+            missing_in_else = sorted(then_names - else_names)
+            missing_in_then = sorted(else_names - then_names)
+            pieces = []
+            if missing_in_else:
+                pieces.append(f"missing in else: {', '.join(missing_in_else)}")
+            if missing_in_then:
+                pieces.append(f"missing in then: {', '.join(missing_in_then)}")
+            raise RuntimeError("br.assign(...) names must match across branches; " + "; ".join(pieces))
+
+        order = then_assignment["order"]
+        result_types = []
+        for name in order:
+            then_value = then_assignment["raw_values"][name]
+            else_value = else_assignment["raw_values"][name]
+            if then_value.type != else_value.type:
+                raise RuntimeError(
+                    f"br.assign(...) type mismatch for '{name}': "
+                    f"then branch yields {then_value.type}, else branch yields {else_value.type}"
+                )
+            result_types.append(then_value.type)
+
+        return {
+            "order": order,
+            "result_types": result_types,
+            "then": then_assignment,
+            "else": else_assignment,
+        }
+
+    def _finalize_side_effect_if(self):
+        has_else = self._branch_entered["else"]
+        final_if = scf.IfOp(self._cond_value, hasElse=has_else)
+        _move_block_ops(self._tmp_if.then_block, final_if.then_block, yield_values=[])
+        if has_else:
+            _move_block_ops(self._tmp_if.else_block, final_if.else_block, yield_values=[])
+        self._merged_values = {}
+        self._tmp_if.erase()
+        self._tmp_if = final_if
+
+    def _finalize_merged_if(self, merge_spec):
+        final_if = scf.IfOp(self._cond_value, merge_spec["result_types"], hasElse=True)
+        then_yield_values = [
+            merge_spec["then"]["raw_values"][name]
+            for name in merge_spec["order"]
+        ]
+        else_yield_values = [
+            merge_spec["else"]["raw_values"][name]
+            for name in merge_spec["order"]
+        ]
+        _move_block_ops(self._tmp_if.then_block, final_if.then_block, yield_values=then_yield_values)
+        _move_block_ops(self._tmp_if.else_block, final_if.else_block, yield_values=else_yield_values)
+
+        merged = {}
+        for name, template, result in zip(
+            merge_spec["order"],
+            (merge_spec["then"]["templates"][name] for name in merge_spec["order"]),
+            final_if.results,
+        ):
+            merged[name] = wrap_like_surface_value(template, result)
+        self._merged_values = merged
+        self._tmp_if.erase()
+        self._tmp_if = final_if
+
+    def _erase_tmp_if(self):
+        if self._tmp_if is None:
+            return
+        try:
+            self._tmp_if.erase()
+        except Exception:
+            pass
+        finally:
+            self._tmp_if = None
 
 
-def if_(cond, *, results=None) -> _IfCM:
+def if_(cond) -> _IfCM:
     """
-    ``scf.if`` context manager.
+    ``scf.if`` context manager with explicit branch handles.
 
-    Without ``results`` – simple if with no else; ``scf.yield`` is inserted
-    automatically::
+    Side-effect-only form::
 
-        with pto.if_(has_rows):
-            ...
-
-    With ``results`` – if/else pair that produces SSA values; the caller must
-    manage ``br.then_`` and ``br.else_`` and emit ``pto.yield_(…)`` in each::
-
-        with pto.if_(has_chunk, results=(vf32, vf32)) as br:
+        with pto.if_(has_rows) as br:
             with br.then_:
                 ...
-                pto.yield_(merged_max, merged_sum)
+
+    Automatic named merge form::
+
+        with pto.if_(has_chunk) as br:
+            with br.then_:
+                br.assign(x=a)
             with br.else_:
-                pto.yield_(running_max, running_sum)
-        x, y = br.results
+                br.assign(x=b)
+        x = br.x
     """
-    return _IfCM(cond, results)
+    return _IfCM(cond)
 
 
 # ── yield_ ────────────────────────────────────────────────────────────────────

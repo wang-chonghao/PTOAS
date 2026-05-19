@@ -1,41 +1,41 @@
 # 2. Quick Start
 
-This chapter walks through a minimal but complete PTODSL kernel — elementwise vector addition — covering the essential concepts you need to start writing your own kernels.
+This chapter walks through a minimal but complete PTODSL kernel — a tiled copy from one GM tensor to another — covering the essential concepts you need to start writing your own kernels.
 
-## 2.1 A first kernel: elementwise vector add
+## 2.1 A first kernel: tiled copy
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"tile_copy","compile":{"BLOCK":128}} -->
 ```python
 from ptodsl import pto
 
 
 @pto.jit(target="a5")
-def vec_add(A, B, O, *, N: pto.constexpr):
-    """O = A + B, elementwise, for vectors of length N."""
+def tile_copy(
+    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    *,
+    BLOCK: pto.constexpr = 128,
+):
+    """Copy one 2D tensor tile from A to O."""
+
+    rows = A.shape[0]
+    cols = A.shape[1]
 
     # Describe the GM tensors.
-    a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=[N], strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=[N], strides=O.strides)
+    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
 
-    # Allocate a UB tile to hold one block of each vector.
-    a_tile = pto.alloc_tile(shape=[N], dtype=pto.f32)
-    b_tile = pto.alloc_tile(shape=[N], dtype=pto.f32)
-    o_tile = pto.alloc_tile(shape=[N], dtype=pto.f32)
+    # Allocate UB tiles for one row-strip block.
+    a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
-    # Partition the GM views to cover the whole vector.
-    a_part = pto.partition_view(a_view, offsets=[0], sizes=[N])
-    b_part = pto.partition_view(b_view, offsets=[0], sizes=[N])
-    o_part = pto.partition_view(o_view, offsets=[0], sizes=[N])
+    # Partition the GM views to cover the current logical slice.
+    a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
+    o_part = pto.partition_view(o_view, offsets=[0, 0], sizes=[rows, cols])
 
-    # Load A and B from GM into UB tiles.
-    pto.tload(a_part, a_tile)
-    pto.tload(b_part, b_tile)
-
-    # Elementwise add on the tiles.
-    pto.tadd(a_tile, b_tile, o_tile)
-
-    # Store the result back to GM.
-    pto.tstore(o_tile, o_part)
+    # Load from GM into UB, then store back out.
+    pto.tile.load(a_part, a_tile)
+    pto.tile.store(o_tile, o_part)
 ```
 
 Let us step through each piece.
@@ -44,15 +44,15 @@ Let us step through each piece.
 
 ```python
 @pto.jit(target="a5")
-def vec_add(A, B, O, *, N: pto.constexpr):
+def tile_copy(A, O, *, BLOCK: pto.constexpr = 128):
 ```
 
-`@pto.jit` marks this function as a launchable PTO kernel. The positional parameters `A`, `B`, `O` are Python-native tensors — they arrive from NumPy, torch-npu, or any framework that provides a shape and strides. The keyword-only argument `N` is a compile-time constant declared with `pto.constexpr`; the compiler specializes the kernel for each value of `N`.
+`@pto.jit` marks this function as a launchable PTO kernel. The positional parameters `A` and `O` are Python-native tensors — they arrive from NumPy, torch-npu, or any framework that provides a shape and strides. Their ABI contract is declared with `pto.tensor_spec(...)`. The keyword-only argument `BLOCK` is a compile-time constant declared with `pto.constexpr`; the compiler specializes the kernel for each tile width.
 
 ### Describing GM tensors
 
 ```python
-a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
+a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
 ```
 
 `make_tensor_view` wraps a Python tensor into a `TensorView` — a descriptor that tells the kernel how to address the tensor in global memory. You provide the logical shape and the stride (in elements) of each dimension.
@@ -60,7 +60,7 @@ a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
 ### Allocating on-chip buffers
 
 ```python
-a_tile = pto.alloc_tile(shape=[N], dtype=pto.f32)
+a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 ```
 
 `alloc_tile` reserves space in the Unified Buffer (UB). A `Tile` is a 2D buffer that lives on-chip during kernel execution. Every tile has a `shape` and a `dtype`.
@@ -68,78 +68,87 @@ a_tile = pto.alloc_tile(shape=[N], dtype=pto.f32)
 ### Partitioning GM views
 
 ```python
-a_part = pto.partition_view(a_view, offsets=[0], sizes=[N])
+a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
 ```
 
-`partition_view` creates a sub-view of a `TensorView` at a given offset and size. It describes *which part* of the GM tensor a `tload` or `tstore` should operate on. For this simple whole-vector example the offset is zero and the size equals the full length; in a blocked kernel you would slide the offset through a loop.
+`partition_view` creates a sub-view of a `TensorView` at a given offset and size. It describes *which part* of the GM tensor a `tile.load` or `tile.store` should operate on. For this simple whole-tensor example the offset is zero and the size matches the logical tensor extent; in a blocked kernel you would slide the offset through a loop.
 
-### Moving data: tload and tstore
+### Moving data: tile.load and tile.store
 
 ```python
-pto.tload(a_part, a_tile)   # GM → UB
-pto.tstore(o_tile, o_part)  # UB → GM
+pto.tile.load(a_part, a_tile)   # GM → UB
+pto.tile.store(o_tile, o_part)  # UB → GM
 ```
 
-`tload` copies a block of data from GM (described by a partition) into a UB tile. `tstore` copies a UB tile back to GM. These are **Tile Ops** — they operate on entire tile buffers at once.
+`tile.load` copies a block of data from GM (described by a partition) into a UB tile. `tile.store` copies a UB tile back to GM. These are **Tile Ops** — they operate on entire tile buffers at once.
 
-### Computing on tiles
+### Why start with copy
 
 ```python
-pto.tadd(a_tile, b_tile, o_tile)
+pto.tile.load(a_part, a_tile)
+pto.tile.store(o_tile, o_part)
 ```
 
-`tadd` performs elementwise addition of two tiles. The result is written to a third tile. PTODSL provides a rich set of Tile-level compute instructions — `texp`, `trowsum`, `tcvt`, `tsel`, and many more — covered in Chapter 8.
+A copy kernel strips the example down to the essential PTODSL boundary objects:
+
+- host tensors entering `@pto.jit`
+- `TensorView` descriptors over GM tensors
+- UB `Tile` allocation
+- `PartitionTensorView` slices
+- tile-level movement with `tile.load` / `tile.store`
+
+Once these pieces are clear, arithmetic and sub-kernel orchestration become much easier to layer on.
 
 ## 2.2 A blocked version with a loop
 
-The kernel above assumes the entire vector fits in one UB tile. For vectors longer than the maximum tile size, you need to process them in blocks. The length `N` is not known until the kernel is launched — it comes from the actual input tensor:
+The kernel above touches one logical slice directly. To introduce device-side control flow, we can iterate over the rows of a 2D tensor and copy one row-strip at a time:
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"blocked_copy","compile":{"BLOCK":128}} -->
 ```python
+from ptodsl import pto
+
+
 @pto.jit(target="a5")
-def vec_add_blocked(A, B, O, *, BLOCK: pto.constexpr):
-    N = A.shape[0]
+def blocked_copy(
+    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    *,
+    BLOCK: pto.constexpr = 128,
+):
+    rows = A.shape[0]
+    cols = A.shape[1]
 
-    a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=[N], strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=[N], strides=O.strides)
+    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
 
-    a_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
-    b_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
-    o_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
+    tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
-    num_blocks = (N + BLOCK - 1) // BLOCK
+    with pto.for_(0, rows, step=1) as row:
+        a_part = pto.partition_view(a_view, offsets=[row, 0], sizes=[1, cols])
+        o_part = pto.partition_view(o_view, offsets=[row, 0], sizes=[1, cols])
 
-    with pto.for_(0, num_blocks, step=1) as i:
-        offset = i * BLOCK
-
-        a_part = pto.partition_view(a_view, offsets=[offset], sizes=[BLOCK])
-        b_part = pto.partition_view(b_view, offsets=[offset], sizes=[BLOCK])
-        o_part = pto.partition_view(o_view, offsets=[offset], sizes=[BLOCK])
-
-        pto.tload(a_part, a_tile)
-        pto.tload(b_part, b_tile)
-        pto.tadd(a_tile, b_tile, o_tile)
-        pto.tstore(o_tile, o_part)
+        pto.tile.load(a_part, tile)
+        pto.tile.store(tile, o_part)
 ```
 
-Here `N` is dynamic — it comes from `A.shape[0]` and can differ across launches. The loop bound `num_blocks` depends on `N`, so `pto.for_` records a structured loop in the IR rather than unrolling at trace time. The `BLOCK` parameter stays `constexpr` because it is a tuning knob, not data-dependent. Chapter 5 covers this distinction in detail.
+Here `rows` and `cols` are dynamic — they come from `A.shape` and can differ across launches. The loop bound depends on `rows`, so `pto.for_` records a structured loop in the IR rather than unrolling at trace time. The `BLOCK` parameter stays `constexpr` because it is a tuning knob, not data-dependent. Chapter 5 covers this distinction in detail.
 
 ## 2.3 Compile and launch
 
 Once the kernel is defined, you compile it and then launch it:
 
+<!-- ptodsl-doc-pending: host-side compile-and-launch flow is documented but not covered by compile-only docs contract -->
 ```python
 # Compile once, cache the result.
-compiled = vec_add.compile(N=1024)
+compiled = blocked_copy.compile(BLOCK=128)
 
 # Allocate or obtain input/output tensors (NumPy, torch-npu, ...).
 import numpy as np
-A = np.random.randn(1024).astype(np.float32)
-B = np.random.randn(1024).astype(np.float32)
+A = np.random.randn(4, 128).astype(np.float32)
 O = np.empty_like(A)
 
 # Launch on the NPU.
-compiled[1, None](A, B, O)
+compiled[1, None](A, O)
 ```
 
 - `.compile(**constexprs)` traces the kernel body, lowers it through the PTOAS pipeline, and returns a compiled handle. Repeated calls with the same tensor ABI contract and constexpr configuration hit the cache.
@@ -165,16 +174,18 @@ This lets you map different data slices to different blocks — for example, one
 
 ## 2.5 Dropping down to micro-instructions
 
-The examples above used Tile Ops (`tload`, `tadd`, `tstore`), which operate on entire tiles at once. When you need finer control — for instance, writing a custom softmax or an activation that maps directly to vector hardware — you can drop down to the micro-instruction level. This involves three layers working together:
+The examples above used Tile Ops (`tile.load` / `tile.store` here, and arithmetic Tile Ops in later chapters), which operate on entire tiles at once. When you need finer control — for instance, writing a custom softmax or an activation that maps directly to vector hardware — you can drop down to the micro-instruction level. This involves three layers working together:
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"vec_add_micro","compile":{"BLOCK":128}} -->
 ```python
 # L3: hardware-bound SIMD kernel — vector instructions on individual rows.
 @pto.simd
 def add_rows(a_tile: pto.Tile, b_tile: pto.Tile, o_tile: pto.Tile,
-             rows: pto.i32, cols: pto.i32):
+             rows: pto.index, cols: pto.index):
     VEC = pto.elements_per_vreg(pto.f32)
+    initial_remained = scalar.index_cast(pto.i32, cols)
     with pto.for_(0, rows, step=1) as r:
-        col_loop = pto.for_(0, cols, step=VEC).carry(remained=cols)
+        col_loop = pto.for_(0, cols, step=VEC).carry(remained=initial_remained)
         with col_loop:
             c = col_loop.iv
             remained = col_loop.remained
@@ -192,41 +203,52 @@ def add_block(a_part: pto.PartitionTensorView,
               b_part: pto.PartitionTensorView,
               o_part: pto.PartitionTensorView,
               a_tile: pto.Tile, b_tile: pto.Tile, o_tile: pto.Tile,
-              rows: pto.i32, cols: pto.i32):
-    pto.mte_load(a_part, a_tile)
-    pto.mte_load(b_part, b_tile)
+              rows: pto.index, cols: pto.index):
+    row_bytes = cols * pto.bytewidth(pto.f32)
+    pto.mte_load(a_part.as_ptr(), a_tile.as_ptr(), 0, row_bytes,
+                 nburst=(rows, 0, 0))
+    pto.mte_load(b_part.as_ptr(), b_tile.as_ptr(), 0, row_bytes,
+                 nburst=(rows, 0, 0))
     pto.pipe_barrier(pto.Pipe.ALL)
 
     add_rows(a_tile, b_tile, o_tile, rows, cols)
     pto.pipe_barrier(pto.Pipe.ALL)
 
-    pto.mte_store(o_tile, o_part)
+    pto.mte_store(o_tile.as_ptr(), o_part.as_ptr(), row_bytes,
+                  nburst=(rows, 0, 0))
 
 
 # L1: JIT entry — tile allocation, partitioning, launch.
 @pto.jit(target="a5")
-def vec_add_micro(A, B, O, *, BLOCK: pto.constexpr):
+def vec_add_micro(
+    A: pto.tensor_spec(rank=1, dtype=pto.f32),
+    B: pto.tensor_spec(rank=1, dtype=pto.f32),
+    O: pto.tensor_spec(rank=1, dtype=pto.f32),
+    *,
+    BLOCK: pto.constexpr = 128,
+):
     N = A.shape[0]
     a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
     b_view = pto.make_tensor_view(B, shape=[N], strides=B.strides)
     o_view = pto.make_tensor_view(O, shape=[N], strides=O.strides)
 
-    a_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
-    b_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
-    o_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
+    a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    b_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
     num_blocks = (N + BLOCK - 1) // BLOCK
     with pto.for_(0, num_blocks, step=1) as i:
         offset = i * BLOCK
-        a_part = pto.partition_view(a_view, offsets=[offset], sizes=[BLOCK])
-        b_part = pto.partition_view(b_view, offsets=[offset], sizes=[BLOCK])
-        o_part = pto.partition_view(o_view, offsets=[offset], sizes=[BLOCK])
-        add_block(a_part, b_part, o_part, a_tile, b_tile, o_tile, 1, BLOCK)
+        this_block = scalar.min(N - offset, BLOCK)
+        a_part = pto.partition_view(a_view, offsets=[offset], sizes=[this_block])
+        b_part = pto.partition_view(b_view, offsets=[offset], sizes=[this_block])
+        o_part = pto.partition_view(o_view, offsets=[offset], sizes=[this_block])
+        add_block(a_part, b_part, o_part, a_tile, b_tile, o_tile, 1, this_block)
 ```
 
 - **L1 `@pto.jit`**: allocates tiles, partitions the GM views, and loops over blocks — the same tile-level orchestration as Section 2.2, but now calling a ukernel instead of Tile Ops.
 
-- **L2 `@pto.ukernel`**: stages data with `mte_load`, synchronizes with `mem_bar`, dispatches the SIMD kernel, synchronizes again, then writes back with `mte_store`. The ukernel owns the hardware-level sequencing.
+- **L2 `@pto.ukernel`**: stages data with ptr-based `mte_load`, inserts explicit `pipe_barrier` phase boundaries, dispatches the SIMD kernel, synchronizes again, then writes back with `mte_store`. The ukernel owns the hardware-level sequencing.
 
 - **L3 `@pto.simd`**: the outer `pto.for_` iterates over rows, the inner `pto.for_` iterates over column chunks of the hardware vector width (`elements_per_vreg`). Each iteration loads a vector-width slice into a `vreg`, does the addition under a mask (for tail elements), and stores the result back. Both loops are recorded as structured control flow IR — the compiler decides whether to keep them or unroll them.
 

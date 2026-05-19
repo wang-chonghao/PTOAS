@@ -2,11 +2,11 @@
 
 This chapter covers every operation that moves data between memory spaces in PTODSL — tile-level transfers, DMA micro-instructions, vector loads and stores, and cube data movement. Operations are organized by abstraction level: tile ops (L1), DMA ops (L2), vector memory ops (L3 SIMD), and cube memory ops (L3 cube).
 
-## 7.1 Tile-level movement: tload and tstore
+## 7.1 Tile-level movement: tile.load and tile.store
 
 Tile ops move entire blocks between Global Memory and the Unified Buffer in a single call. They are the primary data movement interface inside `@pto.jit`.
 
-#### `pto.tload(partition: PartitionTensorView, tile: Tile) -> None`
+#### `pto.tile.load(partition: PartitionTensorView, tile: Tile) -> None`
 
 **Description**: Copies data from a GM partition into a UB tile. The transfer size is determined by the partition's `sizes` and the tile's shape — they must be compatible.
 
@@ -21,15 +21,16 @@ Tile ops move entire blocks between Global Memory and the Unified Buffer in a si
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.tload","symbol":"data_movement_tload_probe","compile":{"BLOCK":128}} -->
 ```python
-a_part = pto.partition_view(a_view, offsets=[offset], sizes=[BLOCK])
-a_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32)
-pto.tload(a_part, a_tile)
+a_part = pto.partition_view(a_view, offsets=[offset, 0], sizes=[1, cols])
+a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+pto.tile.load(a_part, a_tile)
 ```
 
 ---
 
-#### `pto.tstore(tile: Tile, partition: PartitionTensorView) -> None`
+#### `pto.tile.store(tile: Tile, partition: PartitionTensorView) -> None`
 
 **Description**: Copies data from a UB tile back to a GM partition. The tile's `valid_shape` determines how many elements are written; elements outside `valid_shape` are not stored.
 
@@ -44,13 +45,14 @@ pto.tload(a_part, a_tile)
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"quick_start.tile_io","symbol":"quick_start_tile_io_probe","compile":{"BLOCK":128}} -->
 ```python
-pto.tstore(o_tile, o_part)
+pto.tile.store(o_tile, o_part)
 ```
 
 ---
 
-Both `tload` and `tstore` operate at **tile granularity** — they are the idiomatic choice inside `@pto.jit` loops. When you need finer control over DMA scheduling, drop down to the micro-instruction level.
+Both `tile.load` and `tile.store` operate at **tile granularity** — they are the idiomatic choice inside `@pto.jit` loops. When you need finer control over DMA scheduling, drop down to the micro-instruction level.
 
 ## 7.2 DMA micro-instructions (ukernel)
 
@@ -64,8 +66,6 @@ Inside `@pto.ukernel`, data movement between memory spaces is expressed with gro
 | `pto.mte_ub_l1` | UB → L1 | 32B units | — |
 
 All four share a common structure: a required innermost `nburst(...)` group that defines the repeated burst transfer, plus optional outer `loop(...)` groups for multi-level repetition. `pto.mte_gm_ub` additionally supports `pad(...)` for UB row padding.
-
-> **Convenience wrappers**: `pto.mte_load(src, dst)` and `pto.mte_store(src, dst)` are Python-level shorthands that expand to `mte_gm_ub` / `mte_ub_gm` with inferred strides. The reference operations below are the full grouped MTE interfaces.
 
 ### 7.2.1 GM → UB: `pto.mte_gm_ub`
 
@@ -94,16 +94,18 @@ All four share a common structure: a required innermost `nburst(...)` group that
 
 **Example** — load a 32×32 f32 tile from contiguous GM into contiguous UB:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
-pto.mte_gm_ub(gm_ptr, ub_ptr, 0, 128,
+pto.mte_gm_ub(gm_src, ub_dst, 0, 128,
               nburst=(32, 128, 128))
 # 32 rows, 128 bytes per row, contiguous in both GM and UB
 ```
 
 **Example** — load a 64×128 f16 tile from a larger GM matrix (1024×512) into UB:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
-pto.mte_gm_ub(gm_ptr, ub_ptr, 0, 256,
+pto.mte_gm_ub(gm_src, ub_dst, 0, 256,
               nburst=(64, 1024, 256))
 # 64 rows of 256 bytes each.
 # GM: each row is 1024 bytes apart (full matrix row stride).
@@ -112,8 +114,9 @@ pto.mte_gm_ub(gm_ptr, ub_ptr, 0, 256,
 
 **Example** — load with padding (100 valid f16 columns into a 128-wide UB tile):
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
-pto.mte_gm_ub(gm_ptr, ub_ptr, 0, 200,
+pto.mte_gm_ub(gm_src, ub_dst, 0, 200,
               nburst=(64, 200, 256),
               pad=(0.0, 0, 0))
 # 64 rows, 200 valid bytes per row, 256-byte UB stride.
@@ -122,8 +125,9 @@ pto.mte_gm_ub(gm_ptr, ub_ptr, 0, 200,
 
 **Example** — multi-level loop: load 4 batches of 8×128 f16 tiles:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
-pto.mte_gm_ub(gm_ptr, ub_ptr, 0, 256,
+pto.mte_gm_ub(gm_src, ub_dst, 0, 256,
               nburst=(8, 256, 256),
               loops=[(4, 2048, 2048)])
 # Innermost: 8 rows × 256B (one tile).
@@ -152,15 +156,17 @@ pto.mte_gm_ub(gm_ptr, ub_ptr, 0, 256,
 
 **Example** — store a 32×32 f32 tile from UB to GM:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
-pto.mte_ub_gm(ub_ptr, gm_ptr, 128,
+pto.mte_ub_gm(ub_src_f32, gm_dst_f32, 128,
               nburst=(32, 128, 128))
 ```
 
 **Example** — store a 64×128 f16 tile back to a larger GM matrix:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
-pto.mte_ub_gm(ub_ptr, gm_ptr, 256,
+pto.mte_ub_gm(ub_src, gm_dst, 256,
               nburst=(64, 256, 1024))
 # UB: contiguous rows (256-byte stride).
 # GM: rows spaced at 1024-byte intervals (full matrix width).
@@ -189,6 +195,7 @@ Each burst copies `len_burst * 32` bytes. The next burst starts at `src + (len_b
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
 pto.mte_ub_ub(ub_src, ub_dst, 8,
               nburst=(16, 0, 4))
@@ -245,6 +252,7 @@ For `mte_ub_ub` and `mte_ub_l1`, the parameters are in **32-byte units**. Each b
 
 ### 7.2.6 Typical ukernel DMA pattern
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.ukernel_dma","symbol":"data_movement_ukernel_dma_probe","compile":{"ROWS":8,"COLS":16}} -->
 ```python
 @pto.ukernel
 def process_block(k_part, v_part, k_tile, v_tile, o_tile, o_part,
@@ -277,8 +285,13 @@ Inside `@pto.simd`, data moves between UB tiles and vector registers (`vreg`). V
 
 All vector load and store operations support the element-indexing syntax, which eliminates manual byte-offset calculation:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.tile_slice_2d","symbol":"data_movement_tile_slice_2d_probe","compile":{"BLOCK":128}} -->
 ```python
 vec = pto.vlds(tile[row, col:])       # load from row, starting at column col
+```
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.tile_slice_1d","symbol":"data_movement_tile_slice_1d_probe","compile":{"BLOCK":128}} -->
+```python
 vec = pto.vlds(tile[start:])          # 1D tile, starting at element start
 ```
 
@@ -316,6 +329,10 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 
 **Description**: Dual vector load with deinterleave (AoS → SoA). Loads interleaved data and deinterleaves into two vectors.
 
+PTODSL accepts both pointer-based forms and tile-slice forms. The tile-slice
+spellings are PTODSL surface sugar; the pointer form `buf[offset] + dist` is
+the canonical form.
+
 **Parameters**:
 
 | Parameter | Type | Description |
@@ -324,7 +341,7 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 | `tile[start:]` | Tile index | 1D tile with starting element (vector-width range) |
 | `buf` | `PtrType` (UB) | Pointer to buffer in UB (pointer form) |
 | `offset` | `Index` | Byte offset (pointer form) |
-| `dist` | `DeinterleaveDist` | `DINTLV` (alternating elements) or `BDINTLV` (block deinterleave) |
+| `dist` | `DeinterleaveDist` | `DINTLV_B8` / `DINTLV_B16` / `DINTLV_B32` (alternating elements) or `BDINTLV` (block deinterleave) |
 
 **Returns**:
 
@@ -340,6 +357,9 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 #### `pto.vldas(buf: PtrType) -> AlignType`
 
 **Description**: Primes the alignment buffer for a subsequent unaligned load stream. Returns alignment state consumed by `vldus`.
+
+PTODSL accepts both pointer-based forms and tile-slice forms. The tile-slice
+spellings are PTODSL surface sugar; the pointer form is the canonical form.
 
 **Parameters**:
 
@@ -357,11 +377,14 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 
 ---
 
-#### `pto.vldus(tile[row, col:], align: AlignType) -> (VRegType, AlignType, PtrType)`
-#### `pto.vldus(tile[start:], align: AlignType) -> (VRegType, AlignType, PtrType)`
-#### `pto.vldus(buf: PtrType, align: AlignType) -> (VRegType, AlignType, PtrType)`
+#### `pto.vldus(tile[row, col:], align: AlignType) -> (VRegType, AlignType)`
+#### `pto.vldus(tile[start:], align: AlignType) -> (VRegType, AlignType)`
+#### `pto.vldus(buf: PtrType, align: AlignType) -> (VRegType, AlignType)`
 
 **Description**: Unaligned load with alignment state threading. Requires alignment state from `vldas` or a previous `vldus`.
+
+PTODSL accepts both pointer-based forms and tile-slice forms. The tile-slice
+spellings are PTODSL surface sugar; the pointer form is the canonical form.
 
 **Parameters**:
 
@@ -370,7 +393,6 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 | `tile[row, col:]` | Tile index | 2D tile row with starting column (vector-width range) |
 | `tile[start:]` | Tile index | 1D tile with starting element (vector-width range) |
 | `buf` | `PtrType` (UB) | Pointer to buffer in UB (pointer form) |
-| `offset` | `Index` | Byte offset (pointer form) |
 | `align` | `AlignType` | Alignment state from `vldas` or previous `vldus` |
 
 **Returns**:
@@ -379,13 +401,18 @@ The compiler automatically computes the byte offset from the tile's shape, eleme
 |--------------|------|-------------|
 | `vec` | `VRegType` | Assembled vector |
 | `align_out` | `AlignType` | Updated alignment state for next load |
-| `base_out` | `PtrType` | Post-update base pointer |
-
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.tile_slice_2d","symbol":"data_movement_tile_slice_2d_probe","compile":{"BLOCK":128}} -->
 ```python
 align = pto.vldas(tile[row, col:])
-vec, align, base = pto.vldus(tile[row, col:], align)
+vec, align = pto.vldus(tile[row, col:], align)
+```
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.tile_slice_1d","symbol":"data_movement_tile_slice_1d_probe","compile":{"BLOCK":128}} -->
+```python
+align = pto.vldas(tile[start:])
+vec, align = pto.vldus(tile[start:], align)
 ```
 
 ---
@@ -412,9 +439,10 @@ vec, align, base = pto.vldus(tile[row, col:], align)
 
 ---
 
-#### `pto.vgather2(buf: PtrType, offsets: Index, active_lanes: Index) -> VRegType`
+#### `pto.vgather2(buf: PtrType, offsets: Index, mask: MaskType) -> VRegType`
 
-**Description**: Indexed gather from UB using per-lane offsets. Only the first `active_lanes` lanes participate.
+**Description**: Indexed gather from UB using per-lane offsets. Only masked-on
+lanes participate.
 
 **Parameters**:
 
@@ -422,7 +450,7 @@ vec, align, base = pto.vldus(tile[row, col:], align)
 |-----------|------|-------------|
 | `buf` | `PtrType` (UB) | Source buffer |
 | `offsets` | `Index` | Per-lane element offsets (vector register) |
-| `active_lanes` | `Index` | Number of participating lanes |
+| `mask` | `MaskType` | Predicate mask gating lane participation |
 
 **Returns**:
 
@@ -452,16 +480,18 @@ vec, align, base = pto.vldus(tile[row, col:], align)
 
 ---
 
-#### `pto.vgatherb(buf: PtrType, offsets: Index) -> VRegType`
+#### `pto.vgatherb(buf: PtrType, offsets: Index, mask: MaskType) -> VRegType`
 
-**Description**: Byte-granularity gather load.
+**Description**: Block gather load. Participating lanes gather 32-byte blocks
+from UB using byte offsets.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `buf` | `PtrType` | Source buffer |
-| `offsets` | `Index` | Byte offsets |
+| `buf` | `PtrType` (UB) | Source buffer |
+| `offsets` | `Index` | Per-block byte offsets |
+| `mask` | `MaskType` | `b32` predicate controlling which blocks participate |
 
 **Returns**:
 
@@ -471,17 +501,20 @@ vec, align, base = pto.vldus(tile[row, col:], align)
 
 ---
 
-#### `pto.vsldb(tile[row, col], offset: Index, mask: MaskType) -> VRegType`
-#### `pto.vsldb(tile[pos], offset: Index, mask: MaskType) -> VRegType`
-#### `pto.vsldb(buf: PtrType, offset: Index, mask: MaskType) -> VRegType`
+#### `pto.vsldb(tile[row, col], block_stride: Index, repeat_stride: Index, mask: MaskType) -> VRegType`
+#### `pto.vsldb(tile[pos], block_stride: Index, repeat_stride: Index, mask: MaskType) -> VRegType`
+#### `pto.vsldb(buf: PtrType, block_stride: Index, repeat_stride: Index, mask: MaskType) -> VRegType`
 
-**Description**: Block-strided load. The `offset` encodes a packed stride/control word, not a plain byte displacement. Masked-off blocks are zeroed.
+**Description**: Block-strided load. The source is interpreted as a sequence of
+32-byte blocks addressed by `repeat_stride + blk * block_stride`. Masked-off
+blocks are zero-filled.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `offset` | `Index` | Packed stride/control word |
+| `block_stride` | `Index` | 16-bit block stride field |
+| `repeat_stride` | `Index` | 16-bit repeat stride field |
 | `mask` | `MaskType` | Mask controlling which blocks participate |
 
 **Returns**:
@@ -498,7 +531,8 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 #### `pto.vsts(vec: VRegType, tile[start:], mask: MaskType, dist: VStoreDist | None = None) -> None`
 #### `pto.vsts(vec: VRegType, buf: PtrType, offset: Index, mask: MaskType, dist: VStoreDist | None = None) -> None`
 
-**Description**: Stateless vector store to UB. The mask gates which lanes are written.
+**Description**: Stateless vector store to UB. The mask gates writes for the
+distributions that use predicate masking.
 
 **Parameters**:
 
@@ -510,15 +544,27 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 | `buf` | `PtrType` (UB) | Destination buffer (pointer form) |
 | `offset` | `Index` | Byte offset (pointer form) |
 | `mask` | `MaskType` | Predicate mask gating writes |
-| `dist` | `VStoreDist` or `None` | Optional store distribution: `NORM_B32` (default), `PK_B16`/`PK_B32`/`PK_B64`, `ONE_POINT_B8`/`ONE_POINT_B16`/`ONE_POINT_B32` |
+| `dist` | `VStoreDist` or `None` | Store distribution token. When omitted, PTODSL defaults to `NORM_B32` on the current surface. |
 
 **Returns**: None (side-effect operation).
 
+**Distribution families**:
+
+| Family | Notes |
+|--------|-------|
+| `NORM_B8` / `NORM_B16` / `NORM_B32` | Contiguous vector store |
+| `1PT_B8` / `1PT_B16` / `1PT_B32` | First-element-only store; predicate is ignored |
+| `PK_B16` / `PK_B32` / `PK_B64` | Packed store families |
+| `PK4_B32` | 4-way packed store |
+| `MRG4CHN_B8` | 4-channel merge store |
+| `MRG2CHN_B8` / `MRG2CHN_B16` | 2-channel merge store |
+
 ---
 
-#### `pto.psts(mask: MaskType, buf: PtrType, offset: Index) -> None`
+#### `pto.psts(mask: MaskType, buf: PtrType, offset: Index, *, dist: PredicateDist = PredicateDist.NORM) -> None`
 
-**Description**: Predicate store. Writes the packed predicate payload of `mask` to UB memory.
+**Description**: Predicate store. Writes the packed predicate payload of `mask`
+to UB memory.
 
 **Parameters**:
 
@@ -527,6 +573,7 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 | `mask` | `MaskType` | Predicate payload to store |
 | `buf` | `PtrType` (UB) | Destination buffer |
 | `offset` | `Index` | Byte offset |
+| `dist` | `PredicateDist` | Predicate payload layout. PTODSL defaults to `NORM` on the current surface. |
 
 **Returns**: None (side-effect operation).
 
@@ -536,7 +583,8 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 #### `pto.vstsx2(low: VRegType, high: VRegType, tile[start:], dist: InterleaveDist, mask: MaskType) -> None`
 #### `pto.vstsx2(low: VRegType, high: VRegType, buf: PtrType, offset: Index, dist: InterleaveDist, mask: MaskType) -> None`
 
-**Description**: Dual interleaving store (SoA → AoS). Interleaves two vectors into one destination.
+**Description**: Dual interleaving store (SoA → AoS). Interleaves two vectors
+into one destination.
 
 **Parameters**:
 
@@ -548,58 +596,38 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 | `tile[start:]` | Tile index | 1D destination (vector-width range) |
 | `buf` | `PtrType` (UB) | Destination buffer (pointer form) |
 | `offset` | `Index` | Byte offset (pointer form) |
-| `dist` | `InterleaveDist` | `INTLV` |
-| `mask` | `MaskType` | Predicate mask |
+| `dist` | `InterleaveDist` | `INTLV_B8` / `INTLV_B16` / `INTLV_B32` |
+| `mask` | `MaskType` | Parameter retained for call-shape regularity; for the `INTLV_B*` family it does not affect the stored result |
 
 **Returns**: None (side-effect operation).
 
 ---
 
-#### `pto.vsst(scalar: ScalarType, tile[row, col:], mask: MaskType) -> None`
-#### `pto.vsst(scalar: ScalarType, tile[start:], mask: MaskType) -> None`
-#### `pto.vsst(scalar: ScalarType, buf: PtrType, offset: Index, mask: MaskType) -> None`
+#### `pto.vsstb(tile[row, col], block_stride: Index, repeat_stride: Index, mask: MaskType) -> None`
+#### `pto.vsstb(tile[pos], block_stride: Index, repeat_stride: Index, mask: MaskType) -> None`
+#### `pto.vsstb(buf: PtrType, block_stride: Index, repeat_stride: Index, mask: MaskType) -> None`
 
-**Description**: Scalar broadcast store. Stores a scalar value replicated to all lanes under `mask`.
+**Description**: Block-strided store. Stores 32-byte source blocks to a
+block-strided UB destination. Masked-off blocks do not write memory.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `scalar` | `ScalarType` | Scalar value to broadcast |
-| `tile[row, col:]` | Tile index | 2D destination (vector-width range) |
-| `tile[start:]` | Tile index | 1D destination (vector-width range) |
+| `tile[row, col]` | Tile index | 2D starting element |
+| `tile[pos]` | Tile index | 1D starting element |
 | `buf` | `PtrType` (UB) | Destination buffer (pointer form) |
-| `offset` | `Index` | Byte offset (pointer form) |
-| `mask` | `MaskType` | Predicate mask |
+| `block_stride` | `Index` | 16-bit block stride field |
+| `repeat_stride` | `Index` | 16-bit repeat stride field |
+| `mask` | `MaskType` | Mask controlling which blocks participate |
 
 **Returns**: None (side-effect operation).
 
 ---
 
-#### `pto.vsstb(scalar: ScalarType, tile[row, col:], mask: MaskType) -> None`
-#### `pto.vsstb(scalar: ScalarType, tile[start:], mask: MaskType) -> None`
-#### `pto.vsstb(scalar: ScalarType, buf: PtrType, offset: Index, mask: MaskType) -> None`
-
-**Description**: Enhanced scalar broadcast store. Same semantics as `vsst`.
-
-**Parameters**:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `scalar` | `ScalarType` | Scalar value to broadcast |
-| `tile[row, col:]` | Tile index | 2D destination (vector-width range) |
-| `tile[start:]` | Tile index | 1D destination (vector-width range) |
-| `buf` | `PtrType` (UB) | Destination buffer (pointer form) |
-| `offset` | `Index` | Byte offset (pointer form) |
-| `mask` | `MaskType` | Predicate mask |
-
-**Returns**: None (side-effect operation).
-
----
-
-#### `pto.vsta(align: AlignType, tile[row, col:]) -> None`
-#### `pto.vsta(align: AlignType, tile[start:]) -> None`
-#### `pto.vsta(align: AlignType, buf: PtrType, offset: Index) -> None`
+#### `pto.vstar(align: AlignType, tile[row, col:]) -> None`
+#### `pto.vstar(align: AlignType, tile[start:]) -> None`
+#### `pto.vstar(align: AlignType, buf: PtrType) -> None`
 
 **Description**: Flush alignment state to memory. Commits buffered tail bytes from an unaligned store stream. Consumes the alignment state.
 
@@ -611,7 +639,6 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 | `tile[row, col:]` | Tile index | 2D destination (vector-width range) |
 | `tile[start:]` | Tile index | 1D destination (vector-width range) |
 | `buf` | `PtrType` (UB) | Destination buffer (pointer form) |
-| `offset` | `Index` | Byte offset (pointer form) |
 
 **Returns**: None (side-effect operation).
 
@@ -621,7 +648,7 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 #### `pto.vstas(align: AlignType, tile[start:], offset: Index) -> None`
 #### `pto.vstas(align: AlignType, buf: PtrType, offset: Index) -> None`
 
-**Description**: Scalar-register-offset form of alignment-state flush. Same buffered-tail semantics as `vsta` with an explicit scalar offset.
+**Description**: Scalar-register-offset form of alignment-state flush. Same buffered-tail semantics as `vstar` with an explicit scalar offset.
 
 **Parameters**:
 
@@ -637,27 +664,7 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 
 ---
 
-#### `pto.vstar(align: AlignType, tile[row, col:]) -> None`
-#### `pto.vstar(align: AlignType, tile[start:]) -> None`
-#### `pto.vstar(align: AlignType, buf: PtrType) -> None`
-
-**Description**: Register-update form of alignment-state flush. Consumes the implicit update state from the matching store stream.
-
-**Parameters**:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `align` | `AlignType` | Pending store-alignment state |
-
-| `tile[row, col:]` | Tile index | 2D destination (vector-width range) |
-| `tile[start:]` | Tile index | 1D destination (vector-width range) |
-| `buf` | `PtrType` (UB) | Destination buffer (pointer form) |
-
-**Returns**: None (side-effect operation).
-
----
-
-#### `pto.vscatter(vec: VRegType, buf: PtrType, offsets: Index, active_lanes: Index) -> None`
+#### `pto.vscatter(vec: VRegType, buf: PtrType, offsets: Index, mask: MaskType) -> None`
 
 **Description**: Indexed scatter to UB. Stores vector lanes to irregular locations using per-lane offsets.
 
@@ -668,7 +675,7 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 | `vec` | `VRegType` | Source vector to scatter |
 | `buf` | `PtrType` (UB) | Destination buffer |
 | `offsets` | `Index` | Per-lane element offsets (vector register) |
-| `active_lanes` | `Index` | Number of participating lanes |
+| `mask` | `MaskType` | Predicate mask gating lane participation |
 
 **Returns**: None (side-effect operation).
 
@@ -678,54 +685,28 @@ Vector stores write `vreg` contents back to UB tiles. Like loads, they support t
 
 For streaming unaligned stores with explicit alignment threading:
 
-#### `pto.vstu(align_in: AlignType, base_in: PtrType, vec: VRegType, buf: PtrType, mode: Index) -> (AlignType, PtrType)`
+#### `pto.vstus(align_in: AlignType, offset: Index, vec: VRegType, buf: PtrType) -> AlignType`
 
-**Description**: Unaligned store with explicit threaded alignment/base state. Returns updated state for the next store in the stream.
-
-**Parameters**:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `align_in` | `AlignType` | Incoming store-alignment state |
-| `base_in` | `PtrType` | Current stream base pointer |
-| `vec` | `VRegType` | Vector to store |
-| `buf` | `PtrType` (UB) | Destination buffer |
-| `mode` | `Index` | Post-update mode |
-
-**Returns**:
-
-| Return Value | Type | Description |
-|--------------|------|-------------|
-| `align_out` | `AlignType` | Updated buffered-tail state |
-| `base_out` | `PtrType` | Post-update base pointer |
-
----
-
-#### `pto.vstus(align_in: AlignType, base_in: PtrType, vec: VRegType, buf: PtrType, offset: Index) -> (AlignType, PtrType)`
-
-**Description**: Scalar-offset unaligned store. Same roles as `vstu` with explicit scalar displacement.
+**Description**: Scalar-offset unaligned store. Returns updated alignment state for the next store in the stream.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `align_in` | `AlignType` | Incoming store-alignment state |
-| `base_in` | `PtrType` | Current stream base pointer |
-| `vec` | `VRegType` | Vector to store |
-| `buf` | `PtrType` (UB) | Destination buffer |
 | `offset` | `Index` | Scalar displacement |
-| `mode` | `Index` | Post-update mode |
+| `vec` | `VRegType` | Vector to store |
+| `buf` | `PtrType` (UB) | Destination buffer |
 
 **Returns**:
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
 | `align_out` | `AlignType` | Updated buffered-tail state |
-| `base_out` | `PtrType` | Post-update base pointer |
 
 ---
 
-#### `pto.vstur(align_in: AlignType, vec: VRegType, buf: PtrType, mode: PostUpdateMode = PostUpdateMode.NO_POST_UPDATE) -> AlignType`
+#### `pto.vstur(align_in: AlignType, vec: VRegType, buf: PtrType, mode: PostUpdate = PostUpdate.OFF) -> AlignType`
 
 **Description**: Register-update unaligned store. Updates only residual alignment state without base pointer update.
 
@@ -736,7 +717,7 @@ For streaming unaligned stores with explicit alignment threading:
 | `align_in` | `AlignType` | Incoming store-alignment state |
 | `vec` | `VRegType` | Vector to store |
 | `buf` | `PtrType` (UB) | Destination buffer |
-| `mode` | `PostUpdateMode` | `NO_POST_UPDATE` (default) or `POST_UPDATE` |
+| `mode` | `PostUpdate` | `PostUpdate.OFF` (default) or `PostUpdate.ON` |
 
 **Returns**:
 
@@ -769,10 +750,13 @@ For streaming unaligned stores with explicit alignment threading:
 
 **Unaligned store stream pattern** — prime, thread, flush:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.grouped_dma_ptrs","symbol":"data_movement_grouped_dma_ptrs_probe","compile":{}} -->
 ```python
-align, base = pto.vstu(align0, base0, vec0, ub_ptr, mode)
-align, base = pto.vstu(align, base, vec1, ub_ptr, mode)
-pto.vsta(align, ub_ptr, flush_offset)
+align = pto.init_align()
+vec0 = pto.vlds(ub_src_f32, pto.const(0))
+align = pto.vstur(align, vec0, ub_dst_f32, pto.PostUpdate.OFF)
+align = pto.vstus(align, pto.const(32), vec0, ub_dst_f32)
+pto.vstas(align, ub_dst_f32, pto.const(64))
 ```
 
 ### Distribution enums reference
@@ -780,11 +764,11 @@ pto.vsta(align, ub_ptr, flush_offset)
 | Enum | Values | Used with |
 |------|--------|-----------|
 | `VLoadDist` | `NORM`, `UNPK_B8`, `UNPK_B16`, `UNPK_B32`, `BRC_B8`, `BRC_B16`, `BRC_B32`, `US_B8`, `US_B16`, `DS_B8`, `DS_B16` | `vlds` |
-| `VStoreDist` | `NORM_B8`, `NORM_B16`, `NORM_B32`, `ONE_POINT_B8`, `ONE_POINT_B16`, `ONE_POINT_B32`, `PK_B16`, `PK_B32`, `PK_B64`, `PK4_B32`, `MRG4CHN_B8`, `MRG2CHN_B8`, `MRG2CHN_B16` | `vsts` |
-| `DeinterleaveDist` | `DINTLV`, `BDINTLV` | `vldsx2` |
-| `InterleaveDist` | `INTLV` | `vstsx2` |
+| `VStoreDist` | `NORM_B8`, `NORM_B16`, `NORM_B32`, `1PT_B8`, `1PT_B16`, `1PT_B32`, `PK_B16`, `PK_B32`, `PK_B64`, `PK4_B32`, `MRG4CHN_B8`, `MRG2CHN_B8`, `MRG2CHN_B16` | `vsts` |
+| `DeinterleaveDist` | `DINTLV_B8`, `DINTLV_B16`, `DINTLV_B32`, `BDINTLV` | `vldsx2` |
+| `InterleaveDist` | `INTLV_B8`, `INTLV_B16`, `INTLV_B32` | `vstsx2` |
 | `StrideMode` | `S3_B16`, `S4_B64`, `S8_B32`, `S2_B64` | `vsld` |
-| `PostUpdateMode` | `NO_POST_UPDATE`, `POST_UPDATE` | `vstur` |
+| `PostUpdate` | `OFF`, `ON` | `vstur` |
 
 ## 7.5 Cube data movement (cube)
 
@@ -999,6 +983,7 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 
 A full cube matmul (`@pto.cube`) follows this dataflow pattern:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.cube_helper","symbol":"data_movement_cube_helper_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16}} -->
 ```python
 @pto.cube
 def qk_matmul(q_tile, k_tile, q_l0a, k_l0b, s_acc, s_tile):

@@ -29,6 +29,7 @@ Python literals are automatically typed by the tracer: `bool` → `pto.i1`, `int
 
 For explicit typing, use type constructors:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.scalar_expr","symbol":"type_system_scalar_expr_probe","compile":{}} -->
 ```python
 x = pto.i32(1024)
 y = pto.ui16(7)
@@ -37,7 +38,7 @@ z: pto.i32 = 1024
 
 ### Low-precision types (storage only)
 
-The following types are available for storage and data movement, but **not** for computation. Use them to reduce memory bandwidth; convert to a compute-capable type before arithmetic.
+The following types are **storage-only**: they may only appear as element types when constructing `Tile`, `TensorView`, and `PartitionTensorView` values for storage and data movement. They **cannot** be used to construct scalars, vectors, pointers, or `tensor_spec(...)` ABI contracts. Use them to reduce memory bandwidth; convert to a compute-capable type before arithmetic.
 
 | DSL Type | Description |
 |----------|-------------|
@@ -47,10 +48,21 @@ The following types are available for storage and data movement, but **not** for
 | `pto.f8e4m3` | 8-bit float (E4M3) |
 | `pto.f8e5m2` | 8-bit float (E5M2) |
 
+These types can be used when constructing on-chip tiles and view descriptors:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.low_precision_types","symbol":"type_system_low_precision_types_probe","compile":{}} -->
+```python
+lp_tile = pto.alloc_tile(shape=[128, 64], dtype=pto.f8e4m3)
+fp4_tile = pto.alloc_tile(shape=[64, 32], dtype=pto.f4e2m1x2)
+```
+
+Constructing a scalar, vector, pointer, or host tensor ABI contract with a low-precision type is **not supported** — `pto.f8e4m3(1.0)`, `pto.vreg_type(64, pto.f8e4m3)`, `pto.ptr(pto.f8e4m3)`, and `pto.tensor_spec(rank=2, dtype=pto.f8e4m3)` will raise an error. Load data as the storage type, then convert to a compute-capable type before arithmetic.
+
 ### Integer literal guidance
 
 Prefer plain integer literals. Hex string literals are reserved for explicit bit-pattern authoring:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.scalar_expr","symbol":"type_system_scalar_expr_probe","compile":{}} -->
 ```python
 count = pto.i32(1024)
 delta = pto.i16(-12)
@@ -59,6 +71,7 @@ hi_bit = pto.i32("0x80000000")   # bit-pattern: -2147483648
 
 ### Floating-point literal forms
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.scalar_expr","symbol":"type_system_scalar_expr_probe","compile":{}} -->
 ```python
 a = pto.f16(-1.5)
 b = pto.f32("inf")
@@ -82,6 +95,7 @@ Constraint: `element_count × bitwidth(dtype) = 2048`.
 
 Use `pto.elements_per_vreg(dtype)` to query the element count:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.scalar_expr","symbol":"type_system_scalar_expr_probe","compile":{}} -->
 ```python
 lanes = pto.elements_per_vreg(pto.f32)  # 64
 ```
@@ -90,6 +104,7 @@ lanes = pto.elements_per_vreg(pto.f32)  # 64
 
 Reinterpret the bits of a vector register as a different element type:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.vreg_bitcast_ptr","symbol":"type_system_vreg_bitcast_ptr_probe","compile":{"BLOCK":128}} -->
 ```python
 fvec = pto.vlds(ptr, offset)            # !pto.vreg<64xf32>
 ivec = pto.vbitcast(fvec, pto.i32)      # !pto.vreg<64xi32>
@@ -108,8 +123,28 @@ Masks are typed by bit granularity and must match the vector element width:
 | `pto.mask_b16` | 16-bit | `f16`, `bf16`, `i16`, `si16`, `ui16` |
 | `pto.mask_b32` | 32-bit | `f32`, `i32`, `si32`, `ui32` |
 
-Bitcast between mask types with `pto.pbitcast`:
+### Constructing masks
 
+Use `make_mask` to generate a mask from a pattern or scalar — it automatically selects the correct bit width from the element dtype:
+
+<!-- ptodsl-doc-pending: documented make_mask API is not yet exposed -->
+```python
+active     = pto.make_mask(pto.f16, "PAT_ALL")   # pattern-based full mask
+tail_mask, _ = pto.make_mask(pto.f32, tail_count) # load mask from tail count scalar
+```
+
+The bit-width-specific `pset_b32` and `plt_b32` forms are also available:
+
+```python
+active      = pto.pset_b32("PAT_ALL")
+one_mask, _ = pto.plt_b32(c1_i32)
+```
+
+### Reinterpreting masks
+
+`pbitcast` reinterprets a mask register at a different granularity:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.mask_bitcast","symbol":"type_system_mask_bitcast_probe","compile":{}} -->
 ```python
 mask_b16 = pto.pbitcast(mask_b8, pto.mask_b16)
 ```
@@ -118,6 +153,7 @@ mask_b16 = pto.pbitcast(mask_b8, pto.mask_b16)
 
 Pointers combine an element type and a memory space:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.scalar_expr","symbol":"type_system_scalar_expr_probe","compile":{}} -->
 ```python
 ptr_gm  = pto.ptr(pto.f32, pto.MemorySpace.GM)
 ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
@@ -139,13 +175,19 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 
 `TensorView` is a descriptor for a tensor in Global Memory. Create one inside a `@pto.jit` body with `make_tensor_view`:
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel","compile":{"BLOCK":128}} -->
 ```python
 @pto.jit(target="a5")
-def kernel(A, *, BLOCK: pto.constexpr):
-    tv = pto.make_tensor_view(A, shape=[N], strides=A.strides)
+def kernel(
+    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    *,
+    BLOCK: pto.constexpr = 128,
+):
+    tv = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+    return
 ```
 
-`make_tensor_view` wraps a Python-native tensor. You provide the logical shape and the stride of each dimension in **elements** (not bytes). The resulting `TensorView` can be partitioned for `tload`/`tstore`.
+`make_tensor_view` wraps a Python-native tensor. You provide the logical shape and the stride of each dimension in **elements** (not bytes). The resulting `TensorView` can be partitioned for `tile.load`/`tile.store`.
 
 ### TensorView attributes
 
@@ -159,8 +201,9 @@ Strides support non-contiguous tensors. Pass `strides=A.strides` from the source
 
 ## 4.6 PartitionTensorView
 
-`partition_view` creates a sub-view of a TensorView at a given offset and size. It describes *which part* of the GM tensor a `tload` or `tstore` should operate on:
+`partition_view` creates a sub-view of a TensorView at a given offset and size. It describes *which part* of the GM tensor a `tile.load` or `tile.store` should operate on:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.partition_view","symbol":"type_system_partition_view_probe","compile":{"BLOCK":128}} -->
 ```python
 part = pto.partition_view(tv, offsets=[row_offset, 0], sizes=[BLOCK, dim])
 ```
@@ -171,6 +214,7 @@ The result is a `PartitionTensorView` — a lightweight descriptor, not a data b
 
 A `Tile` is an on-chip buffer allocated in UB or cube-local memory. Allocate tiles with `alloc_tile`:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.tile_alloc","symbol":"type_system_tile_alloc_probe","compile":{"BLOCK":128,"Br":16,"Bc":16,"dim":16}} -->
 ```python
 # UB tile
 a_tile = pto.alloc_tile(shape=[BLOCK, dim], dtype=pto.f32)
@@ -188,6 +232,8 @@ For narrow logical column tiles such as `[Br, 1]`, author them with
 `blayout="ColMajor"`. Row-major none-box tiles are validated against a 32-byte
 physical row-alignment rule.
 
+For packed types (`pto.f4e1m2x2`, `pto.f4e2m1x2`), `shape` dimensions refer to the number of **packed** elements, each containing 2 f4 values. For example, `alloc_tile(shape=[128, 64], dtype=pto.f4e1m2x2)` allocates a 128×64 tile of packed elements, holding 128×64×2 individual 4-bit floats. The same applies to TensorView shapes when the tensor spec uses a packed dtype.
+
 ### Tile attributes
 
 | Attribute | Type | Description |
@@ -204,12 +250,15 @@ physical row-alignment rule.
 | `tile.fill(value)` | Fill the entire tile with a scalar value |
 | `tile.as_ptr()` | Obtain a typed pointer to the tile's base address |
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.tile_methods","symbol":"type_system_tile_methods_probe","compile":{"Br":16,"Bc":16,"dim":16}} -->
 ```python
 m_prev_tile.fill(float("-inf"))
 l_prev_tile.fill(0.0)
 
 rows = q_tile.valid_shape[0]
 cols = k_tile.valid_shape[1]
+meta_tile.valid_shape = [pto.const(1), pto.const(2)]
+tail_tile.valid_shape = [rows]
 
 meta_ptr = meta_tile.as_ptr()
 ```

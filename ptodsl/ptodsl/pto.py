@@ -23,10 +23,13 @@ internally as ``_pto`` (``from mlir.dialects import pto as _pto``).
 # ── Types ─────────────────────────────────────────────────────────────────────
 from ._types import (           # noqa: F401
     float32, float16, bf16,
+    f8e4m3, f8e5m2, hif8, f4e1m2x2, f4e2m1x2,
     int1, int8, int16, int32, int64,
+    si8, si16, si32, si64,
+    ui8, ui16, ui32, ui64,
     index,
     ptr, vreg_type, mask_type,
-    tile_buf_type, tensor_view_type, part_tensor_view_type,
+    tile_buf_type,
     _resolve,
 )
 from ._surface_types import (   # noqa: F401
@@ -36,29 +39,65 @@ from ._surface_types import (   # noqa: F401
     BarrierType,
     Pipe,
     MemorySpace,
+    MaskPattern,
+    CmpMode,
+    PredicatePart,
+    PredicateDist,
+    VStoreDist,
+    DeinterleaveDist,
+    InterleaveDist,
+    PostUpdate,
+    AlignType,
+    DivPrecision,
+    ExpPrecision,
+    LogPrecision,
+    RecipPrecision,
+    RsqrtPrecision,
+    SqrtPrecision,
     TensorView,
     PartitionTensorView,
     Tile,
 )
 from ._tensor_factories import empty_like  # noqa: F401
+from ._tile_namespace import tile  # noqa: F401
 
 # ── Operations ────────────────────────────────────────────────────────────────
 from ._ops import (             # noqa: F401
     const,
     castptr, addptr,
-    vlds, vbrc_load, vsts, vsts_1pt,
-    plt_b32, pset_b32,
-    make_mask,
-    vadd, vmul, vmax, vdiv,
-    vcmax, vcadd, vdup, vexpdif,
-    vexp, vcgmax, vcgadd, vsubs,
+    vlds, vldas, vldus, vldsx2, vbrc_load, vsts, vsts_1pt, vstsx2,
+    init_align,
+    plt_b8, plt_b16, plt_b32,
+    pset_b8, pset_b16, pset_b32,
+    pge_b8, pge_b16, pge_b32,
+    make_mask, bytewidth, elements_per_vreg,
+    pand, por, pxor, pnot, psel,
+    pbitcast,
+    ppack, punpack,
+    pintlv_b8, pintlv_b16, pintlv_b32,
+    pdintlv_b8, pdintlv_b16, pdintlv_b32,
+    vgather2, vgather2_bc, vgatherb, vscatter, vsldb, vsstb,
+    vcmp, vcmps,
+    plds, psts, pstu, vstar, vstas, vstur, vstus,
+    vbitcast,
+    vadd, vsub, vmul, vdiv, vmax, vmin,
+    vand, vor, vxor, vshl, vshr,
+    vcmax, vcadd, vcmin, vdup, vexpdif,
+    vexp, vln, vsqrt, vabs, vneg, vrec, vrsqrt, vrelu, vnot,
+    vcgmax, vcgadd, vcgmin, vcpadd,
+    vadds, vsubs, vmuls, vmaxs, vmins, vlrelu,
+    vaxpy, vaddrelu, vsubrelu,
+    vsel,
     make_tensor_view, partition_view,
-    alloc_tile, tload, tstore, tmov, as_ptr,
-    mte_load, mte_store, mem_bar,
-    mte_l1_l0a, mte_l1_l0b, mte_l0c_ub, mad,
+    alloc_tile, as_ptr,
+    mte_load, mte_store, mte_gm_ub, mte_ub_gm, mte_ub_ub, mte_ub_l1, mem_bar,
+    mte_l1_l0a, mte_l1_l0b, mte_l0c_ub,
+    mad, mad_acc, mad_bias, mad_mx, mad_mx_acc, mad_mx_bias,
     get_block_idx, get_block_num, get_subblock_idx, get_subblock_num,
     store_vfsimt_info, get_tid_x, get_tid_y, get_tid_z,
     pipe_barrier,
+    get_buf, rls_buf,
+    set_cross_flag, wait_cross_flag, set_intra_flag, wait_intra_flag,
     set_flag, wait_flag,
 )
 
@@ -73,9 +112,6 @@ from ._control_flow import (    # noqa: F401
 from ._jit import jit, KernelHandle      # noqa: F401
 from ._subkernels import ukernel, cube, simd, simt     # noqa: F401
 
-# ── Scalar sub-namespace ──────────────────────────────────────────────────────
-from . import scalar            # noqa: F401
-
 # ── Shorthand dtype aliases ───────────────────────────────────────────────────
 f32 = float32
 f16 = float16
@@ -84,3 +120,6 @@ i8 = int8
 i16 = int16
 i32 = int32
 i64 = int64
+mask_b8 = mask_type("b8")
+mask_b16 = mask_type("b16")
+mask_b32 = mask_type("b32")

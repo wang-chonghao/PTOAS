@@ -13,7 +13,7 @@ import inspect
 from dataclasses import dataclass
 
 from ._diagnostics import host_tensor_metadata_error
-from ._types import _resolve, index, ptr
+from ._types import _ensure_non_storage_only_authored_dtype, _resolve, index, ptr
 
 
 def _normalize_tensor_shape(shape):
@@ -110,6 +110,10 @@ class TensorSpec:
     def __post_init__(self):
         if self.rank <= 0:
             raise ValueError("tensor_spec(rank=...) expects a positive rank")
+        _ensure_non_storage_only_authored_dtype(
+            self.dtype,
+            context="pto.tensor_spec(...)",
+        )
 
     def entry_arg_types(self):
         data_type = _resolve(ptr(self.dtype, self.address_space))

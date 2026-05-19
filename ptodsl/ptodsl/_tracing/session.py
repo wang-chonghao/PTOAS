@@ -93,12 +93,12 @@ class TraceSession:
                 raise RuntimeError("PTODSL trace-session function stack corruption detected")
 
     @contextmanager
-    def enter_subkernel(self, subkernel):
-        """Push *subkernel* as the current active inline-lowering frame."""
+    def enter_inline_subkernel(self, role: str, symbol_name: str, target: str):
+        """Push one inline subkernel frame onto the active tracing stack."""
         frame = SubkernelTraceFrame(
-            role=subkernel.spec.role.value,
-            symbol_name=subkernel.spec.symbol_name,
-            target=subkernel.spec.target,
+            role=role,
+            symbol_name=symbol_name,
+            target=target,
         )
         self._subkernel_stack.append(frame)
         try:
@@ -107,6 +107,16 @@ class TraceSession:
             popped = self._subkernel_stack.pop()
             if popped is not frame:
                 raise RuntimeError("PTODSL trace-session subkernel stack corruption detected")
+
+    @contextmanager
+    def enter_subkernel(self, subkernel):
+        """Push *subkernel* as the current active inline-lowering frame."""
+        with self.enter_inline_subkernel(
+            subkernel.spec.role.value,
+            subkernel.spec.symbol_name,
+            subkernel.spec.target,
+        ) as frame:
+            yield frame
 
     def lower_inline_subkernel(self, subkernel, *args, **kwargs):
         """Lower one inline PTODSL subkernel call through the shared session."""

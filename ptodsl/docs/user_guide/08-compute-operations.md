@@ -10,11 +10,11 @@ Tile compute ops are the primary arithmetic surface inside `@pto.jit`. They oper
 
 Element-wise operations between two tiles of the same shape.
 
-#### `pto.tadd(src0: Tile, src1: Tile, dst: Tile) -> None`
-#### `pto.tsub(src0: Tile, src1: Tile, dst: Tile) -> None`
-#### `pto.tmul(src0: Tile, src1: Tile, dst: Tile) -> None`
-#### `pto.tmax(src0: Tile, src1: Tile, dst: Tile) -> None`
-#### `pto.tmin(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.add(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.sub(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.mul(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.max(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.min(src0: Tile, src1: Tile, dst: Tile) -> None`
 
 **Description**: Element-wise `dst[i,j] = src0[i,j] <op> src1[i,j]`.
 
@@ -31,13 +31,13 @@ Element-wise operations between two tiles of the same shape.
 **Example**:
 
 ```python
-pto.tadd(a_tile, b_tile, o_tile)
-pto.tmul(scale_tile, data_tile, scaled_tile)
+pto.tile.add(a_tile, b_tile, o_tile)
+pto.tile.mul(scale_tile, data_tile, scaled_tile)
 ```
 
 ---
 
-#### `pto.tdiv(src0: Tile, src1: Tile, dst: Tile, *, div_precision: DivPrecision = DivPrecision.Default) -> None`
+#### `pto.tile.div(src0: Tile, src1: Tile, dst: Tile, *, div_precision: DivPrecision = DivPrecision.Default) -> None`
 
 **Description**: Element-wise division. `div_precision` can be `Default` or `HighPrecision` (f16/f32 only).
 
@@ -58,11 +58,11 @@ pto.tmul(scale_tile, data_tile, scaled_tile)
 
 Element-wise operations between a tile and a scalar.
 
-#### `pto.tadds(src: Tile, scalar: ScalarType, dst: Tile) -> None`
-#### `pto.tsubs(src: Tile, scalar: ScalarType, dst: Tile) -> None`
-#### `pto.tmuls(src: Tile, scalar: ScalarType, dst: Tile) -> None`
-#### `pto.tmaxs(src: Tile, scalar: ScalarType, dst: Tile) -> None`
-#### `pto.tmins(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.adds(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.subs(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.muls(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.maxs(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.mins(src: Tile, scalar: ScalarType, dst: Tile) -> None`
 
 **Description**: Element-wise `dst[i,j] = src[i,j] <op> scalar`.
 
@@ -78,9 +78,9 @@ Element-wise operations between a tile and a scalar.
 
 ---
 
-#### `pto.tdivs(numer: Tile | ScalarType, denom: Tile | ScalarType, dst: Tile, *, div_precision: DivPrecision = DivPrecision.Default) -> None`
+#### `pto.tile.divs(src: Tile, scalar: ScalarType, dst: Tile, *, div_precision: DivPrecision = DivPrecision.Default) -> None`
 
-**Description**: Element-wise tile-scalar division. Accepts both `(tile, scalar)` and `(scalar, tile)` operand orders.
+**Description**: Element-wise tile-scalar division: `dst[i,j] = src[i,j] / scalar`.
 
 ---
 
@@ -88,11 +88,11 @@ Element-wise operations between a tile and a scalar.
 
 Single-source element-wise math functions.
 
-#### `pto.texp(src: Tile, dst: Tile, *, exp_precision: ExpPrecision = ExpPrecision.Default) -> None`
-#### `pto.tlog(src: Tile, dst: Tile, *, log_precision: LogPrecision = LogPrecision.Default) -> None`
-#### `pto.tsqrt(src: Tile, dst: Tile, *, sqrt_precision: SqrtPrecision = SqrtPrecision.Default) -> None`
-#### `pto.trsqrt(src: Tile, dst: Tile, *, rsqrt_precision: RsqrtPrecision = RsqrtPrecision.Default) -> None`
-#### `pto.trecip(src: Tile, dst: Tile, *, recip_precision: RecipPrecision = RecipPrecision.Default) -> None`
+#### `pto.tile.exp(src: Tile, dst: Tile, *, exp_precision: ExpPrecision = ExpPrecision.Default) -> None`
+#### `pto.tile.log(src: Tile, dst: Tile, *, log_precision: LogPrecision = LogPrecision.Default) -> None`
+#### `pto.tile.sqrt(src: Tile, dst: Tile, *, sqrt_precision: SqrtPrecision = SqrtPrecision.Default) -> None`
+#### `pto.tile.rsqrt(src: Tile, dst: Tile, *, rsqrt_precision: RsqrtPrecision = RsqrtPrecision.Default) -> None`
+#### `pto.tile.recip(src: Tile, dst: Tile, *, recip_precision: RecipPrecision = RecipPrecision.Default) -> None`
 
 **Description**: Element-wise `exp`, `ln`, `sqrt`, `1/sqrt`, `1/x`.
 
@@ -108,8 +108,8 @@ Single-source element-wise math functions.
 
 ---
 
-#### `pto.tabs(src: Tile, dst: Tile) -> None`
-#### `pto.tneg(src: Tile, dst: Tile) -> None`
+#### `pto.tile.abs(src: Tile, dst: Tile) -> None`
+#### `pto.tile.neg(src: Tile, dst: Tile) -> None`
 
 **Description**: Element-wise absolute value and negation. No precision mode attribute.
 
@@ -117,11 +117,11 @@ Single-source element-wise math functions.
 
 ### 8.1.4 Activation
 
-#### `pto.trelu(src: Tile, dst: Tile) -> None`
+#### `pto.tile.relu(src: Tile, dst: Tile) -> None`
 
 **Description**: `dst[i,j] = max(0, src[i,j])`. Supported on f16, f32, i32.
 
-#### `pto.tlrelu(src: Tile, slope: float, dst: Tile) -> None`
+#### `pto.tile.lrelu(src: Tile, slope: float, dst: Tile) -> None`
 
 **Description**: Leaky ReLU — `dst[i,j] = src[i,j] >= 0 ? src[i,j] : slope * src[i,j]`.
 
@@ -133,22 +133,22 @@ Reductions collapse one dimension of a 2D tile, producing a tile with one row or
 
 #### Row reductions
 
-#### `pto.trowsum(src: Tile, tmp: Tile, dst: Tile) -> None`
-#### `pto.trowmax(src: Tile, tmp: Tile, dst: Tile) -> None`
-#### `pto.trowmin(src: Tile, tmp: Tile, dst: Tile) -> None`
-#### `pto.trowprod(src: Tile, tmp: Tile, dst: Tile) -> None`
-#### `pto.trowargmax(src: Tile, tmp: Tile, dst: Tile) -> None`
-#### `pto.trowargmin(src: Tile, tmp: Tile, dst: Tile) -> None`
+#### `pto.tile.rowsum(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
+#### `pto.tile.rowmax(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
+#### `pto.tile.rowmin(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
+#### `pto.tile.rowprod(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
+#### `pto.tile.rowargmax(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
+#### `pto.tile.rowargmin(src: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
 
-**Description**: For each row `i`, reduce across columns: `dst[i, 0] = <reduce>_j src[i, j]`. `trowargmax`/`trowargmin` return the column index of the extremum.
+**Description**: For each row `i`, reduce across columns: `dst[i, 0] = <reduce>_j src[i, j]`. `tile.rowargmax`/`tile.rowargmin` return the column index of the extremum. In the public PTODSL wrapper, `tmp` is optional; when omitted, PTODSL allocates a matching scratch tile automatically.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `src` | `Tile` | Source tile (`[rows, cols]`) |
-| `tmp` | `Tile` | Scratch tile for intermediate reduction state |
 | `dst` | `Tile` | Destination tile (`[rows, 1]`) |
+| `tmp` | `Tile | None` | Optional scratch tile for intermediate reduction state; when omitted, PTODSL synthesizes a matching scratch tile automatically |
 
 **Returns**: None.
 
@@ -156,10 +156,10 @@ Reductions collapse one dimension of a 2D tile, producing a tile with one row or
 
 #### Column reductions
 
-#### `pto.tcolsum(src: Tile, dst: Tile) -> None`
-#### `pto.tcolmax(src: Tile, dst: Tile) -> None`
-#### `pto.tcolmin(src: Tile, dst: Tile) -> None`
-#### `pto.tcolprod(src: Tile, dst: Tile) -> None`
+#### `pto.tile.colsum(src: Tile, dst: Tile) -> None`
+#### `pto.tile.colmax(src: Tile, dst: Tile) -> None`
+#### `pto.tile.colmin(src: Tile, dst: Tile) -> None`
+#### `pto.tile.colprod(src: Tile, dst: Tile) -> None`
 
 **Description**: For each column `j`, reduce across rows: `dst[0, j] = <reduce>_i src[i, j]`.
 
@@ -180,7 +180,7 @@ Expansion ops take a narrow source (scalar, row vector, or column vector) and br
 
 #### Scalar broadcast
 
-#### `pto.texpands(scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.expands(scalar: ScalarType, dst: Tile) -> None`
 
 **Description**: `dst[i,j] = scalar` — fills every element of `dst` with the same scalar value.
 
@@ -188,7 +188,7 @@ Expansion ops take a narrow source (scalar, row vector, or column vector) and br
 
 #### Row expansion
 
-#### `pto.trowexpand(src: Tile, dst: Tile) -> None`
+#### `pto.tile.rowexpand(src: Tile, dst: Tile) -> None`
 
 **Description**: `dst[row, col] = src[row, 0]` — broadcasts each row's single value across all columns of `dst`.
 
@@ -205,7 +205,7 @@ Expansion ops take a narrow source (scalar, row vector, or column vector) and br
 
 #### Column expansion
 
-#### `pto.tcolexpand(src: Tile, dst: Tile) -> None`
+#### `pto.tile.colexpand(src: Tile, dst: Tile) -> None`
 
 **Description**: `dst[row, col] = src[0, col]` — broadcasts each column's single value across all rows of `dst`.
 
@@ -217,13 +217,13 @@ These combine broadcasting with an arithmetic operation: `src1` is a per-row coe
 
 | Op | Semantics |
 |----|-----------|
-| `pto.trowexpandadd(src0, src1, dst)` | `dst = src0 + expand_rows(src1)` |
-| `pto.trowexpandsub(src0, src1, dst)` | `dst = src0 - expand_rows(src1)` |
-| `pto.trowexpandmul(src0, src1, dst)` | `dst = src0 * expand_rows(src1)` |
-| `pto.trowexpanddiv(src0, src1, dst)` | `dst = src0 / expand_rows(src1)` (f-only) |
-| `pto.trowexpandmax(src0, src1, dst)` | `dst = max(src0, expand_rows(src1))` |
-| `pto.trowexpandmin(src0, src1, dst)` | `dst = min(src0, expand_rows(src1))` |
-| `pto.trowexpandexpdif(src0, src1, dst)` | `dst = exp(src0 - expand_rows(src1))` (f-only) |
+| `pto.tile.rowexpandadd(src0, src1, dst)` | `dst = src0 + expand_rows(src1)` |
+| `pto.tile.rowexpandsub(src0, src1, dst)` | `dst = src0 - expand_rows(src1)` |
+| `pto.tile.rowexpandmul(src0, src1, dst)` | `dst = src0 * expand_rows(src1)` |
+| `pto.tile.rowexpanddiv(src0, src1, dst)` | `dst = src0 / expand_rows(src1)` (f-only) |
+| `pto.tile.rowexpandmax(src0, src1, dst)` | `dst = max(src0, expand_rows(src1))` |
+| `pto.tile.rowexpandmin(src0, src1, dst)` | `dst = min(src0, expand_rows(src1))` |
+| `pto.tile.rowexpandexpdif(src0, src1, dst)` | `dst = exp(src0 - expand_rows(src1))` (f-only) |
 
 **Parameters**:
 
@@ -239,8 +239,8 @@ These combine broadcasting with an arithmetic operation: `src1` is a per-row coe
 
 ```python
 # alpha_tile: [rows, 1], beta_tile: [rows, 1], data_tile: [rows, cols]
-pto.trowexpandmul(data_tile, alpha_tile, scaled_tile)
-pto.trowexpandadd(scaled_tile, beta_tile, result_tile)
+pto.tile.rowexpandmul(data_tile, alpha_tile, scaled_tile)
+pto.tile.rowexpandadd(scaled_tile, beta_tile, result_tile)
 ```
 
 ---
@@ -251,31 +251,31 @@ Same pattern as row-expand arithmetic, but `src1` is a per-column coefficient ti
 
 | Op | Semantics |
 |----|-----------|
-| `pto.tcolexpandadd(src0, src1, dst)` | `dst = src0 + expand_cols(src1)` |
-| `pto.tcolexpandsub(src0, src1, dst)` | `dst = src0 - expand_cols(src1)` |
-| `pto.tcolexpandmul(src0, src1, dst)` | `dst = src0 * expand_cols(src1)` |
-| `pto.tcolexpanddiv(src0, src1, dst)` | `dst = src0 / expand_cols(src1)` (f-only) |
-| `pto.tcolexpandmax(src0, src1, dst)` | `dst = max(src0, expand_cols(src1))` |
-| `pto.tcolexpandmin(src0, src1, dst)` | `dst = min(src0, expand_cols(src1))` |
-| `pto.tcolexpandexpdif(src0, src1, dst)` | `dst = exp(src0 - expand_cols(src1))` (f-only) |
+| `pto.tile.colexpandadd(src0, src1, dst)` | `dst = src0 + expand_cols(src1)` |
+| `pto.tile.colexpandsub(src0, src1, dst)` | `dst = src0 - expand_cols(src1)` |
+| `pto.tile.colexpandmul(src0, src1, dst)` | `dst = src0 * expand_cols(src1)` |
+| `pto.tile.colexpanddiv(src0, src1, dst)` | `dst = src0 / expand_cols(src1)` (f-only) |
+| `pto.tile.colexpandmax(src0, src1, dst)` | `dst = max(src0, expand_cols(src1))` |
+| `pto.tile.colexpandmin(src0, src1, dst)` | `dst = min(src0, expand_cols(src1))` |
+| `pto.tile.colexpandexpdif(src0, src1, dst)` | `dst = exp(src0 - expand_cols(src1))` (f-only) |
 
 ---
 
 ### 8.1.7 Selection
 
-#### `pto.tsel(mask: Tile, src0: Tile, src1: Tile, tmp: Tile, dst: Tile) -> None`
+#### `pto.tile.sel(mask: Tile, src0: Tile, src1: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
 
-**Description**: Element-wise ternary: `dst[i,j] = mask[i,j] ? src0[i,j] : src1[i,j]`. The `mask` is an integer tile where zero means false and non-zero means true.
+**Description**: Element-wise ternary: `dst[i,j] = mask[i,j] ? src0[i,j] : src1[i,j]`. The `mask` is an integer tile where zero means false and non-zero means true. `tmp` is an optional scratch tile override; when omitted, PTODSL synthesizes any architecture-specific scratch tile automatically.
 
-#### `pto.tsels(mask: Tile, src: Tile, scalar: ScalarType, tmp: Tile, dst: Tile) -> None`
+#### `pto.tile.sels(mask: Tile, src: Tile, scalar: ScalarType, dst: Tile, *, tmp: Tile | None = None) -> None`
 
-**Description**: Element-wise select with scalar fallback: `dst[i,j] = mask[i,j] ? src[i,j] : scalar`.
+**Description**: Element-wise select with scalar fallback: `dst[i,j] = mask[i,j] ? src[i,j] : scalar`. As with `tile.sel`, `tmp` is optional and PTODSL synthesizes any required scratch tile automatically when it is omitted.
 
 ---
 
 ### 8.1.8 Type conversion
 
-#### `pto.tcvt(src: Tile, dst: Tile, *, rmode: RoundMode = RoundMode.NONE) -> None`
+#### `pto.tile.cvt(src: Tile, dst: Tile, *, rmode: RoundMode = RoundMode.NONE) -> None`
 
 **Description**: Element-wise type conversion. The destination tile's `dtype` determines the target type.
 
@@ -291,24 +291,187 @@ Same pattern as row-expand arithmetic, but `src1` is a per-column coefficient ti
 
 ---
 
-### 8.1.9 Tile compute quick reference
+### 8.1.9 Bitwise ops
+
+Bitwise operations on integer tiles (i8, i16, i32, etc.). All follow the standard `(src, dst)` or `(src0, src1, dst)` pattern.
+
+#### Unary bitwise
+
+#### `pto.tile.bit_not(src: Tile, dst: Tile) -> None`
+
+**Description**: Element-wise bitwise NOT: `dst[i,j] = ~src[i,j]`. Integer types only.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src` | `Tile` | Source tile (integer dtype) |
+| `dst` | `Tile` | Destination tile |
+
+**Returns**: None.
+
+---
+
+#### Binary bitwise (tile-tile)
+
+#### `pto.tile.bit_and(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.bit_or(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.bit_shl(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.bit_shr(src0: Tile, src1: Tile, dst: Tile) -> None`
+
+**Description**: Element-wise bitwise `dst[i,j] = src0[i,j] <op> src1[i,j]`. Integer types only.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src0` | `Tile` | First source tile |
+| `src1` | `Tile` | Second source tile |
+| `dst` | `Tile` | Destination tile |
+
+**Returns**: None.
+
+---
+
+#### `pto.tile.bit_xor(src0: Tile, src1: Tile, dst: Tile, *, tmp: Tile | None = None) -> None`
+
+**Description**: Element-wise bitwise XOR. Requires an additional scratch buffer `tmp` of the same type as `dst`. When `tmp` is omitted, PTODSL synthesizes a matching scratch tile automatically.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src0` | `Tile` | First source tile |
+| `src1` | `Tile` | Second source tile |
+| `dst` | `Tile` | Destination tile |
+| `tmp` | `Tile | None` | Optional scratch tile; when omitted, PTODSL synthesizes one automatically |
+
+**Returns**: None.
+
+---
+
+#### Binary bitwise (tile-scalar)
+
+#### `pto.tile.bit_ands(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.bit_ors(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.bit_shls(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+#### `pto.tile.bit_shrs(src: Tile, scalar: ScalarType, dst: Tile) -> None`
+
+**Description**: Element-wise `dst[i,j] = src[i,j] <op> scalar`. The scalar is broadcast to all elements. Integer types only.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src` | `Tile` | Source tile |
+| `scalar` | `ScalarType` | Scalar operand (Python int or PTO scalar) |
+| `dst` | `Tile` | Destination tile |
+
+**Returns**: None.
+
+---
+
+#### `pto.tile.bit_xors(src: Tile, scalar: ScalarType, dst: Tile, *, tmp: Tile | None = None) -> None`
+
+**Description**: Element-wise bitwise XOR with scalar. Requires an additional scratch buffer `tmp` of the same type as `dst`. When `tmp` is omitted, PTODSL synthesizes a matching scratch tile automatically.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src` | `Tile` | Source tile |
+| `scalar` | `ScalarType` | Scalar operand |
+| `dst` | `Tile` | Destination tile |
+| `tmp` | `Tile | None` | Optional scratch tile; when omitted, PTODSL synthesizes one automatically |
+
+**Returns**: None.
+
+---
+
+### 8.1.10 Partial elementwise ops
+
+Partial elementwise ops compute over the **intersection** of the valid regions of two source tiles. This allows element-wise arithmetic between tiles that have different `valid_shape`s — only the overlapping area is computed.
+
+#### `pto.tile.partadd(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.partmul(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.partmax(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.partmin(src0: Tile, src1: Tile, dst: Tile) -> None`
+
+**Description**: Element-wise `dst[i,j] = src0[i,j] <op> src1[i,j]` over the intersection of `src0.valid_shape` and `src1.valid_shape`.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src0` | `Tile` | First source tile (may have a partial valid region) |
+| `src1` | `Tile` | Second source tile (may have a partial valid region) |
+| `dst` | `Tile` | Destination tile |
+
+**Returns**: None.
+
+**Example** — adding tiles with different valid regions:
+
+```python
+# a_tile: valid_shape = [64, 32], b_tile: valid_shape = [64, 64]
+# The partial add only operates on the intersection: 64 columns × min(32, 64) = 32 columns
+pto.tile.partadd(a_tile, b_tile, result_tile)
+```
+
+---
+
+### 8.1.11 Fill/padding
+
+Fill-padding ops copy a source tile's valid region into a destination tile, filling the remaining physical elements (outside `src.valid_shape`) with a configured pad value. The pad value is specified at tile allocation time via the tile's `PadValue` attribute (`Null`, `Zero`, `Max`, or `Min`).
+
+#### `pto.tile.fillpad(src: Tile, dst: Tile) -> None`
+
+**Description**: Copies `src`'s valid region into `dst` and fills extra elements of `dst` with the pad value configured on `dst`'s type. The `dst` physical shape must be at least as large as `src.valid_shape`.
+
+#### `pto.tile.fillpad_expand(src: Tile, dst: Tile) -> None`
+
+**Description**: Like `fillpad`, but the destination tile may have a different shape in the partition/tensor view. The src valid region is copied and the expanded area is filled with the pad value. Useful when expanding a tile into a larger buffer for downstream processing.
+
+#### `pto.tile.fillpad_inplace(src: Tile, dst: Tile) -> None`
+
+**Description**: In-place variant of `fillpad`. `src` and `dst` may refer to the same tile buffer, padding the tile's own valid region in place.
+
+**Parameters** (all three ops):
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src` | `Tile` | Source tile (with valid region to copy) |
+| `dst` | `Tile` | Destination tile (carries `PadValue` attribute set at allocation) |
+
+**Returns**: None.
+
+**Example** — padding a partial tile to full shape:
+
+```python
+# tile has valid_shape [32, 16] in a physical buffer of [32, 32]
+# pad=Zero at allocation time fills extra columns with zeros
+pto.tile.fillpad(partial_tile, padded_tile)
+```
+
+---
+
+### 8.1.12 Tile compute quick reference
 
 | Category | Operations |
 |----------|------------|
-| Binary tile-tile | `tadd`, `tsub`, `tmul`, `tdiv`, `tmax`, `tmin` |
-| Tile-scalar | `tadds`, `tsubs`, `tmuls`, `tdivs`, `tmaxs`, `tmins` |
-| Unary math | `texp`, `tlog`, `tsqrt`, `trsqrt`, `trecip`, `tabs`, `tneg` |
-| Activation | `trelu`, `tlrelu` |
-| Row reductions | `trowsum`, `trowmax`, `trowmin`, `trowprod`, `trowargmax`, `trowargmin` |
-| Column reductions | `tcolsum`, `tcolmax`, `tcolmin`, `tcolprod` |
-| Broadcast | `texpands`, `trowexpand`, `tcolexpand` |
-| Row-expand arith | `trowexpandadd`, `trowexpandsub`, `trowexpandmul`, `trowexpanddiv`, `trowexpandmax`, `trowexpandmin`, `trowexpandexpdif` |
-| Col-expand arith | `tcolexpandadd`, `tcolexpandsub`, `tcolexpandmul`, `tcolexpanddiv`, `tcolexpandmax`, `tcolexpandmin`, `tcolexpandexpdif` |
-| Selection | `tsel`, `tsels` |
-| Type conversion | `tcvt` |
-| Bitwise | `tnot`, `tand`, `tor`, `txor`, `tshl`, `tshr`, `tands`, `tors`, `txors`, `tshls`, `tshrs` |
-| Partial elementwise | `tpartadd`, `tpartmul`, `tpartmax`, `tpartmin` |
-| Fill/padding | `tfillpad`, `tfillpad_expand`, `tfillpad_inplace` |
+| Binary tile-tile | `tile.add`, `tile.sub`, `tile.mul`, `tile.div`, `tile.max`, `tile.min` |
+| Tile-scalar | `tile.adds`, `tile.subs`, `tile.muls`, `tile.divs`, `tile.maxs`, `tile.mins` |
+| Unary math | `tile.exp`, `tile.log`, `tile.sqrt`, `tile.rsqrt`, `tile.recip`, `tile.abs`, `tile.neg` |
+| Activation | `tile.relu`, `tile.lrelu` |
+| Row reductions | `tile.rowsum`, `tile.rowmax`, `tile.rowmin`, `tile.rowprod`, `tile.rowargmax`, `tile.rowargmin` |
+| Column reductions | `tile.colsum`, `tile.colmax`, `tile.colmin`, `tile.colprod` |
+| Broadcast | `tile.expands`, `tile.rowexpand`, `tile.colexpand` |
+| Row-expand arith | `tile.rowexpandadd`, `tile.rowexpandsub`, `tile.rowexpandmul`, `tile.rowexpanddiv`, `tile.rowexpandmax`, `tile.rowexpandmin`, `tile.rowexpandexpdif` |
+| Col-expand arith | `tile.colexpandadd`, `tile.colexpandsub`, `tile.colexpandmul`, `tile.colexpanddiv`, `tile.colexpandmax`, `tile.colexpandmin`, `tile.colexpandexpdif` |
+| Selection | `tile.sel`, `tile.sels` |
+| Type conversion | `tile.cvt` |
+| Bitwise | `tile.bit_not`, `tile.bit_and`, `tile.bit_or`, `tile.bit_xor`, `tile.bit_shl`, `tile.bit_shr`, `tile.bit_ands`, `tile.bit_ors`, `tile.bit_xors`, `tile.bit_shls`, `tile.bit_shrs` |
+| Partial elementwise | `tile.partadd`, `tile.partmul`, `tile.partmax`, `tile.partmin` |
+| Fill/padding | `tile.fillpad`, `tile.fillpad_expand`, `tile.fillpad_inplace` |
 
 ---
 
@@ -347,6 +510,7 @@ All vector ops in this section follow the pattern established in Section 7.3 for
 
 **Example**:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"compute_ops.vector_compute","symbol":"compute_ops_vector_probe","compile":{"BLOCK":128}} -->
 ```python
 exp_vec = pto.vexp(s_row, col_mask)
 ```
@@ -418,6 +582,7 @@ exp_vec = pto.vexp(s_row, col_mask)
 
 **Example** — subtract row max from score row (online softmax):
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"compute_ops.vector_compute","symbol":"compute_ops_vector_probe","compile":{"BLOCK":128}} -->
 ```python
 s_shifted = pto.vsubs(s_row, m_next, col_mask)
 ```
@@ -452,11 +617,11 @@ s_shifted = pto.vsubs(s_row, m_next, col_mask)
 
 These reduce within each hardware vector lane group (typically 8 groups per vector). Useful when a vector register holds multiple independent sub-vectors that need separate reductions.
 
-#### `pto.vcgadd(vec: VRegType, mask: MaskType) -> VRegType`
-#### `pto.vcgmax(vec: VRegType, mask: MaskType) -> VRegType`
-#### `pto.vcgmin(vec: VRegType, mask: MaskType) -> VRegType`
+#### `pto.vcgadd(vec: VRegType, mask: MaskType) -> ScalarType`
+#### `pto.vcgmax(vec: VRegType, mask: MaskType) -> ScalarType`
+#### `pto.vcgmin(vec: VRegType, mask: MaskType) -> ScalarType`
 
-**Description**: Per-group sum, max, or min. Each group's result is placed in the first lane of that group.
+**Description**: Per-group sum, max, or min. The underlying vector reduction places each group's result in the first lane of that group; the ptodsl surface extracts lane 0 and returns it as a runtime scalar.
 
 **Parameters**:
 
@@ -469,13 +634,14 @@ These reduce within each hardware vector lane group (typically 8 groups per vect
 
 | Return Value | Type | Description |
 |--------------|------|-------------|
-| `result` | `VRegType` | Vector with per-group reduction results |
+| `result` | `ScalarType` | Lane-0 scalar extracted from the grouped reduction result |
 
 **Example** — row max and row sum from online softmax:
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"compute_ops.vector_compute","symbol":"compute_ops_vector_probe","compile":{"BLOCK":128}} -->
 ```python
-row_max = pto.vcgmax(s_row, col_mask)   # per-group max → first lane of each group
-row_sum = pto.vcgadd(p_row, col_mask)   # per-group sum → first lane of each group
+row_max = pto.vcgmax(s_row, col_mask)   # grouped reduction, surfaced as a runtime scalar
+row_sum = pto.vcgadd(p_row, col_mask)   # grouped reduction, surfaced as a runtime scalar
 ```
 
 ---
@@ -490,9 +656,9 @@ row_sum = pto.vcgadd(p_row, col_mask)   # per-group sum → first lane of each g
 
 These combine an arithmetic operation with a math function or activation in a single instruction.
 
-#### `pto.vexpdif(vec: VRegType, max_vec: VRegType, mask: MaskType, *, part: PartMode = PartMode.EVEN) -> VRegType`
+#### `pto.vexpdif(vec: VRegType, max_vec: VRegType, mask: MaskType, *, part: PartMode = PartMode.ODD) -> VRegType`
 
-**Description**: `exp(vec[i] - max_vec[i])` — the stable softmax numerator. `part` controls which half of the vector is computed: `EVEN` or `ODD`. Result type is always f32.
+**Description**: `exp(vec[i] - max_vec[i])` — the stable softmax numerator. `part` controls which half of the vector is computed: `EVEN` or `ODD`. The result keeps the same `VRegType` as the input vector.
 
 ---
 
@@ -565,20 +731,16 @@ These combine an arithmetic operation with a math function or activation in a si
 
 | Category | Operations |
 |----------|------------|
-| Unary | `vexp`, `vln`, `vsqrt`, `vabs`, `vneg`, `vrec`, `vrsqrt`, `vrelu`, `vnot`, `vmov`, `vcls`, `vbcnt` |
-| Binary | `vadd`, `vsub`, `vmul`, `vdiv`, `vmax`, `vmin`, `vand`, `vor`, `vxor`, `vshl`, `vshr`, `vmod` |
-| Vector-scalar | `vadds`, `vsubs`, `vmuls`, `vmaxs`, `vmins`, `vshls`, `vshrs`, `vlrelu`, `vands`, `vors`, `vxors` |
-| Broadcast | `vbr`, `vdup` |
+| Unary | `vexp`, `vln`, `vsqrt`, `vabs`, `vneg`, `vrec`, `vrsqrt`, `vrelu`, `vnot` |
+| Binary | `vadd`, `vsub`, `vmul`, `vdiv`, `vmax`, `vmin`, `vand`, `vor`, `vxor`, `vshl`, `vshr` |
+| Vector-scalar | `vadds`, `vsubs`, `vmuls`, `vmaxs`, `vmins`, `vlrelu` |
+| Broadcast | `vdup` |
 | Full reduction | `vcadd`, `vcmax`, `vcmin` |
 | Group reduction | `vcgadd`, `vcgmax`, `vcgmin` |
 | Scan | `vcpadd` |
-| Fused | `vexpdif`, `vaxpy`, `vprelu`, `vaddrelu`, `vsubrelu`, `vmulconv`, `vaddreluconv` |
-| Compare/select | `vcmp`, `vcmps`, `vsel`, `vselr`, `vselrv2` |
-| Carry | `vaddc`, `vsubc`, `vaddcs`, `vsubcs` |
-| Extended arith | `vmull`, `vmula` |
-| Conversion | `vcvt`, `vtrc`, `vbitcast`, `pbitcast` |
-| Index gen | `vci` |
-| Rearrangement | `vintlv`, `vdintlv`, `vintlvv2`, `vdintlvv2`, `vsqz`, `vusqz`, `vpack`, `vsunpack`, `vzunpack`, `vperm`, `vshift`, `vslide`, `vsort32`, `vmrgsort`, `vtranspose` |
+| Fused | `vexpdif`, `vaxpy`, `vaddrelu`, `vsubrelu` |
+| Compare/select | `vcmp`, `vcmps`, `vsel` |
+| Conversion | `vbitcast`, `pbitcast` |
 
 ---
 
@@ -607,15 +769,33 @@ The Cube unit performs matrix multiplication. Its operands are typed pointers in
 
 ---
 
-#### `pto.mad_acc(lhs: PtrType, rhs: PtrType, dst: PtrType, m: int, k: int, n: int) -> None`
+#### `pto.mad_acc(lhs: PtrType, rhs: PtrType, dst: PtrType, m: int, n: int, k: int) -> None`
 
 **Description**: Accumulating matrix multiply: `dst[M×N] += lhs[M×K] * rhs[K×N]`. `dst` must already hold a prior accumulation result.
 
 ---
 
-#### `pto.mad_bias(lhs: PtrType, rhs: PtrType, dst: PtrType, bias: PtrType, m: int, k: int, n: int) -> None`
+#### `pto.mad_bias(lhs: PtrType, rhs: PtrType, dst: PtrType, bias: PtrType, m: int, n: int, k: int) -> None`
 
 **Description**: Bias-initialized matrix multiply: `dst[M×N] = lhs[M×K] * rhs[K×N] + bias[M×N]`. `bias` is a BIAS pointer.
+
+---
+
+#### `pto.mad_mx(lhs: PtrType, rhs: PtrType, dst: PtrType, m: int, n: int, k: int) -> None`
+
+**Description**: MX-format zero-initialized matrix multiply. This variant is intended for MX-enabled operand formats such as f8 payloads with their associated scale data already staged into cube-local buffers.
+
+---
+
+#### `pto.mad_mx_acc(lhs: PtrType, rhs: PtrType, dst: PtrType, m: int, n: int, k: int) -> None`
+
+**Description**: MX-format accumulating matrix multiply: `dst[M×N] += lhs[M×K] * rhs[K×N]`.
+
+---
+
+#### `pto.mad_mx_bias(lhs: PtrType, rhs: PtrType, dst: PtrType, bias: PtrType, m: int, n: int, k: int) -> None`
+
+**Description**: MX-format bias-initialized matrix multiply: `dst[M×N] = lhs[M×K] * rhs[K×N] + bias[M×N]`.
 
 ---
 
@@ -623,14 +803,15 @@ The Cube unit performs matrix multiplication. Its operands are typed pointers in
 
 A full cube matmul follows a three-stage pattern: stage operands into L0A/L0B, compute, write back to UB.
 
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"data_movement.cube_helper","symbol":"data_movement_cube_helper_probe","compile":{"BLOCK_M":16,"BLOCK_K":16,"BLOCK_N":16}} -->
 ```python
 @pto.cube
 def qk_matmul(q_tile, k_tile, q_l0a, k_l0b, s_acc, s_tile):
     m = q_tile.valid_shape[0]
     k = q_tile.valid_shape[1]
-    n = k_tile.valid_shape[0]
+    n = k_tile.valid_shape[1]
 
-    # Stage: UB → L0A / L0B
+    # Stage: source tiles → L0A / L0B
     pto.mte_l1_l0a(q_tile.as_ptr(), q_l0a.as_ptr(), m, k)
     pto.mte_l1_l0b(k_tile.as_ptr(), k_l0b.as_ptr(), k, n, transpose=True)
 
@@ -641,7 +822,7 @@ def qk_matmul(q_tile, k_tile, q_l0a, k_l0b, s_acc, s_tile):
     pto.mte_l0c_ub(s_acc.as_ptr(), s_tile.as_ptr(), m, n, n, n, 0)
 ```
 
-The `mte_l1_l0a`/`mte_l1_l0b` stage operands from UB into cube-local buffers. `mad` performs the matrix multiply into L0C. `mte_l0c_ub` writes the result back to a UB tile for downstream processing. At this micro-op layer, the operands are explicit pointer views obtained with `.as_ptr()`.
+The `mte_l1_l0a`/`mte_l1_l0b` stage operands from the authored source tiles into cube-local buffers. `mad` performs the matrix multiply into L0C. `mte_l0c_ub` writes the result back to a UB tile for downstream processing. At this micro-op layer, the operands are explicit pointer views obtained with `.as_ptr()`.
 
 ---
 
@@ -650,10 +831,10 @@ The `mte_l1_l0a`/`mte_l1_l0b` stage operands from UB into cube-local buffers. `m
 | Operation | Semantics |
 |-----------|-----------|
 | `pto.mad(lhs, rhs, dst, m, n, k)` | `dst = lhs * rhs` (zero-init) |
-| `pto.mad_acc(lhs, rhs, dst, m, k, n)` | `dst += lhs * rhs` (accumulating) |
-| `pto.mad_bias(lhs, rhs, dst, bias, m, k, n)` | `dst = lhs * rhs + bias` |
-| `pto.mad_mx(lhs, rhs, dst, m, k, n)` | MX-format zero-init matmul |
-| `pto.mad_mx_acc(lhs, rhs, dst, m, k, n)` | MX-format accumulating matmul |
-| `pto.mad_mx_bias(lhs, rhs, dst, bias, m, k, n)` | MX-format bias-init matmul |
+| `pto.mad_acc(lhs, rhs, dst, m, n, k)` | `dst += lhs * rhs` (accumulating) |
+| `pto.mad_bias(lhs, rhs, dst, bias, m, n, k)` | `dst = lhs * rhs + bias` |
+| `pto.mad_mx(lhs, rhs, dst, m, n, k)` | MX-format zero-init matmul |
+| `pto.mad_mx_acc(lhs, rhs, dst, m, n, k)` | MX-format accumulating matmul |
+| `pto.mad_mx_bias(lhs, rhs, dst, bias, m, n, k)` | MX-format bias-init matmul |
 
 MX variants require MX-enabled dtypes (f8) and pre-loaded scale payloads. For most users, the standard `mad`, `mad_acc`, and `mad_bias` are the primary interface.

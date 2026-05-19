@@ -28,9 +28,9 @@ The Python code maps 1-to-1 to the MLIR IR lines:
     }
 """
 
-from ptodsl import pto
+from ptodsl import pto, scalar
 
-s = pto.scalar  # arith shorthand alias
+s = scalar  # arith shorthand alias
 
 
 @pto.jit(name="TADD", kernel_kind="vector", target="a5")

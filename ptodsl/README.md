@@ -13,8 +13,8 @@ types as lazy descriptors, and control-flow maps 1-to-1 to MLIR operations.
 ptodsl/
 ├── ptodsl/              # pip-installable package
 │   ├── __init__.py      # exports: pto, scalar
-│   ├── pto.py           # main pto.* namespace
-│   ├── scalar.py        # pto.scalar.* arith helpers
+│   ├── pto.py           # main PTO DSL namespace
+│   ├── scalar.py        # top-level scalar.* helper namespace
 │   ├── _bootstrap.py    # MLIR path setup + context factory
 │   ├── _types.py        # lazy dtype descriptors and type constructors
 │   ├── _ops.py          # PTO operation wrappers
@@ -28,7 +28,6 @@ ptodsl/
 │   ├── softmax_lowlevel.py # Softmax – raw MLIR Python binding calls
 │   └── softmax_dsl.py      # Softmax – @pto.jit DSL style
 ├── pyproject.toml       # pip install -e .
-├── check_ir.py          # IR correctness test runner
 └── README.md
 ```
 
@@ -56,40 +55,90 @@ pip install -e .
 
 ---
 
-## Running the IR check
+## Running regression checks
 
 ```bash
-# From $PTOAS_REPO_ROOT/ptodsl/
-python3 check_ir.py
-
-# From the repository root ($PTOAS_REPO_ROOT)
-python3 ptodsl/check_ir.py
+cd $PTOAS_REPO_ROOT
+python3 test/python/ptodsl_jit_compile.py
+python3 test/python/ptodsl_jit_diagnostics.py
+python3 test/python/ptodsl_subkernel_diagnostics.py
+python3 test/python/ptodsl_flash_attention_demo_compile.py
+python3 test/python/ptodsl_ptoas_frontend_verify.py
+python3 test/python/ptodsl_docs_as_test.py
 ```
 
 Expected output:
 
 ```
-ptodsl IR check
-==================================================
-  PASS  TADD  low-level
-  PASS  TADD  dsl-style
-  PASS  softmax low-level
-  PASS  softmax dsl-style
-==================================================
-Result: ALL PASS
+ptodsl_jit_compile: PASS
+ptodsl_jit_diagnostics: PASS
+ptodsl_subkernel_diagnostics: PASS
+ptodsl_flash_attention_demo_compile: PASS
+ptodsl_ptoas_frontend_verify: PASS
+ptodsl_docs_as_test: PASS
 ```
 
-Exit code is `0` on full pass, `1` on any failure.  A unified diff of up to
-60 diverging lines is printed for each failing case.
+`ptodsl_docs_as_test.py` is the docs-as-test regression for the PTODSL user
+guide under `ptodsl/docs/user_guide/`. It scans every Python fenced code block
+and requires each one to be explicitly classified with either
+`ptodsl-doc-test` or `ptodsl-doc-pending` metadata.
+
+- `mode="compile"` blocks are executed as-authored and must pass the PTODSL
+  compile-only path, MLIR verify, and shared PTOAS frontend validation.
+- `mode="compile_fragment"` blocks are embedded into explicit test fixtures so
+  representative partial snippets can be compiled under a declared outer
+  kernel context instead of relying on hidden heuristic context synthesis.
+- `ptodsl-doc-pending` marks snippets the manual intends to treat as contract
+  later, but which are still blocked on missing implementation or missing test
+  harness support.
+
+Run it directly while editing the manual:
+
+```bash
+cd $PTOAS_REPO_ROOT
+python3 test/python/ptodsl_docs_as_test.py
+```
+
+When it fails, the diagnostic includes the Markdown path, starting line number,
+and target symbol so the drift can be fixed in the manual instead of searching
+through generated IR logs.
+
+These PTODSL regressions are intentionally complementary:
+
+- `ptodsl_jit_compile.py` protects canonical authored compile probes and
+  lowering contracts for the public PTODSL surface.
+- `ptodsl_flash_attention_demo_compile.py` protects the bundled
+  `ptodsl/examplesflash_attention_sketch.py` authored demo as a stable end-to-end
+  contract.
+- `ptodsl_ptoas_frontend_verify.py` protects the handoff from PTODSL-emitted
+  MLIR into standalone `ptoas` frontend verification.
+- `ptodsl_docs_as_test.py` protects the user manual itself: documented
+  self-contained examples must still compile, fixture-backed partial fragments
+  must still compile inside their declared context, and explicitly marked
+  pending snippets remain visible as docs/test debt.
+
+`ptodsl_docs_as_test.py` is not a replacement for the authored compile/demo
+regressions above. It reuses the same compile-only and frontend-validation
+boundaries, but its job is to keep `ptodsl/docs/user_guide/` honest rather than
+to redefine the canonical demo contracts.
+
+The legacy `ptodsl/check_ir.py` script has been retired. PTODSL validation now
+lives under `test/python/` so every regression shares the same bootstrap,
+public surface, and canonical authored targets as the tracing/JIT
+implementation.
 
 ---
 
 ## DSL-style API quick reference
 
 ```python
-from ptodsl import pto
-s = pto.scalar   # arith shorthand alias
+from ptodsl import pto, scalar
+s = scalar       # arith shorthand alias
 ```
+
+`pto` is the main DSL namespace. `scalar` is a separate top-level helper
+namespace for runtime scalar load/store, arithmetic helpers, and scalar math;
+it is intentionally not exported as `pto.scalar`.
 
 ### Kernel decorator
 
@@ -155,19 +204,20 @@ with pto.for_(c0, c128, step=c64, iter_args=(a, b)) as loop:
     pto.yield_(nx, ny)             # scf.yield with values
 fx, fy = loop.results
 
-with pto.if_(has_rows):            # simple scf.if
-    ...                             # scf.yield inserted automatically
-
-with pto.if_(has_chunk, results=(vf32, vf32)) as br:
+with pto.if_(has_rows) as br:      # simple scf.if
     with br.then_:
         ...
-        pto.yield_(merged_max, merged_sum)
+
+with pto.if_(has_chunk) as br:
+    with br.then_:
+        br.assign(x=merged_max, y=merged_sum)
     with br.else_:
-        pto.yield_(running_max, running_sum)
-x, y = br.results
+        br.assign(x=running_max, y=running_sum)
+x = br.x
+y = br.y
 ```
 
-### Scalar arithmetic (`s = pto.scalar`)
+### Scalar arithmetic (`s = scalar`)
 
 ```python
 s.muli(a, b)                 # arith.muli
@@ -175,8 +225,8 @@ s.addi(a, b)                 # arith.addi
 s.subi(a, b)                 # arith.subi
 s.index_cast(val)            # arith.index_cast → index
 s.index_cast(pto.int32, val) # arith.index_cast → i32
-s.cmpi_sgt(a, b)             # arith.cmpi sgt
-s.cmpi("slt", a, b)          # arith.cmpi with named predicate
+(a > b)                      # scalar compare → pto.i1
+(a <= b)                     # scalar compare → pto.i1
 s.select(cond, t, f)         # arith.select
 ```
 
@@ -185,19 +235,21 @@ s.select(cond, t, f)         # arith.select
 ```python
 pto.castptr(addr, ptr_type)              # pto.castptr
 pto.addptr(ptr, offset)                  # pto.addptr
-pto.vlds(ptr, offset, vreg_type)         # pto.vlds
+pto.vlds(ptr, offset)                    # pto.vlds, result vreg inferred from ptr element type
 pto.vbrc_load(ptr, offset, vreg_type)    # pto.vlds {dist="BRC_B32"}
 pto.vsts(v, ptr, offset, mask)           # pto.vsts
 pto.vsts_1pt(v, ptr, offset, mask)       # pto.vsts {dist="1PT_B32"}
 pto.plt_b32(scalar)                      # → (mask, scalar_out)
 pto.pset_b32("PAT_ALL")                  # pto.pset_b32 → mask
+pto.vbitcast(v, dtype)                   # pto.vbitcast
+pto.pbitcast(mask, mask_type)            # pto.pbitcast
 pto.vadd(a, b, mask)   # infers result type from a.type
 pto.vmul / vmax / vdiv / vcmax / vcadd / vdup / vexpdif  # similarly
 pto.make_tensor_view(ptr, shape=…, strides=…)    # type inferred
 pto.partition_view(tv, offsets=…, sizes=…)        # type inferred
 pto.alloc_tile(shape=…, dtype=…, memory_space=…)  # authored surface
-pto.tload(part, tile)
-pto.tstore(tile, part)
+pto.tile.load(part, tile)
+pto.tile.store(tile, part)
 tile.as_ptr() / view.as_ptr()
 pto.get_block_idx()           # → i64
 pto.set_flag("MTE2", "V", event_id=0)
