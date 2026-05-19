@@ -11080,7 +11080,7 @@ public:
 
     // 将 arith.cmpi 转换为 emitc.cmp
     // 映射 Predicate: eq -> equal, slt -> less, etc.
-    emitc::CmpPredicate emitcPred;
+    emitc::CmpPredicate emitcPred = emitc::CmpPredicate::eq;
     const bool isUnsignedPred =
         op.getPredicate() == arith::CmpIPredicate::ult ||
         op.getPredicate() == arith::CmpIPredicate::ule ||
