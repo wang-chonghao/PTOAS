@@ -1741,17 +1741,10 @@ int main(int argc, char **argv) {
 
   // [Fix] ToolOutputFile Usage
   std::error_code ec;
-  std::unique_ptr<llvm::ToolOutputFile> outputFile;
-  llvm::raw_ostream *outputOS = &llvm::outs();
-  if (outputFilename != "-") {
-    std::error_code ec;
-    outputFile = std::make_unique<llvm::ToolOutputFile>(
-        outputFilename, ec, llvm::sys::fs::OF_None);
-    if (ec) {
-      llvm::errs() << ec.message() << "\n";
-      return 1;
-    }
-    outputOS = &outputFile->os();
+  llvm::ToolOutputFile outputFile(outputFilename, ec, llvm::sys::fs::OF_None);
+  if (ec) {
+    llvm::errs() << ec.message() << "\n";
+    return 1;
   }
 
   const bool hasTileOpsToExpand = hasUnexpandedTileOps(*module);
@@ -1766,7 +1759,7 @@ int main(int argc, char **argv) {
     if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand,
                                       hasTilelangHelpers)))
       return 1;
-    return emitVPTOBackendResult(module.get(), *outputFile);
+    return emitVPTOBackendResult(module.get(), outputFile);
   }
 
   // Main PassManager
@@ -1818,9 +1811,8 @@ int main(int argc, char **argv) {
       llvm::errs() << "Error: Pass execution failed.\n";
       return 1;
     }
-    module->print(*outputOS);
-    if (outputFile)
-      outputFile->keep();
+    module->print(outputFile.os());
+    outputFile.keep();
     return 0;
   }
 
@@ -1850,7 +1842,7 @@ int main(int argc, char **argv) {
     if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand,
                                       hasTilelangHelpers)))
       return 1;
-    return emitVPTOBackendResult(module.get(), *outputFile);
+    return emitVPTOBackendResult(module.get(), outputFile);
   }
 
   if (arch == "a3") {
@@ -1895,11 +1887,10 @@ int main(int argc, char **argv) {
   rewriteScalarConstantDecls(cppOutput);
   rewriteHoistedGlobalTensorDecls(cppOutput);
 
-  *outputOS << cppOutput;
-  outputOS->flush();
+  outputFile.os() << cppOutput;
+  outputFile.os().flush();
 
-  if (outputFile)
-    outputFile->keep(); // Success, keep the file
+  outputFile.keep(); // Success, keep the file
 
   return 0;
 }
