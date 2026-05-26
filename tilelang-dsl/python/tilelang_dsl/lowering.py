@@ -4636,4 +4636,21 @@ def lower_semantic_kernel(kernel: SemanticKernel) -> AuthoringModule:
     return AuthoringModule(kernel=kernel)
 
 
-__all__ = ["AuthoringModule", "lower_semantic_kernel"]
+def lower_semantic_kernel_with_backend(
+    kernel: SemanticKernel,
+    backend: str = "text",
+) -> "LoweringResult":
+    """Lower semantic kernel with selectable backend (Issue #237).
+
+    Args:
+        kernel: The semantic kernel to lower.
+        backend: Backend identifier ("text" or "pybind").
+
+    Returns:
+        LoweringResult from the specified backend.
+    """
+    from .lowering_backend import lower_with_backend
+    return lower_with_backend(kernel, backend)
+
+
+__all__ = ["AuthoringModule", "lower_semantic_kernel", "lower_semantic_kernel_with_backend"]
