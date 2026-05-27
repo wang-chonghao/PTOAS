@@ -399,6 +399,27 @@ private:
             result == VPTOMaskGranularity::B32);
   }
 
+  static bool isAdjacentMaskGranularityNarrowing(VPTOMaskGranularity input,
+                                                 VPTOMaskGranularity result) {
+    return (input == VPTOMaskGranularity::B16 &&
+            result == VPTOMaskGranularity::B8) ||
+           (input == VPTOMaskGranularity::B32 &&
+            result == VPTOMaskGranularity::B16);
+  }
+
+  static LogicalResult validatePpackMaskGranularity(PpackOp op) {
+    auto input = VPTOLegalityHelper::getMaskGranularity(op.getInput().getType());
+    auto result = VPTOLegalityHelper::getMaskGranularity(op.getResult().getType());
+    if (!input || !result || *input == *result ||
+        isAdjacentMaskGranularityNarrowing(*input, *result))
+      return success();
+
+    return op.emitOpError()
+           << "input mask type " << op.getInput().getType()
+           << " does not match result mask type " << op.getResult().getType()
+           << " for pto.ppack";
+  }
+
   static LogicalResult validatePunpackMaskGranularity(PunpackOp op) {
     auto input = VPTOLegalityHelper::getMaskGranularity(op.getInput().getType());
     auto result = VPTOLegalityHelper::getMaskGranularity(op.getResult().getType());
@@ -667,7 +688,7 @@ private:
                                                concreteOp.getSrc().getType());
         })
         .Case<PpackOp>([](PpackOp concreteOp) {
-          return validateMaskOnlyUnaryContract(concreteOp);
+          return validatePpackMaskGranularity(concreteOp);
         })
         .Case<PunpackOp>([](PunpackOp concreteOp) {
           return validatePunpackMaskGranularity(concreteOp);

@@ -102,7 +102,7 @@ def main() -> None:
     expect_raises(
         define_removed_ukernel_surface_probe,
         AttributeError,
-        "pto.ukernel has been removed from the PTODSL public surface",
+        "pto.ukernel is not a supported PTODSL public interface",
         '@pto.jit(mode="explicit")',
         "@pto.simd/@pto.simt/@pto.cube",
     )

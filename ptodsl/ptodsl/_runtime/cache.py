@@ -28,6 +28,10 @@ def _specialization_digest(specialization_key) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
+def _content_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class NativeBuildArtifacts:
     """Paths to one compiled native kernel specialization."""
@@ -56,12 +60,21 @@ def artifact_paths(py_name: str, ir_function_name: str, specialization_key) -> N
     )
 
 
-def write_manifest(artifacts: NativeBuildArtifacts, *, ir_function_name: str, launch_symbol: str) -> None:
+def write_manifest(
+    artifacts: NativeBuildArtifacts,
+    *,
+    ir_function_name: str,
+    launch_symbol: str,
+    mlir_digest: str,
+    launch_cpp_digest: str,
+) -> None:
     artifacts.cache_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "ir_function_name": ir_function_name,
         "launch_symbol": launch_symbol,
         "shared_library": str(artifacts.shared_library),
+        "mlir_digest": mlir_digest,
+        "launch_cpp_digest": launch_cpp_digest,
     }
     artifacts.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
@@ -70,7 +83,12 @@ def read_manifest(artifacts: NativeBuildArtifacts) -> dict:
     return json.loads(artifacts.manifest_path.read_text(encoding="utf-8"))
 
 
-def is_native_build_current(artifacts: NativeBuildArtifacts) -> bool:
+def is_native_build_current(
+    artifacts: NativeBuildArtifacts,
+    *,
+    mlir_text: str,
+    launch_cpp_text: str,
+) -> bool:
     required = (
         artifacts.mlir_path,
         artifacts.kernel_object,
@@ -78,12 +96,24 @@ def is_native_build_current(artifacts: NativeBuildArtifacts) -> bool:
         artifacts.shared_library,
         artifacts.manifest_path,
     )
-    return all(path.is_file() for path in required)
+    if not all(path.is_file() for path in required):
+        return False
+
+    try:
+        manifest = read_manifest(artifacts)
+    except Exception:
+        return False
+
+    return (
+        manifest.get("mlir_digest") == _content_digest(mlir_text)
+        and manifest.get("launch_cpp_digest") == _content_digest(launch_cpp_text)
+    )
 
 
 __all__ = [
     "NativeBuildArtifacts",
     "artifact_paths",
+    "_content_digest",
     "is_native_build_current",
     "read_manifest",
     "write_manifest",

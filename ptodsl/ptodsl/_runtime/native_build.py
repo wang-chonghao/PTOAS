@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 from .cache import (
+    _content_digest,
     NativeBuildArtifacts,
     artifact_paths,
     is_native_build_current,
@@ -165,19 +166,21 @@ def build_native_library(
     ir_function_name = module_spec.function_name
     artifacts = artifact_paths(py_name, ir_function_name, specialization_key)
     launch_symbol = launch_symbol_name(ir_function_name)
+    launch_cpp_text = generate_launch_cpp(
+        ir_function_name=ir_function_name,
+        kernel_signature=kernel_signature,
+    )
 
-    if is_native_build_current(artifacts):
+    if is_native_build_current(
+        artifacts,
+        mlir_text=mlir_text,
+        launch_cpp_text=launch_cpp_text,
+    ):
         return artifacts.shared_library, launch_symbol
 
     artifacts.cache_dir.mkdir(parents=True, exist_ok=True)
     artifacts.mlir_path.write_text(mlir_text, encoding="utf-8")
-    artifacts.launch_cpp.write_text(
-        generate_launch_cpp(
-            ir_function_name=ir_function_name,
-            kernel_signature=kernel_signature,
-        ),
-        encoding="utf-8",
-    )
+    artifacts.launch_cpp.write_text(launch_cpp_text, encoding="utf-8")
 
     _run_ptoas(
         artifacts.mlir_path,
@@ -205,6 +208,8 @@ def build_native_library(
         artifacts,
         ir_function_name=ir_function_name,
         launch_symbol=launch_symbol,
+        mlir_digest=_content_digest(mlir_text),
+        launch_cpp_digest=_content_digest(launch_cpp_text),
     )
     return artifacts.shared_library, launch_symbol
 

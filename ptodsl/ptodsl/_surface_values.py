@@ -816,12 +816,14 @@ def _build_tile_slice_view(tile: TileValue, *, raw_offsets, shape):
     rank = len(base_type.shape)
     offset_operands, static_offsets = _split_dynamic_index_operands(raw_offsets)
     shape_operands, static_shape = _split_dynamic_index_operands(shape)
+    base_strides, base_offset = base_type.get_strides_and_offset()
     if rank == 1:
         slice_type = _make_strided_memref_type(
             [_static_extent_if_known(shape[0])],
             base_type.element_type,
-            [1],
+            [base_strides[0]],
             base_type.memory_space,
+            offset=_compose_static_subview_offset(base_offset, base_strides, raw_offsets),
         )
         slice_value = memref.SubViewOp(
             slice_type,
@@ -838,8 +840,9 @@ def _build_tile_slice_view(tile: TileValue, *, raw_offsets, shape):
     slice_type = _make_strided_memref_type(
         [_static_extent_if_known(shape[0])],
         base_type.element_type,
-        [1],
+        [base_strides[1]],
         base_type.memory_space,
+        offset=_compose_static_subview_offset(base_offset, base_strides, raw_offsets),
     )
     slice_value = memref.SubViewOp(
         slice_type,
@@ -885,13 +888,35 @@ def _split_dynamic_index_operands(values):
     return operands, static_attrs
 
 
-def _make_strided_memref_type(shape, element_type, strides, memory_space):
+def _make_strided_memref_type_with_offset(shape, element_type, strides, memory_space, *, offset):
     return MemRefType.get(
         list(shape),
         element_type,
-        StridedLayoutAttr.get(ShapedType.get_dynamic_size(), list(strides)),
+        StridedLayoutAttr.get(offset, list(strides)),
         memory_space,
     )
+
+
+def _make_strided_memref_type(shape, element_type, strides, memory_space, *, offset=ShapedType.get_dynamic_size()):
+    return _make_strided_memref_type_with_offset(
+        shape,
+        element_type,
+        strides,
+        memory_space,
+        offset=offset,
+    )
+
+
+def _compose_static_subview_offset(base_offset, base_strides, raw_offsets):
+    if base_offset == ShapedType.get_dynamic_size():
+        return ShapedType.get_dynamic_size()
+
+    linear_offset = base_offset
+    for stride, authored_offset in zip(base_strides, raw_offsets):
+        if not isinstance(authored_offset, int):
+            return ShapedType.get_dynamic_size()
+        linear_offset += stride * authored_offset
+    return linear_offset
 
 
 def _mul_index(lhs, rhs):

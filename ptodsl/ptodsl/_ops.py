@@ -629,6 +629,17 @@ def _mask_type_from_bits(mask_bits: int):
     return _resolve(mask_type(f"b{mask_bits}"))
 
 
+def _resolve_mask_result_type(result_type, *, context: str):
+    if result_type is None:
+        return None
+    resolved = _resolve(result_type)
+    try:
+        _pto.MaskType(resolved)
+    except Exception as exc:
+        raise TypeError(f"{context} expects to_type to resolve to a PTO mask type, got {resolved}") from exc
+    return resolved
+
+
 def _infer_mask_metadata(mask_value, *, context: str):
     raw_type = unwrap_surface_value(mask_value).type
     try:
@@ -830,9 +841,12 @@ def psel(src0, src1, sel):
     )
 
 
-def ppack(mask_value, part):
+def ppack(mask_value, part, to_type=None):
     """``pto.ppack`` – pack predicate bits into the selected half."""
-    _, result_type = _infer_mask_metadata(mask_value, context="ppack(mask, part)")
+    _, inferred_type = _infer_mask_metadata(mask_value, context="ppack(mask, part)")
+    result_type = _resolve_mask_result_type(to_type, context="ppack(mask, part, to_type=...)")
+    if result_type is None:
+        result_type = inferred_type
     return wrap_surface_value(
         _pto.PpackOp(
             result_type,
@@ -842,9 +856,12 @@ def ppack(mask_value, part):
     )
 
 
-def punpack(mask_value, part):
+def punpack(mask_value, part, to_type=None):
     """``pto.punpack`` – unpack predicate bits from the selected half."""
-    _, result_type = _infer_mask_metadata(mask_value, context="punpack(mask, part)")
+    _, inferred_type = _infer_mask_metadata(mask_value, context="punpack(mask, part)")
+    result_type = _resolve_mask_result_type(to_type, context="punpack(mask, part, to_type=...)")
+    if result_type is None:
+        result_type = inferred_type
     return wrap_surface_value(
         _pto.PunpackOp(
             result_type,

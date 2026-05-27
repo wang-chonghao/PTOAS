@@ -208,6 +208,18 @@ jobs:
           # PTO_INSTALL_DIR is already set at the job level.
           LLVM_BUILD_DIR="${LLVM_DIR}" pip install . --no-build-isolation
 
+      - name: Run PTODSL Python tests
+        shell: bash
+        env:
+          LLVM_DIR: ${{ env.LLVM_DIR }}
+          PTO_INSTALL_DIR: ${{ env.PTO_INSTALL_DIR }}
+          MLIR_PYTHONPATH: ${{ env.MLIR_PYTHONPATH }}
+        run: |
+          export PATH="${LLVM_DIR}/bin:${PTO_INSTALL_DIR}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${LLVM_DIR}/lib:${PTO_INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
+          export PYTHONPATH="${MLIR_PYTHONPATH}:${PTO_INSTALL_DIR}:${PYTHONPATH:-}"
+          ctest --test-dir "${PTO_BUILD_DIR}" --output-on-failure -L PTODSL
+
       - name: Run lit tests
         shell: bash
         env:
@@ -455,6 +467,18 @@ jobs:
               2>&1 | tee "${TILELANG_DSL_WORKSPACE}/run_ci.log"
           fi
 
+      - name: Run PTODSL DSL ST CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${TILELANG_DSL_WORKSPACE}"
+          export LLVM_BUILD_DIR="${LLVM_DIR}"
+          export PYTHON_BIN="python3"
+          ASCEND_HOME_PATH="${ASCEND_HOME_PATH}" \
+          PTOAS_BIN="${PTOAS_BIN}" \
+          scripts/sim_dsl.sh test/dsl-st/predicate_pack_launch.py \
+            2>&1 | tee "${TILELANG_DSL_WORKSPACE}/ptodsl-dsl-st.log"
+
       - name: Upload TileLang DSL logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -462,6 +486,7 @@ jobs:
           name: tilelang-dsl-ci-${{ github.run_id }}
           path: |
             ${{ env.TILELANG_DSL_WORKSPACE }}/run_ci.log
+            ${{ env.TILELANG_DSL_WORKSPACE }}/ptodsl-dsl-st.log
           if-no-files-found: warn
 
       - name: Run TileLang DSL unit tests

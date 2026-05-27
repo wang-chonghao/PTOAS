@@ -20,9 +20,21 @@ Usage:
   scripts/sim_dsl.sh [options] <example.py> [-- <example args...>]
 
 Options:
-  --output <dir>        Override msprof output directory.
+  --output <dir>        Final directory to sync results into after the run.
   --soc-version <soc>   Override simulator soc version. Default: Ascend950PR_9599
+  --verbose-msprof      Show the full `msprof` simulator log stream.
+  --quiet-msprof        Suppress noisy `msprof` INFO/WARN/ERROR lines. Default.
   -h, --help            Show this help.
+
+Environment:
+  PTOAS_MSPROF_PRIVATE_ROOT
+                        Private root used for the actual `msprof --output`.
+                        Defaults to `$XDG_RUNTIME_DIR/ptoas-msprof` when available,
+                        otherwise `$HOME/.cache/ptoas/msprof`.
+  PTOAS_KEEP_MSPROF_STAGING=1
+                        Keep the private staging directory after a successful sync.
+  PTOAS_MSPROF_LOG_MODE=quiet|verbose
+                        Override the default simulator log rendering mode.
 
 Examples:
   scripts/sim_dsl.sh ptodsl/examples/jit/tadd_launch.py
@@ -37,10 +49,60 @@ die() {
   exit 1
 }
 
+log() {
+  echo "[sim_dsl] $*"
+}
+
+ensure_private_dir() {
+  local dir="$1"
+  umask 077
+  mkdir -p "${dir}"
+  chmod 700 "${dir}"
+}
+
+sync_msprof_output() {
+  local src_dir="$1"
+  local dst_dir="$2"
+
+  mkdir -p "${dst_dir}"
+  cp -a "${src_dir}/." "${dst_dir}/"
+}
+
+print_msprof_log() {
+  local log_file="$1"
+  local mode="$2"
+  local status="$3"
+
+  if [[ "${mode}" == "verbose" ]]; then
+    cat "${log_file}"
+    return
+  fi
+
+  grep -Ev '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} \[(INFO|WARN|ERROR|DEBUG)\][[:space:]]' \
+    "${log_file}" || true
+
+  if [[ ${status} -ne 0 ]]; then
+    local suppressed_count
+    suppressed_count=$(wc -l < "${log_file}")
+    local filtered_count
+    filtered_count=$(
+      grep -Evc '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} \[(INFO|WARN|ERROR|DEBUG)\][[:space:]]' \
+        "${log_file}" || true
+    )
+    suppressed_count=$((suppressed_count - filtered_count))
+    if [[ ${suppressed_count} -gt 0 ]]; then
+      log "msprof failure tail:"
+      tail -n 20 "${log_file}"
+    fi
+    log "full msprof log saved at ${log_file}"
+  fi
+}
+
 SOC_VERSION="Ascend950PR_9599"
 OUTPUT_DIR=""
 EXAMPLE_PATH=""
 EXAMPLE_ARGS=()
+MSPROF_LOG_MODE="${PTOAS_MSPROF_LOG_MODE:-quiet}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,6 +115,14 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "--soc-version requires a value"
       SOC_VERSION="$2"
       shift 2
+      ;;
+    --verbose-msprof)
+      MSPROF_LOG_MODE="verbose"
+      shift
+      ;;
+    --quiet-msprof)
+      MSPROF_LOG_MODE="quiet"
+      shift
       ;;
     -h|--help)
       usage
@@ -91,12 +161,18 @@ fi
 if [[ -z "${OUTPUT_DIR}" ]]; then
   EXAMPLE_STEM="$(basename -- "${EXAMPLE_PATH}" .py)"
   OUTPUT_DIR="${REPO_ROOT}/build/msprof_res/${EXAMPLE_STEM}"
+else
+  EXAMPLE_STEM="$(basename -- "${EXAMPLE_PATH}" .py)"
 fi
 
 SIM_LIB_DIR="${ASCEND_HOME_PATH}/tools/simulator/${SOC_VERSION}/lib"
 [[ -d "${SIM_LIB_DIR}" ]] || die "simulator library directory not found: ${SIM_LIB_DIR}"
 
-mkdir -p "${OUTPUT_DIR}"
+PRIVATE_ROOT="${PTOAS_MSPROF_PRIVATE_ROOT:-${XDG_RUNTIME_DIR:-${HOME}/.cache}/ptoas/msprof}"
+ensure_private_dir "${PRIVATE_ROOT}"
+RUNTIME_OUTPUT_DIR="$(mktemp -d "${PRIVATE_ROOT}/${EXAMPLE_STEM}.XXXXXX")"
+chmod 700 "${RUNTIME_OUTPUT_DIR}"
+MSPROF_STDIO_LOG="${RUNTIME_OUTPUT_DIR}/msprof.stdout.log"
 
 source "${ASCEND_HOME_PATH}/bin/setenv.bash"
 source "${REPO_ROOT}/set_ptoas_env.sh"
@@ -107,7 +183,40 @@ ulimit -n 65535
 # from a private directory and use an absolute path for the example script.
 cd "${HOME}"
 
-exec msprof op simulator \
+log "staging msprof output in ${RUNTIME_OUTPUT_DIR}"
+if [[ "${OUTPUT_DIR}" != "${RUNTIME_OUTPUT_DIR}" ]]; then
+  log "final results will be synced to ${OUTPUT_DIR}"
+fi
+
+set +e
+msprof op simulator \
   --soc-version="${SOC_VERSION}" \
-  --output="${OUTPUT_DIR}" \
-  python3 "${EXAMPLE_PATH}" "${EXAMPLE_ARGS[@]}"
+  --output="${RUNTIME_OUTPUT_DIR}" \
+  python3 "${EXAMPLE_PATH}" "${EXAMPLE_ARGS[@]}" \
+  > "${MSPROF_STDIO_LOG}" 2>&1
+STATUS=$?
+set -e
+
+print_msprof_log "${MSPROF_STDIO_LOG}" "${MSPROF_LOG_MODE}" "${STATUS}"
+
+SYNC_STATUS=0
+if [[ -d "${RUNTIME_OUTPUT_DIR}" ]]; then
+  if sync_msprof_output "${RUNTIME_OUTPUT_DIR}" "${OUTPUT_DIR}"; then
+    log "synced msprof results to ${OUTPUT_DIR}"
+  else
+    SYNC_STATUS=$?
+    log "failed to sync msprof results to ${OUTPUT_DIR}"
+  fi
+fi
+
+if [[ "${PTOAS_KEEP_MSPROF_STAGING:-0}" != "1" && ${SYNC_STATUS} -eq 0 ]]; then
+  rm -rf "${RUNTIME_OUTPUT_DIR}"
+else
+  log "kept staging directory at ${RUNTIME_OUTPUT_DIR}"
+fi
+
+if [[ ${STATUS} -ne 0 ]]; then
+  exit ${STATUS}
+fi
+
+exit ${SYNC_STATUS}
