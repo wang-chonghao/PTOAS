@@ -24,6 +24,7 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -136,6 +137,46 @@ static bool isSupportedReduxValueType(Type type) {
   if (auto intType = dyn_cast<IntegerType>(type))
     return intType.getWidth() == 32;
   return type.isF16() || type.isF32();
+}
+
+LogicalResult SimtLaunchOp::verify() {
+  if (auto parentFunc = (*this)->getParentOfType<func::FuncOp>()) {
+    if (parentFunc->hasAttr(pto::kPTOSimtEntryAttrName)) {
+      return emitOpError()
+             << "must not appear inside a function marked with '"
+             << pto::kPTOSimtEntryAttrName
+             << "'; launch the SIMT entry from an outer non-simt function";
+    }
+  }
+
+  func::FuncOp callee =
+      SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(*this, getCalleeAttr());
+  if (!callee)
+    return emitOpError() << "'" << getCalleeAttr().getValue()
+                         << "' does not reference a valid function";
+
+  if (!callee->hasAttr(pto::kPTOSimtEntryAttrName)) {
+    return emitOpError() << "callee '" << getCalleeAttr().getValue()
+                         << "' must be marked with '"
+                         << pto::kPTOSimtEntryAttrName << "'";
+  }
+
+  FunctionType calleeType = callee.getFunctionType();
+  if (!calleeType.getResults().empty())
+    return emitOpError("requires a callee with no results");
+
+  if (calleeType.getNumInputs() != getArgs().size())
+    return emitOpError("incorrect number of operands for callee");
+
+  for (auto [index, argType, operand] :
+       llvm::enumerate(calleeType.getInputs(), getArgs())) {
+    if (argType != operand.getType()) {
+      return emitOpError("operand type mismatch: expected operand type ")
+             << argType << ", but provided " << operand.getType()
+             << " for operand number " << index;
+    }
+  }
+  return success();
 }
 
 static LogicalResult verifyShuffleSemanticControl(Operation *op,

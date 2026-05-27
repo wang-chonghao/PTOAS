@@ -11,8 +11,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     %dim_y = arith.constant 1 : i32
     %dim_x = arith.constant 32 : i32
 
-    pto.store_vfsimt_info %dim_z, %dim_y, %dim_x : i32, i32, i32
-    func.call @simt_ldst_policy_core_body(%arg0, %arg1, %arg2, %arg3, %arg4, %arg5, %arg6, %arg7)
+    pto.simt_launch @simt_ldst_policy_core_body<<<%dim_x, %dim_y, %dim_z>>>(%arg0, %arg1, %arg2, %arg3, %arg4, %arg5, %arg6, %arg7)
       : (!pto.ptr<i32, gm>, !pto.ptr<f16, gm>, !pto.ptr<bf16, gm>, !pto.ptr<i8, gm>, !pto.ptr<i16, gm>, !pto.ptr<i64, gm>, !pto.ptr<f32, gm>, !pto.ptr<f64, gm>) -> ()
     pto.barrier #pto.pipe<PIPE_ALL>
     return

@@ -39,7 +39,7 @@ The current PTO SIMT surface supports these operation families:
 
 | Family | Ops |
 |--------|-----|
-| Launch configuration | `pto.store_vfsimt_info` |
+| Launch configuration | `pto.store_vfsimt_info`, `pto.simt_launch` |
 | Thread and lane queries | `pto.get_tid_x`, `pto.get_tid_y`, `pto.get_tid_z`, `pto.get_block_dim_x`, `pto.get_block_dim_y`, `pto.get_block_dim_z`, `pto.get_grid_dim_x`, `pto.get_grid_dim_y`, `pto.get_grid_dim_z`, `pto.get_block_idx_x`, `pto.get_block_idx_y`, `pto.get_block_idx_z`, `pto.get_veccoreid`, `pto.get_clock32`, `pto.get_clock64`, `pto.get_laneid`, `pto.get_lanemask_eq`, `pto.get_lanemask_le`, `pto.get_lanemask_lt`, `pto.get_lanemask_ge`, `pto.get_lanemask_gt` |
 | Lane collectives | `pto.vote_all`, `pto.vote_any`, `pto.vote_uni`, `pto.vote_ballot`, `pto.shuffle_idx`, `pto.shuffle_up`, `pto.shuffle_down`, `pto.shuffle_bfly`, `pto.redux_add`, `pto.redux_max`, `pto.redux_min` |
 | Scalar memory | `pto.load`, `pto.store`, `pto.ldg`, `pto.stg` |
@@ -59,7 +59,7 @@ function:
 Both attributes are optional. If present, they must be positive `i32`
 attributes and may only appear on functions that also carry `pto.simt_entry`.
 They do not launch work by themselves; the actual workitem count comes from
-`pto.store_vfsimt_info`.
+`pto.store_vfsimt_info` or `pto.simt_launch`.
 
 ```mlir
 func.func @body(%dst: !pto.ptr<i32, ub>)
@@ -107,6 +107,34 @@ Typical outer-kernel pattern:
 %dim_x = arith.constant 32 : i32
 pto.store_vfsimt_info %dim_z, %dim_y, %dim_x : i32, i32, i32
 func.call @body(%ub_out) : (!pto.ptr<i32, ub>) -> ()
+```
+
+### `pto.simt_launch`
+
+- **syntax:** `pto.simt_launch @body<<<%dim_x, %dim_y, %dim_z>>>(%arg0, ...) : (arg_types...) -> ()`
+- **semantics:** Launch the SIMT body `@body` using the workitem dimensions
+  `%dim_x`, `%dim_y`, and `%dim_z`. The dimension order follows the launch-site
+  order `x, y, z`; each active workitem in the body observes coordinates in the
+  ranges `tid_x in [0, dim_x)`, `tid_y in [0, dim_y)`, and
+  `tid_z in [0, dim_z)`.
+- **inputs:** `%dim_x`, `%dim_y`, and `%dim_z` are `i32` workitem counts. The
+  remaining operands are passed to the SIMT body and must match the callee
+  function signature.
+- **outputs:** None. The SIMT body must return no values.
+- **constraints and limitations:** The callee must be a `func.func` marked with
+  `pto.simt_entry`. The launch op belongs in the outer non-SIMT caller and must
+  not appear inside a function marked with `pto.simt_entry`. The launch count is
+  `dim_x * dim_y * dim_z` and is bounded by the same limits as
+  `pto.store_vfsimt_info`.
+
+Example launch-site pattern:
+
+```mlir
+%dim_x = arith.constant 32 : i32
+%dim_y = arith.constant 1 : i32
+%dim_z = arith.constant 1 : i32
+pto.simt_launch @body<<<%dim_x, %dim_y, %dim_z>>>(%ub_out)
+  : (!pto.ptr<i32, ub>) -> ()
 ```
 
 ---

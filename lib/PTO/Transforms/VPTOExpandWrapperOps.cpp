@@ -1631,6 +1631,21 @@ struct ExpandAccStoreUbPattern : public OpRewritePattern<pto::MteL0cUbOp> {
   }
 };
 
+struct ExpandSimtLaunchPattern : public OpRewritePattern<pto::SimtLaunchOp> {
+  using OpRewritePattern<pto::SimtLaunchOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(pto::SimtLaunchOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    rewriter.create<pto::StoreVfSimtInfoOp>(loc, op.getDimZ(), op.getDimY(),
+                                            op.getDimX());
+    rewriter.create<func::CallOp>(loc, op.getCalleeAttr(), TypeRange{},
+                                  op.getArgs());
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 struct VPTOExpandWrapperOpsPass
     : public pto::impl::VPTOExpandWrapperOpsBase<VPTOExpandWrapperOpsPass> {
   using pto::impl::VPTOExpandWrapperOpsBase<
@@ -1656,6 +1671,7 @@ struct VPTOExpandWrapperOpsPass
                  ExpandRightLoadMxPattern, ExpandAccStorePattern,
                  ExpandAccStoreGmPattern,
                  ExpandAccStoreUbPattern,
+                 ExpandSimtLaunchPattern,
                  ExpandMadSemanticPattern<pto::MadOp>,
                  ExpandMadSemanticPattern<pto::MadAccOp>,
                  ExpandMadSemanticPattern<pto::MadBiasOp>,

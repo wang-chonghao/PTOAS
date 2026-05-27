@@ -389,6 +389,28 @@ def PTO_StoreVfSimtInfoOp : PTO_Op<"store_vfsimt_info"> {
     $dimZ `,` $dimY `,` $dimX attr-dict `:` type($dimZ) `,` type($dimY) `,` type($dimX)
   }];
 }
+def PTO_SimtLaunchOp : PTO_Op<"simt_launch"> {
+  let summary = "Launch a SIMT entry with VF launch dimensions";
+  let description = [{
+    `pto.simt_launch` is source-level sugar for configuring SIMT VF launch
+    dimensions and calling a function marked with `pto.simt_entry`.
+
+    The textual dimension order follows the familiar launch order
+    `<<<x, y, z>>>`; the canonical `pto.store_vfsimt_info` operation stores
+    the same values in `z, y, x` order for the backend.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$callee,
+                       I32:$dimX,
+                       I32:$dimY,
+                       I32:$dimZ,
+                       Variadic<AnyType>:$args);
+  let results = (outs);
+  let assemblyFormat = [{
+    $callee `<` `<` `<` $dimX `,` $dimY `,` $dimZ `>` `>` `>`
+    `` `(` $args `)` attr-dict `:` functional-type($args, results)
+  }];
+  let hasVerifier = 1;
+}
 def PTO_Sbitset0Op : PTO_BinaryI64PureOp<"sbitset0">;
 def PTO_Sbitset1Op : PTO_BinaryI64PureOp<"sbitset1">;
 def PTO_SetQuantPreOp : PTO_UnaryI64ConfigOp<"set_quant_pre">;

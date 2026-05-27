@@ -5,8 +5,7 @@ module attributes {pto.target_arch = "a5"} {
     %dim_x = arith.constant 32 : i32
 
     pto.section.vector {
-      pto.store_vfsimt_info %dim_z, %dim_y, %dim_x : i32, i32, i32
-      func.call @simt_gm_memory_core_body(%arg0) : (!pto.ptr<i32, gm>) -> ()
+      pto.simt_launch @simt_gm_memory_core_body<<<%dim_x, %dim_y, %dim_z>>>(%arg0) : (!pto.ptr<i32, gm>) -> ()
 
       pto.barrier #pto.pipe<PIPE_ALL>
     }

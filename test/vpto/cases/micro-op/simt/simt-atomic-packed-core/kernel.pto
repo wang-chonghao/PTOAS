@@ -8,8 +8,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     %h2_addr = pto.castptr %h2_gm : !pto.ptr<vector<2xf16>, gm> -> i64
     %b2_addr = pto.castptr %b2_gm : !pto.ptr<vector<2xbf16>, gm> -> i64
 
-    pto.store_vfsimt_info %dim_z, %dim_y, %dim_x : i32, i32, i32
-    func.call @simt_atomic_packed_core_body(%h2_addr, %b2_addr) : (i64, i64) -> ()
+    pto.simt_launch @simt_atomic_packed_core_body<<<%dim_x, %dim_y, %dim_z>>>(%h2_addr, %b2_addr) : (i64, i64) -> ()
     pto.barrier #pto.pipe<PIPE_ALL>
     return
   }

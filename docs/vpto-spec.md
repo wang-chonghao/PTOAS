@@ -782,6 +782,18 @@ subblock_num = subblock_num();
 store_vfsimt_info(dim_z, dim_y, dim_x);
 ```
 
+#### `pto.simt_launch`
+
+- **syntax:** `pto.simt_launch @body<<<%dim_x, %dim_y, %dim_z>>>(%arg0, ...) : (arg_types...) -> ()`
+- **operands:** `%dim_x`, `%dim_y`, and `%dim_z` are `i32` workitem counts in `x, y, z` launch order. The remaining operands are passed to `@body`.
+- **semantics:** Invoke the SIMT entry `@body` for the workitem space described by `%dim_x * %dim_y * %dim_z`. Workitems in `@body` observe thread coordinates through the SIMT query ops.
+- **placement:** This op must appear in the outer non-SIMT caller. The callee must be marked with `pto.simt_entry` and must return no values.
+
+```mlir
+pto.simt_launch @simt_write<<<%dim_x, %dim_y, %dim_z>>>(%ub_out)
+  : (!pto.ptr<i32, ub>) -> ()
+```
+
 #### `pto.get_tid_x`
 
 - **syntax:** `%tx = pto.get_tid_x : i32`
@@ -1386,7 +1398,7 @@ This section provides a categorized overview of all PTO micro Instruction operat
 | 14 | [Arith (Shared MLIR Dialect)](isa/micro-isa/14-shared-arith.md) | Full scalar `arith` surface used around PTO ops; the companion page lists categories and representative examples | all scalar ops | `arith.constant`, `arith.addi`, `arith.addf`, `arith.cmpi`, `arith.cmpf`, `arith.select`, `arith.index_cast`, `arith.extsi`, `arith.trunci`, `arith.andi`, `arith.shli`, etc. |
 | 15 | [SCF (Shared MLIR Dialect)](isa/micro-isa/15-shared-scf.md) | Structured loops, branches, and loop-carried state around PTO regions | 5 | `scf.for`, `scf.if`, `scf.while`, `scf.condition`, `scf.yield` |
 | 16 | [Cube Matrix Multiply](isa/micro-isa/16-cube-matmul.md) | GM↔L1 (`l1`/cbuf) staging, L1 (`l1`)↔UB/BT/FB side moves, L1→L0A/L0B loads, L0C (`l0c`) matmul, and FIXPIPE MTE writeback | 19 | `pto.mte_gm_l1`, `pto.mte_l1_ub`, `pto.mte_gm_l1_frac`, `pto.mte_l1_bt`, `pto.mte_l1_fb`, `pto.mte_l1_l0a`, `pto.mte_l1_l0b`, `pto.mte_l1_l0a_mx`, `pto.mte_l1_l0b_mx`, `pto.mad`, `pto.mad_acc`, `pto.mad_bias`, `pto.mad_mx`, `pto.mad_mx_acc`, `pto.mad_mx_bias`, `pto.mte_l0c_l1`, `pto.mte_l0c_gm`, `pto.mte_l0c_ub` |
-| 17 | [SIMT Ops](isa/micro-isa/17-simt.md) | SIMT launch, thread/lane queries, vote/shuffle/redux, scalar memory, atomics, scalar math, conversion, entry synchronization, and state preservation | ~65 | `pto.store_vfsimt_info`, `pto.get_tid_x`, `pto.get_laneid`, `pto.vote_*`, `pto.shuffle_*`, `pto.redux_*`, `pto.load`, `pto.store`, `pto.atomic_*`, `pto.convert`, `pto.syncthreads`, `pto.keep`, `pto.resume`, etc. |
+| 17 | [SIMT Ops](isa/micro-isa/17-simt.md) | SIMT launch, thread/lane queries, vote/shuffle/redux, scalar memory, atomics, scalar math, conversion, entry synchronization, and state preservation | ~65 | `pto.store_vfsimt_info`, `pto.simt_launch`, `pto.get_tid_x`, `pto.get_laneid`, `pto.vote_*`, `pto.shuffle_*`, `pto.redux_*`, `pto.load`, `pto.store`, `pto.atomic_*`, `pto.convert`, `pto.syncthreads`, `pto.keep`, `pto.resume`, etc. |
 
 ---
 
