@@ -2912,7 +2912,8 @@ struct PTOMGatherToMGATHER : public OpConversionPattern<pto::MGatherOp> {
       templateArgVec.push_back(
           emitc::OpaqueAttr::get(ctx, gatherOobTok(op.getGatherOob())));
     }
-    ArrayAttr templateArgs = rewriter.getArrayAttr(templateArgVec);
+    ArrayAttr templateArgs =
+        templateArgVec.empty() ? ArrayAttr{} : rewriter.getArrayAttr(templateArgVec);
 
     rewriter.create<emitc::CallOpaqueOp>(
         op.getLoc(), TypeRange{}, "MGATHER",
@@ -7847,6 +7848,7 @@ struct PTOTCIToEmitC : public OpConversionPattern<pto::TCIOp> {
 
     Value dst = peelUnrealized(adaptor.getDst());
     Value S = peelUnrealized(adaptor.getOperands()[0]);
+    Value tmp = op.getTmp() ? peelUnrealized(adaptor.getTmp()) : Value();
 
     // The TCI scalar template parameter should follow the original PTO IR
     // scalar type, not the converted EmitC value type.
@@ -7874,11 +7876,15 @@ struct PTOTCIToEmitC : public OpConversionPattern<pto::TCIOp> {
       targs = rewriter.getArrayAttr({});
     }
 
+    SmallVector<Value, 3> operands{dst, S};
+    if (tmp)
+      operands.push_back(tmp);
+
     rewriter.create<emitc::CallOpaqueOp>(
         loc, TypeRange{}, "TCI",
         /*args=*/ArrayAttr{},
         /*templateArgs=*/targs,
-        /*operands=*/ValueRange{dst, S});
+        /*operands=*/operands);
 
     rewriter.eraseOp(op);
     return success();
@@ -9882,9 +9888,12 @@ struct PTORowExpandAddToEmitC : public OpConversionPattern<pto::TRowExpandAddOp>
 
     Value src0 = peelUnrealized(adaptor.getSrc0());
     Value src1 = peelUnrealized(adaptor.getSrc1());
+    Value tmp = op.getTmp() ? peelUnrealized(adaptor.getTmp()) : Value();
     Value dst = peelUnrealized(adaptor.getDst());
 
-    SmallVector<Value, 3> operands{dst, src0, src1};
+    SmallVector<Value, 4> operands{dst, src0, src1};
+    if (tmp)
+      operands.push_back(tmp);
     rewriter.create<emitc::CallOpaqueOp>(
         loc, TypeRange{}, "TROWEXPANDADD",
         /*args=*/ArrayAttr{}, /*templateArgs=*/ArrayAttr{},
@@ -10889,14 +10898,37 @@ struct PTOXORSToEmitC : public OpConversionPattern<pto::TXorSOp> {
   LogicalResult matchAndRewrite(pto::TPrintOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
 
     Value src = peelUnrealized(adaptor.getSrc());
 
-    SmallVector<Value, 4> operands{src};
+    auto printFormatTok = [&](int64_t format) -> StringRef {
+      switch (format) {
+      case 0:
+        return "pto::PrintFormat::Width8_Precision4";
+      case 1:
+        return "pto::PrintFormat::Width8_Precision2";
+      case 2:
+        return "pto::PrintFormat::Width10_Precision6";
+      default:
+        llvm_unreachable("unknown PrintFormat");
+      }
+    };
+
+    SmallVector<Attribute, 1> templateArgVec;
+    int64_t printFormat = 0;
+    if (auto formatAttr = op.getPrintFormatAttr())
+      printFormat = formatAttr.getInt();
+    if (printFormat != 0) {
+      templateArgVec.push_back(
+          emitc::OpaqueAttr::get(ctx, printFormatTok(printFormat)));
+    }
+    ArrayAttr templateArgs = rewriter.getArrayAttr(templateArgVec);
+
     rewriter.create<emitc::CallOpaqueOp>(
         loc, TypeRange{}, "TPRINT",
-        /*args=*/ArrayAttr{}, /*templateArgs=*/ArrayAttr{},
-        /*operands=*/operands);
+        /*args=*/ArrayAttr{}, /*templateArgs=*/templateArgs,
+        /*operands=*/ValueRange{src});
 
     rewriter.eraseOp(op);
     return success();

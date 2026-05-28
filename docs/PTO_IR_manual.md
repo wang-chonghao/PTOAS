@@ -5672,6 +5672,7 @@ For each element (i, j):
 |------|------|-------------|
 | `src0` | `pto.tile_buf` | Source tile buffer |
 | `src1` | `pto.tile_buf` | Per-row scalar vector |
+| `tmp` | `pto.tile_buf` (optional) | Optional scratch tile forwarded to the `pto-isa` tmp-buffer overload |
 | `dst` | `pto.tile_buf` | Destination tile buffer |
 
 **Results:** None. Writes into `dst` via DPS pattern.
@@ -5679,7 +5680,7 @@ For each element (i, j):
 **Assembly Format:**
 
 ```
-pto.trowexpandadd ins(<src0>, <src1> : <src0_type>, <src1_type>)
+pto.trowexpandadd ins(<src0>, <src1> [, <tmp>] : <src0_type>, <src1_type> [, <tmp_type>])
                   outs(<dst> : <dst_type>)
 ```
 
@@ -7709,6 +7710,7 @@ dst[i, j] = S + linear_index(i, j)   // or descending if requested
 | Name | Type | Description |
 |------|------|-------------|
 | `S` | `Integer` | Starting value |
+| `tmp` | `pto.tile_buf` (optional) | Optional scratch tile forwarded to the `pto-isa` tmp-buffer overload |
 | `dst` | `pto.tile_buf` | Destination tile |
 | `descending` | `BoolAttr` (default: false) | Generate descending sequence |
 
@@ -7729,6 +7731,7 @@ dst[i, j] = S + linear_index(i, j)   // or descending if requested
 
 ```mlir
 pto.tci ins(%start : i32) outs(%dst : !pto.tile_buf<...>)
+pto.tci ins(%start, %tmp : i32, !pto.tile_buf<...>) outs(%dst : !pto.tile_buf<...>)
 ```
 
 ---
@@ -9172,7 +9175,8 @@ print(src)
 
 | Name | Type | Description |
 |------|------|-------------|
-| `src` | `pto.tile_buf` | Tile to print |
+| `src` | `pto.tile_buf` / global-memory view | Tile or global-memory view to print |
+| `printFormat` | `i32` (optional, default: `0`) | Print format selector: `0=Width8_Precision4`, `1=Width8_Precision2`, `2=Width10_Precision6` |
 
 **Results:** None.
 
@@ -9199,8 +9203,9 @@ print(src)
 
 - **Formatting**:
 
-  - Floating-point values: printed as `%6.2f`
-  - Integer values: printed as `%6d`
+  - `printFormat = 0`: `Width8_Precision4`
+  - `printFormat = 1`: `Width8_Precision2`
+  - `printFormat = 2`: `Width10_Precision6`
   - For `GlobalTensor`, due to data size and buffer limitations, only elements within its logical shape (defined by `Shape`) are printed.
   - For `tile_buf`, elements outside `valid_shape` are still printed and are marked with a `|` separator when partial validity is specified.
 
@@ -9212,6 +9217,7 @@ print(src)
 
 ```mlir
 pto.tprint ins(%src : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+pto.tprint ins(%src : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {printFormat = 1 : i32}
 ```
 
 ---
