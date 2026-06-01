@@ -121,6 +121,55 @@ def PTO_PipeAttr : PTO_Attr<"Pipe", "pipe"> {
 }
 
 //===----------------------------------------------------------------------===//
+// MemBar
+//===----------------------------------------------------------------------===//
+
+def PTO_MEMBAR_VV_ALL : I32EnumAttrCase<"VV_ALL", 0>;
+def PTO_MEMBAR_VST_VLD : I32EnumAttrCase<"VST_VLD", 1>;
+def PTO_MEMBAR_VLD_VST : I32EnumAttrCase<"VLD_VST", 2>;
+def PTO_MEMBAR_VST_VST : I32EnumAttrCase<"VST_VST", 3>;
+def PTO_MEMBAR_VS_ALL : I32EnumAttrCase<"VS_ALL", 4>;
+def PTO_MEMBAR_VST_LD : I32EnumAttrCase<"VST_LD", 5>;
+def PTO_MEMBAR_VLD_ST : I32EnumAttrCase<"VLD_ST", 6>;
+def PTO_MEMBAR_VST_ST : I32EnumAttrCase<"VST_ST", 7>;
+def PTO_MEMBAR_SV_ALL : I32EnumAttrCase<"SV_ALL", 8>;
+def PTO_MEMBAR_ST_VLD : I32EnumAttrCase<"ST_VLD", 9>;
+def PTO_MEMBAR_LD_VST : I32EnumAttrCase<"LD_VST", 10>;
+def PTO_MEMBAR_ST_VST : I32EnumAttrCase<"ST_VST", 11>;
+def PTO_MEMBAR_SS_ALL : I32EnumAttrCase<"SS_ALL", 12>;
+def PTO_MEMBAR_ST_LD : I32EnumAttrCase<"ST_LD", 13>;
+def PTO_MEMBAR_LD_ST : I32EnumAttrCase<"LD_ST", 14>;
+def PTO_MEMBAR_ST_ST : I32EnumAttrCase<"ST_ST", 15>;
+
+def PTO_MemBarEnum : PTO_I32Enum<
+  "MemBarKind", "PTO low-level memory barrier kind", [
+    PTO_MEMBAR_VV_ALL,
+    PTO_MEMBAR_VST_VLD,
+    PTO_MEMBAR_VLD_VST,
+    PTO_MEMBAR_VST_VST,
+    PTO_MEMBAR_VS_ALL,
+    PTO_MEMBAR_VST_LD,
+    PTO_MEMBAR_VLD_ST,
+    PTO_MEMBAR_VST_ST,
+    PTO_MEMBAR_SV_ALL,
+    PTO_MEMBAR_ST_VLD,
+    PTO_MEMBAR_LD_VST,
+    PTO_MEMBAR_ST_VST,
+    PTO_MEMBAR_SS_ALL,
+    PTO_MEMBAR_ST_LD,
+    PTO_MEMBAR_LD_ST,
+    PTO_MEMBAR_ST_ST
+  ]>;
+
+def PTO_MemBarAttr : PTO_Attr<"MemBar", "membar"> {
+  let parameters = (ins EnumParameter<PTO_MemBarEnum>:$kind);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    Low-level memory barrier kind for VPTO `pto.mem_bar`.
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // Sync Op Type (High Level Abstraction)
 //===----------------------------------------------------------------------===//
 
@@ -166,6 +215,46 @@ def PTO_SyncOpTypeAttr : PTO_Attr<"SyncOpType", "sync_op_type"> {
   let assemblyFormat = "`<` params `>`";
   let description = [{
     Deprecated alias of pipe_event_type. Prefer #pto.pipe_event_type<...>.
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// SYNCALL enums
+//===----------------------------------------------------------------------===//
+
+def PTO_SYNCALL_MODE_HARD : I32EnumAttrCase<"Hard", 0, "hard">;
+def PTO_SYNCALL_MODE_SOFT : I32EnumAttrCase<"Soft", 1, "soft">;
+
+def PTO_SyncAllModeEnum : PTO_I32Enum<
+  "SyncAllMode", "PTO SYNCALL mode", [
+    PTO_SYNCALL_MODE_HARD,
+    PTO_SYNCALL_MODE_SOFT
+  ]>;
+
+def PTO_SyncAllModeAttr : PTO_Attr<"SyncAllMode", "sync_all_mode"> {
+  let parameters = (ins EnumParameter<PTO_SyncAllModeEnum>:$value);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    SYNCALL mode: hard barrier or workspace-backed soft barrier.
+  }];
+}
+
+def PTO_SYNC_CORE_AIV_ONLY : I32EnumAttrCase<"AIVOnly", 0, "aiv_only">;
+def PTO_SYNC_CORE_AIC_ONLY : I32EnumAttrCase<"AICOnly", 1, "aic_only">;
+def PTO_SYNC_CORE_MIX : I32EnumAttrCase<"Mix", 2, "mix">;
+
+def PTO_SyncCoreTypeEnum : PTO_I32Enum<
+  "SyncCoreType", "PTO SYNCALL core participation kind", [
+    PTO_SYNC_CORE_AIV_ONLY,
+    PTO_SYNC_CORE_AIC_ONLY,
+    PTO_SYNC_CORE_MIX
+  ]>;
+
+def PTO_SyncCoreTypeAttr : PTO_Attr<"SyncCoreType", "sync_core_type"> {
+  let parameters = (ins EnumParameter<PTO_SyncCoreTypeEnum>:$value);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    SYNCALL core participation kind: AIV only, AIC only, or mixed AIC/AIV.
   }];
 }
 
@@ -371,6 +460,42 @@ def PTO_RoundModeAttr : EnumAttr<PTO_Dialect, PTO_RoundModeEnum, "round_mode"> {
 }
 
 //===----------------------------------------------------------------------===//
+// MAD semantic controls
+//===----------------------------------------------------------------------===//
+
+def PTO_MadUnitFlagModeEnum : PTO_I32Enum<
+  "MadUnitFlagMode", "PTO MAD producer unit-flag mode", [
+    I32EnumAttrCase<"CheckOnly", 0, "check_only">,
+    I32EnumAttrCase<"CheckAndSet", 1, "check_and_set">
+  ]>;
+
+def PTO_MadUnitFlagModeAttr
+    : EnumAttr<PTO_Dialect, PTO_MadUnitFlagModeEnum, "mad_unit_flag_mode"> {
+  let summary = "MAD producer unit-flag mode attribute";
+}
+
+def PTO_Tf32ModeEnum : PTO_I32Enum<
+  "Tf32Mode", "PTO MAD TF32 rounding mode", [
+    I32EnumAttrCase<"RoundEven", 0, "round_even">,
+    I32EnumAttrCase<"RoundAway", 1, "round_away">
+  ]>;
+
+def PTO_Tf32ModeAttr : EnumAttr<PTO_Dialect, PTO_Tf32ModeEnum, "tf32_mode"> {
+  let summary = "MAD TF32 rounding mode attribute";
+}
+
+def PTO_MadSatModeEnum : PTO_I32Enum<
+  "MadSatMode", "PTO MAD floating exceptional-value saturation mode", [
+    I32EnumAttrCase<"Sat", 0, "sat">,
+    I32EnumAttrCase<"NoSat", 1, "nosat">
+  ]>;
+
+def PTO_MadSatModeAttr
+    : EnumAttr<PTO_Dialect, PTO_MadSatModeEnum, "mad_sat_mode"> {
+  let summary = "MAD floating exceptional-value saturation mode attribute";
+}
+
+//===----------------------------------------------------------------------===//
 // SaturationMode
 //===----------------------------------------------------------------------===//
 
@@ -382,6 +507,110 @@ def PTO_SaturationModeEnum : PTO_I32Enum<
 
 def PTO_SaturationModeAttr : EnumAttr<PTO_Dialect, PTO_SaturationModeEnum, "saturation_mode"> {
   let summary = "saturation mode attribute";
+}
+//===----------------------------------------------------------------------===//
+// TDIV template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_DivPrecisionEnum : PTO_I32Enum<
+  "DivPrecision", "PTO TDIV precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_DivPrecisionAttr : EnumAttr<PTO_Dialect, PTO_DivPrecisionEnum, "div_precision"> {
+  let summary = "TDIV precision mode attribute";
+}
+//===----------------------------------------------------------------------===//
+// TEXP template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_ExpPrecisionEnum : PTO_I32Enum<
+  "ExpPrecision", "PTO TEXP precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_ExpPrecisionAttr : EnumAttr<PTO_Dialect, PTO_ExpPrecisionEnum, "exp_precision"> {
+  let summary = "TEXP precision mode attribute";
+}
+//===----------------------------------------------------------------------===//
+// TLOG template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_LogPrecisionEnum : PTO_I32Enum<
+  "LogPrecision", "PTO TLOG precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_LogPrecisionAttr : EnumAttr<PTO_Dialect, PTO_LogPrecisionEnum, "log_precision"> {
+  let summary = "TLOG precision mode attribute";
+}
+//===----------------------------------------------------------------------===//
+// TRECIP template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_RecipPrecisionEnum : PTO_I32Enum<
+  "RecipPrecision", "PTO TRECIP precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_RecipPrecisionAttr : EnumAttr<PTO_Dialect, PTO_RecipPrecisionEnum, "recip_precision"> {
+  let summary = "TRECIP precision mode attribute";
+}
+//===----------------------------------------------------------------------===//
+// TREM template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_RemPrecisionEnum : PTO_I32Enum<
+  "RemPrecision", "PTO TREM precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_RemPrecisionAttr : EnumAttr<PTO_Dialect, PTO_RemPrecisionEnum, "rem_precision"> {
+  let summary = "TREM precision mode attribute";
+}
+//===----------------------------------------------------------------------===//
+// TRSQRT template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_RsqrtPrecisionEnum : PTO_I32Enum<
+  "RsqrtPrecision", "PTO TRSQRT precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_RsqrtPrecisionAttr : EnumAttr<PTO_Dialect, PTO_RsqrtPrecisionEnum, "rsqrt_precision"> {
+  let summary = "TRSQRT precision mode attribute";
+}
+//===----------------------------------------------------------------------===//
+// TSQRT template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_SqrtPrecisionEnum : PTO_I32Enum<
+  "SqrtPrecision", "PTO TSQRT precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_SqrtPrecisionAttr : EnumAttr<PTO_Dialect, PTO_SqrtPrecisionEnum, "sqrt_precision"> {
+  let summary = "TSQRT precision mode attribute";
+}
+//===----------------------------------------------------------------------===//
+// TFMOD template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_FmodPrecisionEnum : PTO_I32Enum<
+  "FmodPrecision", "PTO TFMOD precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_FmodPrecisionAttr : EnumAttr<PTO_Dialect, PTO_FmodPrecisionEnum, "fmod_precision"> {
+  let summary = "TFMOD precision mode attribute";
 }
 //===----------------------------------------------------------------------===//
 // TStore template controls
@@ -468,11 +697,140 @@ def PTO_ReduceOpAttr : EnumAttr<PTO_Dialect, PTO_ReduceOpEnum, "reduce_op"> {
 def PTO_ReluPreModeEnum : PTO_I32Enum<
   "ReluPreMode", "PTO TSTORE relu pre mode", [
     I32EnumAttrCase<"NoRelu", 0, "no_relu">,
-    I32EnumAttrCase<"NormalRelu", 1, "normal_relu">
+    I32EnumAttrCase<"NormalRelu", 1, "normal_relu">,
+    I32EnumAttrCase<"ScalarRelu", 2, "scalar_relu">,
+    I32EnumAttrCase<"VectorRelu", 3, "vector_relu">,
+    I32EnumAttrCase<"Pwl", 4, "pwl">
   ]>;
 
 def PTO_ReluPreModeAttr : EnumAttr<PTO_Dialect, PTO_ReluPreModeEnum, "relu_pre_mode"> {
   let summary = "TSTORE relu pre mode attribute";
+}
+
+def PTO_UnitFlagCtrlEnum : PTO_I32Enum<
+  "AccStoreUnitFlagCtrl", "PTO accumulator store unit-flag mode", [
+    I32EnumAttrCase<"Off", 0, "off">,
+    I32EnumAttrCase<"CheckOnly", 2, "check_only">,
+    I32EnumAttrCase<"CheckAndClear", 3, "check_and_clear">
+  ]>;
+
+def PTO_UnitFlagCtrlAttr : EnumAttr<PTO_Dialect, PTO_UnitFlagCtrlEnum, "unit_flag_ctrl"> {
+  let summary = "acc_store unit-flag control attribute";
+}
+
+def PTO_AccStoreQuantPreModeEnum : PTO_I32Enum<
+  "AccStoreQuantPreMode", "PTO accumulator store pre-quantization mode", [
+    I32EnumAttrCase<"NoConvert", 0, "no_convert">,
+    I32EnumAttrCase<"F32F16", 1, "f32_f16">,
+    I32EnumAttrCase<"QF322HIF8PreVec", 2, "qf322hif8_pre_vec">,
+    I32EnumAttrCase<"QF322HIF8PreScalar", 3, "qf322hif8_pre_scalar">,
+    I32EnumAttrCase<"QF322HIF8PreHybridVec", 4, "qf322hif8_pre_hybrid_vec">,
+    I32EnumAttrCase<"QF322HIF8PreHybridScalar", 5, "qf322hif8_pre_hybrid_scalar">,
+    I32EnumAttrCase<"DEQS32IntVec", 6, "deqs32_int_vec">,
+    I32EnumAttrCase<"DEQS32IntScalar", 7, "deqs32_int_scalar">,
+    I32EnumAttrCase<"REQ8Vec", 8, "req8_vec">,
+    I32EnumAttrCase<"REQ8Scalar", 9, "req8_scalar">,
+    I32EnumAttrCase<"DEQF16Vec", 10, "deqf16_vec">,
+    I32EnumAttrCase<"DEQF16Scalar", 11, "deqf16_scalar">,
+    I32EnumAttrCase<"QF322FP8PreVec", 12, "qf322fp8_pre_vec">,
+    I32EnumAttrCase<"QF322FP8PreScalar", 13, "qf322fp8_pre_scalar">,
+    I32EnumAttrCase<"QF322F32PreVec", 14, "qf322f32_pre_vec">,
+    I32EnumAttrCase<"QF322F32PreScalar", 15, "qf322f32_pre_scalar">,
+    I32EnumAttrCase<"F32BF16", 16, "f32_bf16">,
+    I32EnumAttrCase<"QF162B8PreVec", 17, "qf162b8_pre_vec">,
+    I32EnumAttrCase<"QF162B8PreScalar", 18, "qf162b8_pre_scalar">,
+    I32EnumAttrCase<"QF162S4PreVec", 19, "qf162s4_pre_vec">,
+    I32EnumAttrCase<"QF162S4PreScalar", 20, "qf162s4_pre_scalar">,
+    I32EnumAttrCase<"REQ4Vec", 21, "req4_vec">,
+    I32EnumAttrCase<"REQ4Scalar", 22, "req4_scalar">,
+    I32EnumAttrCase<"QF322B8PreVec", 23, "qf322b8_pre_vec">,
+    I32EnumAttrCase<"QF322B8PreScalar", 24, "qf322b8_pre_scalar">,
+    I32EnumAttrCase<"QF322S4PreVec", 25, "qf322s4_pre_vec">,
+    I32EnumAttrCase<"QF322S4PreScalar", 26, "qf322s4_pre_scalar">,
+    I32EnumAttrCase<"DEQS16Vec", 27, "deqs16_vec">,
+    I32EnumAttrCase<"DEQS16Scalar", 28, "deqs16_scalar">,
+    I32EnumAttrCase<"QF162S16PreVec", 29, "qf162s16_pre_vec">,
+    I32EnumAttrCase<"QF162S16PreScalar", 30, "qf162s16_pre_scalar">,
+    I32EnumAttrCase<"QF322F16PreVec", 31, "qf322f16_pre_vec">,
+    I32EnumAttrCase<"QF322F16PreScalar", 32, "qf322f16_pre_scalar">,
+    I32EnumAttrCase<"QF322BF16PreVec", 33, "qf322bf16_pre_vec">,
+    I32EnumAttrCase<"QF322BF16PreScalar", 34, "qf322bf16_pre_scalar">,
+    I32EnumAttrCase<"QS322BF16PreVec", 35, "qs322bf16_pre_vec">,
+    I32EnumAttrCase<"QS322BF16PreScalar", 36, "qs322bf16_pre_scalar">
+  ]>;
+
+def PTO_AccStoreQuantPreModeAttr : EnumAttr<PTO_Dialect, PTO_AccStoreQuantPreModeEnum, "quant_pre_mode"> {
+  let summary = "acc_store pre-quantization mode attribute";
+}
+
+def PTO_AccStoreAtomicTypeEnum : PTO_I32Enum<
+  "AccStoreAtomicType", "PTO accumulator store atomic type", [
+    I32EnumAttrCase<"F32", 1, "f32">,
+    I32EnumAttrCase<"F16", 2, "f16">,
+    I32EnumAttrCase<"S16", 3, "s16">,
+    I32EnumAttrCase<"S32", 4, "s32">,
+    I32EnumAttrCase<"S8", 5, "s8">,
+    I32EnumAttrCase<"BF16", 6, "bf16">
+  ]>;
+
+def PTO_AccStoreAtomicTypeAttr : EnumAttr<PTO_Dialect, PTO_AccStoreAtomicTypeEnum, "acc_store_atomic_type"> {
+  let summary = "acc_store atomic type attribute";
+}
+
+def PTO_AccStoreAtomicOpEnum : PTO_I32Enum<
+  "AccStoreAtomicOp", "PTO accumulator store atomic op", [
+    I32EnumAttrCase<"Add", 0, "add">,
+    I32EnumAttrCase<"Max", 1, "max">,
+    I32EnumAttrCase<"Min", 2, "min">
+  ]>;
+
+def PTO_AccStoreAtomicOpAttr : EnumAttr<PTO_Dialect, PTO_AccStoreAtomicOpEnum, "acc_store_atomic_op"> {
+  let summary = "acc_store atomic op attribute";
+}
+
+def PTO_AccStoreModeEnum : PTO_I32Enum<
+  "AccStoreMode", "PTO accumulator store layout conversion mode", [
+    I32EnumAttrCase<"Nz2nd", 0, "nz2nd">,
+    I32EnumAttrCase<"Nz2dn", 1, "nz2dn">,
+    I32EnumAttrCase<"Nz2nz", 2, "nz2nz">
+  ]>;
+
+def PTO_AccStoreModeAttr : EnumAttr<PTO_Dialect, PTO_AccStoreModeEnum, "acc_store_mode"> {
+  let summary = "acc_store layout conversion mode";
+}
+
+def PTO_AccStoreUbDstModeEnum : PTO_I32Enum<
+  "AccStoreUbDstMode", "PTO accumulator store UB destination mode", [
+    I32EnumAttrCase<"Single", 0, "single">,
+    I32EnumAttrCase<"SplitM", 1, "split_m">,
+    I32EnumAttrCase<"SplitN", 2, "split_n">
+  ]>;
+
+def PTO_AccStoreUbDstModeAttr
+    : EnumAttr<PTO_Dialect, PTO_AccStoreUbDstModeEnum, "acc_store_ub_dst_mode"> {
+  let summary = "acc_store_ub destination mode attribute";
+}
+
+def PTO_AccStoreSatModeEnum : PTO_I32Enum<
+  "AccStoreSatMode", "PTO accumulator store saturation mode", [
+    I32EnumAttrCase<"Sat", 0, "sat">,
+    I32EnumAttrCase<"NoSat", 1, "nosat">,
+    I32EnumAttrCase<"SatPreserveNan", 2, "sat_preserve_nan">
+  ]>;
+
+def PTO_AccStoreSatModeAttr
+    : EnumAttr<PTO_Dialect, PTO_AccStoreSatModeEnum, "acc_store_sat_mode"> {
+  let summary = "acc_store saturation mode attribute";
+}
+
+def PTO_CubeLoadFracModeEnum : PTO_I32Enum<
+  "CubeLoadFracMode", "PTO cube fractal load source layout mode", [
+    I32EnumAttrCase<"Nd2nz", 0, "nd2nz">,
+    I32EnumAttrCase<"Dn2nz", 1, "dn2nz">
+  ]>;
+
+def PTO_CubeLoadFracModeAttr : EnumAttr<PTO_Dialect, PTO_CubeLoadFracModeEnum, "cube_load_frac_mode"> {
+  let summary = "cube_load_frac source layout conversion mode";
 }
 
 def PTO_GatherOOBEnum : PTO_I32Enum<

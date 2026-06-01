@@ -47,6 +47,7 @@
 //===----------------------------------------------------------------------===//
  
 #include "PTO/IR/PTOInterfaces.h.inc"
+#include "PTO/IR/VPTOInterfaces.h.inc"
 
 //===----------------------------------------------------------------------===//
 // PTO Attributes
@@ -65,6 +66,65 @@
 //===----------------------------------------------------------------------===//
 // PTO Dialect Operations
 //===----------------------------------------------------------------------===//
+
+namespace mlir {
+namespace pto {
+
+//===----------------------------------------------------------------------===//
+// S Fractal Size Constants
+//===----------------------------------------------------------------------===//
+
+/// Fractal size for mxBox layout (16x2 inner block, 32 bytes total).
+inline constexpr int32_t kFractalMxSize = 32;
+
+/// Fractal size for AB matrices in matmul (16xN inner block, 512 bytes).
+inline constexpr int32_t kFractalABSize = 512;
+
+/// Fractal size for C matrix in matmul (16x16 inner block, 1024 bytes).
+inline constexpr int32_t kFractalCSize = 1024;
+
+struct DmaLoopConfig {
+  Value count;
+  Value srcStride;
+  Value dstStride;
+};
+
+struct DmaPadConfig {
+  Value value;
+  Value leftCount;
+  Value rightCount;
+};
+
+struct AccStoreModeConfig {
+  AccStoreMode mode;
+  std::optional<Value> split;
+  std::optional<Value> loop0SrcStride;
+};
+
+struct CubeLoadFracShapeConfig {
+  Value nValue;
+  Value dValue;
+};
+
+struct CubeLoadFracSrcLayoutConfig {
+  Value srcInnerStride;
+  std::optional<Value> srcOuterStride;
+};
+
+struct CubeLoadFracDstGroupConfig {
+  Value groupCount;
+  Value dstLoop2Stride;
+  Value dstLoop3Stride;
+  Value dstLoop4Stride;
+};
+
+struct CubeLoadFracCtrlConfig {
+  Value l2CacheCtrl;
+  Value smallc0En;
+};
+
+} // namespace pto
+} // namespace mlir
 
 #define GET_OP_CLASSES
 #include "PTO/IR/PTOOps.h.inc"
@@ -120,6 +180,7 @@ private:
 /// Function attribute that marks an explicit PTO kernel entry.
 inline constexpr llvm::StringLiteral kPTOEntryAttrName = "pto.entry";
 inline constexpr llvm::StringLiteral kLegacyHACCEntryAttrName = "hacc.entry";
+inline constexpr llvm::StringLiteral kPTOSimtEntryAttrName = "pto.simt_entry";
 
 /// Return true if the function carries an explicit entry marker.
 bool hasExplicitPTOEntryAttr(func::FuncOp func);

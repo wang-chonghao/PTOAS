@@ -1,0 +1,17 @@
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - | FileCheck %s
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @kernel(%value: f16, %dst: !pto.ptr<ui8, ub>) {
+    %c0 = arith.constant 0 : index
+    pto.vecscope {
+      %mask = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
+      %vec = pto.vdup %value, %mask : f16, !pto.mask<b16> -> !pto.vreg<128xf16>
+      %out = pto.vcvt %vec, %mask {rnd = "R", sat = "NOSAT", part = "EVEN"} : !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<256xui8>
+      pto.vsts %out, %dst[%c0], %mask {dist = "PK_B16"} : !pto.vreg<256xui8>, !pto.ptr<ui8, ub>, !pto.mask<b16>
+    }
+    return
+  }
+}
+
+// CHECK: pto.vcvt
+// CHECK-SAME: {part = "EVEN", rnd = "R", sat = "NOSAT"}

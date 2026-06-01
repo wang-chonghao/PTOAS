@@ -18,6 +18,7 @@
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 #include "mlir/Bindings/Python/PybindAdaptors.h"
+#include "mlir/CAPI/IR.h"
 #include "pto-c/Dialect/PTO.h"
 #include "mlir-c/IR.h"
 #include "PTO/IR/PTO.h"
@@ -25,8 +26,12 @@
 #include "mlir-c/BuiltinAttributes.h"
 #include "mlir-c/Support.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include <stdexcept>
+#include <string>
 namespace py = pybind11;
 using namespace mlir::python::adaptors;
+using llvm::cast;
+using llvm::isa;
 
 static std::vector<int64_t> toInt64Vector(const py::sequence &seq) {
   std::vector<int64_t> out;
@@ -56,11 +61,51 @@ static MlirContext inferContextFromElementType(MlirContext context,
   return mlirTypeGetContext(elementType);
 }
 
+static int32_t enumValueFromPy(py::object value, const char *attrName,
+                               const char *enumName) {
+  if (py::isinstance<py::int_>(value))
+    return value.cast<int32_t>();
+  if (py::hasattr(value, "value"))
+    return value.attr("value").cast<int32_t>();
+  throw std::runtime_error(std::string(attrName) + ".get expects int or " +
+                           enumName + " enum");
+}
+
+static void bindPTOEnumAttr(pybind11::module &m, const char *attrName,
+                            const char *enumName,
+                            bool (*isA)(MlirAttribute),
+                            MlirAttribute (*get)(MlirContext, int32_t),
+                            int32_t (*getValue)(MlirAttribute)) {
+  mlir_attribute_subclass(m, attrName, isA)
+      .def_classmethod(
+          "get",
+          [attrName, enumName, get](py::object cls, py::object value,
+                                    MlirContext ctx) -> py::object {
+            int32_t v = enumValueFromPy(value, attrName, enumName);
+            MlirAttribute a = get(ctx, v);
+            if (mlirAttributeIsNull(a))
+              return py::none();
+            return cls.attr("__call__")(a);
+          },
+          py::arg("cls"), py::arg("value"), py::arg("context") = py::none())
+      .def_property_readonly("value", [getValue](MlirAttribute self) {
+        return getValue(self);
+      });
+}
+
 static py::list shapeToPyList(const int64_t *data, intptr_t n) {
   py::list lst;
   for (intptr_t i = 0; i < n; ++i)
     lst.append(py::int_(data[i]));
   return lst;
+}
+
+static py::object wrapAttributeAs(const py::module_ &m, const char *className,
+                                  MlirAttribute attr) {
+  if (mlirAttributeIsNull(attr))
+    return py::none();
+  py::object cls = m.attr(className);
+  return cls.attr("__call__")(attr);
 }
 
 void populatePTODialectSubmodule(pybind11::module &m);
@@ -125,6 +170,38 @@ static void bindPTOModule(pybind11::module &m) {
     .value("TRUNC", mlir::pto::RoundMode::TRUNC)
     .value("ODD", mlir::pto::RoundMode::ODD)
     .value("CAST_RINT", mlir::pto::RoundMode::CAST_RINT);
+
+    py::enum_<mlir::pto::DivPrecision>(m, "DivPrecision")
+    .value("Default", mlir::pto::DivPrecision::Default)
+    .value("HighPrecision", mlir::pto::DivPrecision::HighPrecision);
+
+    py::enum_<mlir::pto::ExpPrecision>(m, "ExpPrecision")
+    .value("Default", mlir::pto::ExpPrecision::Default)
+    .value("HighPrecision", mlir::pto::ExpPrecision::HighPrecision);
+
+    py::enum_<mlir::pto::LogPrecision>(m, "LogPrecision")
+    .value("Default", mlir::pto::LogPrecision::Default)
+    .value("HighPrecision", mlir::pto::LogPrecision::HighPrecision);
+
+    py::enum_<mlir::pto::RecipPrecision>(m, "RecipPrecision")
+    .value("Default", mlir::pto::RecipPrecision::Default)
+    .value("HighPrecision", mlir::pto::RecipPrecision::HighPrecision);
+
+    py::enum_<mlir::pto::RemPrecision>(m, "RemPrecision")
+    .value("Default", mlir::pto::RemPrecision::Default)
+    .value("HighPrecision", mlir::pto::RemPrecision::HighPrecision);
+
+    py::enum_<mlir::pto::RsqrtPrecision>(m, "RsqrtPrecision")
+    .value("Default", mlir::pto::RsqrtPrecision::Default)
+    .value("HighPrecision", mlir::pto::RsqrtPrecision::HighPrecision);
+
+    py::enum_<mlir::pto::SqrtPrecision>(m, "SqrtPrecision")
+    .value("Default", mlir::pto::SqrtPrecision::Default)
+    .value("HighPrecision", mlir::pto::SqrtPrecision::HighPrecision);
+
+    py::enum_<mlir::pto::FmodPrecision>(m, "FmodPrecision")
+    .value("Default", mlir::pto::FmodPrecision::Default)
+    .value("HighPrecision", mlir::pto::FmodPrecision::HighPrecision);
 
     py::enum_<mlir::pto::SaturationMode>(m, "SaturationMode")
     .value("ON", mlir::pto::SaturationMode::ON)
@@ -416,6 +493,39 @@ static void bindPTOModule(pybind11::module &m) {
         return mlirPTORoundModeAttrGetValue(self);
         });
 
+    bindPTOEnumAttr(m, "DivPrecisionAttr", "DivPrecision",
+                    mlirPTOAttrIsADivPrecisionAttr,
+                    mlirPTODivPrecisionAttrGet,
+                    mlirPTODivPrecisionAttrGetValue);
+    bindPTOEnumAttr(m, "ExpPrecisionAttr", "ExpPrecision",
+                    mlirPTOAttrIsAExpPrecisionAttr,
+                    mlirPTOExpPrecisionAttrGet,
+                    mlirPTOExpPrecisionAttrGetValue);
+    bindPTOEnumAttr(m, "LogPrecisionAttr", "LogPrecision",
+                    mlirPTOAttrIsALogPrecisionAttr,
+                    mlirPTOLogPrecisionAttrGet,
+                    mlirPTOLogPrecisionAttrGetValue);
+    bindPTOEnumAttr(m, "RecipPrecisionAttr", "RecipPrecision",
+                    mlirPTOAttrIsARecipPrecisionAttr,
+                    mlirPTORecipPrecisionAttrGet,
+                    mlirPTORecipPrecisionAttrGetValue);
+    bindPTOEnumAttr(m, "RemPrecisionAttr", "RemPrecision",
+                    mlirPTOAttrIsARemPrecisionAttr,
+                    mlirPTORemPrecisionAttrGet,
+                    mlirPTORemPrecisionAttrGetValue);
+    bindPTOEnumAttr(m, "RsqrtPrecisionAttr", "RsqrtPrecision",
+                    mlirPTOAttrIsARsqrtPrecisionAttr,
+                    mlirPTORsqrtPrecisionAttrGet,
+                    mlirPTORsqrtPrecisionAttrGetValue);
+    bindPTOEnumAttr(m, "SqrtPrecisionAttr", "SqrtPrecision",
+                    mlirPTOAttrIsASqrtPrecisionAttr,
+                    mlirPTOSqrtPrecisionAttrGet,
+                    mlirPTOSqrtPrecisionAttrGetValue);
+    bindPTOEnumAttr(m, "FmodPrecisionAttr", "FmodPrecision",
+                    mlirPTOAttrIsAFmodPrecisionAttr,
+                    mlirPTOFmodPrecisionAttrGet,
+                    mlirPTOFmodPrecisionAttrGetValue);
+
     mlir_attribute_subclass(
         m, "SaturationModeAttr",
         [](MlirAttribute a) { return mlirPTOAttrIsASaturationModeAttr(a); })
@@ -644,21 +754,90 @@ static void bindPTOModule(pybind11::module &m) {
         [](MlirType type) -> bool { return mlirPTOTypeIsAPtrType(type); })
         .def_classmethod(
             "get",
-            [](py::object cls, MlirType elementType,
+            [](py::object cls, MlirType elementType, py::object memorySpace,
                MlirContext context) -> py::object {
                 MlirContext ctx = context;
                 if (!ctx.ptr)
                     ctx = mlirTypeGetContext(elementType);
-                MlirType t = mlirPTOPtrTypeGet(ctx, elementType);
+                MlirType t = {nullptr};
+                if (memorySpace.is_none()) {
+                  t = mlirPTOPtrTypeGet(ctx, elementType);
+                } else {
+                  MlirAttribute memorySpaceAttr =
+                      py::cast<MlirAttribute>(memorySpace);
+                  t = mlirPTOPtrTypeGetWithMemorySpace(ctx, elementType,
+                                                       memorySpaceAttr);
+                }
                 return cls.attr("__call__")(t);
             },
             py::arg("cls"), py::arg("element_type"),
+            py::arg("memory_space") = py::none(),
             py::arg("context") = py::none())
         .def_property_readonly(
             "element_type",
             [](MlirType self) -> MlirType {
                 return mlirPTOPtrTypeGetElementType(self);
+            })
+        .def_property_readonly(
+            "memory_space",
+            [](MlirType self) -> MlirAttribute {
+                return mlirPTOPtrTypeGetMemorySpace(self);
             });
+
+    mlir_type_subclass(
+        m, "VRegType",
+        [](MlirType type) -> bool { return isa<mlir::pto::VRegType>(unwrap(type)); })
+        .def_classmethod(
+            "get",
+            [](py::object cls, int64_t elementCount, MlirType elementType,
+               MlirContext context) -> py::object {
+                context = inferContextFromElementType(context, elementType);
+                MlirType t = wrap(
+                    mlir::pto::VRegType::get(
+                        unwrap(context), elementCount, unwrap(elementType)));
+                return cls.attr("__call__")(t);
+            },
+            py::arg("cls"), py::arg("element_count"), py::arg("element_type"),
+            py::arg("context") = py::none())
+        .def_property_readonly(
+            "element_count",
+            [](MlirType self) -> int64_t {
+                return cast<mlir::pto::VRegType>(unwrap(self)).getElementCount();
+            })
+        .def_property_readonly(
+            "element_type",
+            [](MlirType self) -> MlirType {
+                return wrap(cast<mlir::pto::VRegType>(unwrap(self)).getElementType());
+            });
+
+    mlir_type_subclass(
+        m, "MaskType",
+        [](MlirType type) -> bool { return isa<mlir::pto::MaskType>(unwrap(type)); })
+        .def_classmethod(
+            "get",
+            [](py::object cls, std::string granularity, MlirContext context) -> py::object {
+                MlirType t = wrap(
+                    mlir::pto::MaskType::get(unwrap(context), granularity));
+                return cls.attr("__call__")(t);
+            },
+            py::arg("cls"), py::arg("granularity"),
+            py::arg("context") = py::none())
+        .def_property_readonly(
+            "granularity",
+            [](MlirType self) -> std::string {
+                return cast<mlir::pto::MaskType>(unwrap(self)).getGranularity().str();
+            });
+
+    mlir_type_subclass(
+        m, "AlignType",
+        [](MlirType type) -> bool { return isa<mlir::pto::AlignType>(unwrap(type)); })
+        .def_classmethod(
+            "get",
+            [](py::object cls, MlirContext context) -> py::object {
+                MlirType t = wrap(mlir::pto::AlignType::get(unwrap(context)));
+                return cls.attr("__call__")(t);
+            },
+            py::arg("cls"), py::arg("context") = py::none());
 
     mlir_type_subclass(
         m, "AsyncSessionType",
@@ -678,6 +857,19 @@ static void bindPTOModule(pybind11::module &m) {
             "get",
             [](py::object cls, MlirContext context) -> py::object {
                 MlirType t = mlirPTOAsyncEventTypeGet(context);
+                return cls.attr("__call__")(t);
+            },
+            py::arg("cls"), py::arg("context") = py::none());
+
+    mlir_type_subclass(
+        m, "PrefetchAsyncContextType",
+        [](MlirType type) -> bool {
+            return mlirPTOTypeIsAPrefetchAsyncContextType(type);
+        })
+        .def_classmethod(
+            "get",
+            [](py::object cls, MlirContext context) -> py::object {
+                MlirType t = mlirPTOPrefetchAsyncContextTypeGet(context);
                 return cls.attr("__call__")(t);
             },
             py::arg("cls"), py::arg("context") = py::none());
@@ -930,7 +1122,76 @@ static void bindPTOModule(pybind11::module &m) {
                 if (mlirPTOTypeIsATileBufType(t)) return cls(t);
                 return py::none();
             },
-            py::arg("cls"), py::arg("type"));
+            py::arg("cls"), py::arg("type"))
+        .def_property_readonly(
+            "rank",
+            [](MlirType self) -> intptr_t {
+                return static_cast<intptr_t>(
+                    cast<mlir::pto::TileBufType>(unwrap(self)).getRank());
+            })
+        .def_property_readonly(
+            "element_type",
+            [](MlirType self) -> MlirType {
+                return wrap(cast<mlir::pto::TileBufType>(unwrap(self)).getElementType());
+            })
+        .def_property_readonly(
+            "memory_space",
+            [m](MlirType self) -> py::object {
+                MlirAttribute attr =
+                    wrap(cast<mlir::pto::TileBufType>(unwrap(self)).getMemorySpace());
+                return wrapAttributeAs(m, "AddressSpaceAttr", attr);
+            })
+        .def_property_readonly(
+            "shape",
+            [](MlirType self) -> py::list {
+                auto shape = cast<mlir::pto::TileBufType>(unwrap(self)).getShape();
+                return shapeToPyList(shape.data(), static_cast<intptr_t>(shape.size()));
+            })
+        .def_property_readonly(
+            "valid_shape",
+            [](MlirType self) -> py::list {
+                auto validShape = cast<mlir::pto::TileBufType>(unwrap(self)).getValidShape();
+                return shapeToPyList(validShape.data(), static_cast<intptr_t>(validShape.size()));
+            })
+        .def_property_readonly(
+            "blayout_attr",
+            [m](MlirType self) -> py::object {
+                MlirAttribute attr =
+                    wrap(cast<mlir::pto::TileBufType>(unwrap(self)).getBLayoutAttr());
+                return wrapAttributeAs(m, "BLayoutAttr", attr);
+            })
+        .def_property_readonly(
+            "slayout_attr",
+            [m](MlirType self) -> py::object {
+                MlirAttribute attr =
+                    wrap(cast<mlir::pto::TileBufType>(unwrap(self)).getSLayoutAttr());
+                return wrapAttributeAs(m, "SLayoutAttr", attr);
+            })
+        .def_property_readonly(
+            "blayout_value",
+            [](MlirType self) -> int32_t {
+                return cast<mlir::pto::TileBufType>(unwrap(self)).getBLayoutValueI32();
+            })
+        .def_property_readonly(
+            "slayout_value",
+            [](MlirType self) -> int32_t {
+                return cast<mlir::pto::TileBufType>(unwrap(self)).getSLayoutValueI32();
+            })
+        .def_property_readonly(
+            "pad_value",
+            [](MlirType self) -> int32_t {
+                return cast<mlir::pto::TileBufType>(unwrap(self)).getPadValueI32();
+            })
+        .def_property_readonly(
+            "compact_mode",
+            [](MlirType self) -> int32_t {
+                return cast<mlir::pto::TileBufType>(unwrap(self)).getCompactModeI32();
+            })
+        .def_property_readonly(
+            "s_fractal_size",
+            [](MlirType self) -> int32_t {
+                return cast<mlir::pto::TileBufType>(unwrap(self)).getSFractalSizeI32();
+            });
 	
 	populatePTODialectSubmodule(m);
 }

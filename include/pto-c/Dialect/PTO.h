@@ -26,13 +26,18 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(PTO, pto);
 // ---- !pto.ptr<elem> ----
 bool mlirPTOTypeIsAPtrType(MlirType type);
 MlirType mlirPTOPtrTypeGet(MlirContext ctx, MlirType elementType);
+MlirType mlirPTOPtrTypeGetWithMemorySpace(MlirContext ctx, MlirType elementType,
+                                          MlirAttribute memorySpace);
 MlirType mlirPTOPtrTypeGetElementType(MlirType type);
+MlirAttribute mlirPTOPtrTypeGetMemorySpace(MlirType type);
 
 // ---- !pto.async_session / !pto.async_event ----
 bool mlirPTOTypeIsAAsyncSessionType(MlirType type);
 MlirType mlirPTOAsyncSessionTypeGet(MlirContext ctx);
 bool mlirPTOTypeIsAAsyncEventType(MlirType type);
 MlirType mlirPTOAsyncEventTypeGet(MlirContext ctx);
+bool mlirPTOTypeIsAPrefetchAsyncContextType(MlirType type);
+MlirType mlirPTOPrefetchAsyncContextTypeGet(MlirContext ctx);
 
 // ---- !pto.hif8 / !pto.f4E1M2x2 / !pto.f4E2M1x2 ----
 bool mlirPTOTypeIsAHiF8Type(MlirType type);
@@ -121,6 +126,30 @@ MLIR_CAPI_EXPORTED int32_t mlirPTOReduceOpAttrGetValue(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirPTORoundModeAttrGet(MlirContext ctx, int32_t value);
 MLIR_CAPI_EXPORTED bool mlirPTOAttrIsARoundModeAttr(MlirAttribute attr);
 MLIR_CAPI_EXPORTED int32_t mlirPTORoundModeAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTODivPrecisionAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsADivPrecisionAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int32_t mlirPTODivPrecisionAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTOExpPrecisionAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsAExpPrecisionAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int32_t mlirPTOExpPrecisionAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTOLogPrecisionAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsALogPrecisionAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int32_t mlirPTOLogPrecisionAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTORecipPrecisionAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsARecipPrecisionAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int32_t mlirPTORecipPrecisionAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTORemPrecisionAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsARemPrecisionAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int32_t mlirPTORemPrecisionAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTORsqrtPrecisionAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsARsqrtPrecisionAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int32_t mlirPTORsqrtPrecisionAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTOSqrtPrecisionAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsASqrtPrecisionAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int32_t mlirPTOSqrtPrecisionAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTOFmodPrecisionAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsAFmodPrecisionAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED int32_t mlirPTOFmodPrecisionAttrGetValue(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirPTOSaturationModeAttrGet(MlirContext ctx, int32_t value);
 MLIR_CAPI_EXPORTED bool mlirPTOAttrIsASaturationModeAttr(MlirAttribute attr);
 MLIR_CAPI_EXPORTED int32_t mlirPTOSaturationModeAttrGetValue(MlirAttribute attr);

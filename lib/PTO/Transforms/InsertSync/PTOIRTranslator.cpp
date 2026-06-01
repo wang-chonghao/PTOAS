@@ -13,6 +13,7 @@
 
 #include "PTO/Transforms/InsertSync/PTOIRTranslator.h"
 #include "PTO/IR/PTOTypeUtils.h"
+#include "PTO/Transforms/InsertSync/SyncMacroModel.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -205,8 +206,10 @@ static std::pair<int64_t, int64_t> getStaticOffsetAndSize(Operation *op, Value s
   auto srcType = dyn_cast<MemRefType>(src.getType());
   if (!srcType) return {0, 0};
 
-  int64_t elemSize = srcType.getElementType().getIntOrFloatBitWidth() / 8;
-  if (elemSize == 0) elemSize = 1;
+  int64_t elemSize =
+      static_cast<int64_t>(pto::getPTOStorageElemByteSize(srcType.getElementType()));
+  if (elemSize == 0)
+    return {-1, -1};
 
   // === Case 1: memref.subview ===
   if (auto subView = dyn_cast<memref::SubViewOp>(op)) {
@@ -376,6 +379,8 @@ void PTOIRTranslator::RecursionIR(Region *region) {
       return WalkResult::skip();
     } else if (auto yieldOp = dyn_cast<scf::YieldOp>(op)) {
       UpdateYieldOpInfo(yieldOp);
+    } else if (getSyncMacroModel(op)) {
+      UpdateMacroOpInfo(op);
     } else if (isa<pto::OpPipeInterface>(op)) {
       // --- Case D: 带有 OpPipeInterface 的计算/搬运指令 ---
       UpdatePTOOpInfo(op);
@@ -420,7 +425,10 @@ LogicalResult PTOIRTranslator::UpdateAllocTileOpMemInfo(pto::AllocTileOp op) {
     }
 
     if (isStatic) {
-      int64_t elemSize = tileType.getElementType().getIntOrFloatBitWidth() / 8;
+      int64_t elemSize = static_cast<int64_t>(
+          pto::getPTOStorageElemByteSize(tileType.getElementType()));
+      if (elemSize == 0)
+        return failure();
       int64_t numElements = 1;
       for (auto dim : shape) numElements *= dim;
       sizeInBytes = numElements * elemSize;
@@ -464,7 +472,10 @@ LogicalResult PTOIRTranslator::UpdatePointerCastOpMemInfo(pto::PointerCastOp op)
 
   uint64_t sizeInBytes = 0;
   if (memRefType.hasStaticShape()) {
-    int64_t elemSize = memRefType.getElementType().getIntOrFloatBitWidth() / 8;
+    int64_t elemSize = static_cast<int64_t>(
+        pto::getPTOStorageElemByteSize(memRefType.getElementType()));
+    if (elemSize == 0)
+      return failure();
     int64_t numElements = 1;
     for (auto dim : memRefType.getShape()) numElements *= dim;
     sizeInBytes = numElements * elemSize;
@@ -530,9 +541,10 @@ PTOIRTranslator::UpdateDeclareTileMemRefOpMemInfo(pto::DeclareTileMemRefOp op) {
 
   uint64_t sizeInBytes = 0;
   if (memRefType.hasStaticShape()) {
-    int64_t elemSize = memRefType.getElementType().getIntOrFloatBitWidth() / 8;
+    int64_t elemSize = static_cast<int64_t>(
+        pto::getPTOStorageElemByteSize(memRefType.getElementType()));
     if (elemSize == 0)
-      elemSize = 1;
+      return failure();
 
     int64_t numElements = 1;
     for (auto dim : memRefType.getShape())
@@ -611,6 +623,36 @@ void PTOIRTranslator::UpdatePTOOpInfo(Operation *op) {
 
   syncIR_.emplace_back(std::move(compoundElement));
   index++;
+}
+
+void PTOIRTranslator::MakeMacroCompound(Operation *op, PipelineType pipe,
+                                        ValueRange defValues,
+                                        ValueRange useValues,
+                                        int macroPhaseId) {
+  SmallVector<const BaseMemInfo *> defVec;
+  SmallVector<const BaseMemInfo *> useVec;
+  UpdateDefUseVec(defValues, defVec);
+  UpdateDefUseVec(useValues, useVec);
+
+  auto compoundElement = std::make_unique<CompoundInstanceElement>(
+      index, std::move(defVec), std::move(useVec), pipe, op->getName());
+  compoundElement->elementOp = op;
+  compoundElement->macroOpInstanceId = macroPhaseId;
+  compoundElement->compoundCoreType =
+      pipe == PipelineType::PIPE_M ? pto::TCoreType::CUBE
+                                   : pto::TCoreType::VECTOR;
+  syncIR_.emplace_back(std::move(compoundElement));
+  index++;
+}
+
+void PTOIRTranslator::UpdateMacroOpInfo(Operation *op) {
+  auto model = getSyncMacroModel(op);
+  if (!model)
+    return;
+  for (const auto &phase : model->phases) {
+    MakeMacroCompound(op, phase.pipe, ValueRange(phase.defValues),
+                      ValueRange(phase.useValues), phase.phaseId);
+  }
 }
 
 // ============================================================================
@@ -969,8 +1011,10 @@ LogicalResult PTOIRTranslator::UpdateMemrefAllocOpMemInfo(memref::AllocOp op) {
   // 1. 计算大小 (Bytes)
   uint64_t sizeInBytes = 0;
   if (memRefType.hasStaticShape()) {
-    int64_t elemSize = memRefType.getElementType().getIntOrFloatBitWidth() / 8;
-    if (elemSize == 0) elemSize = 1; // bool case
+    int64_t elemSize = static_cast<int64_t>(
+        pto::getPTOStorageElemByteSize(memRefType.getElementType()));
+    if (elemSize == 0)
+      return failure();
 
     int64_t numElements = 1;
     for (auto dim : memRefType.getShape()) numElements *= dim;

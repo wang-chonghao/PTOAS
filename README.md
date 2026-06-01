@@ -149,16 +149,12 @@ $PTO_SOURCE_DIR/build/python/
 │       ├── pto.py
 │       └── _pto_ops_gen.py
 
-# install 输出（Python 方言文件）
+# install 输出（Python 方言文件和原生扩展）
 $PTO_INSTALL_DIR/
 └── mlir
-    └── dialects
-        ├── pto.py
-        └── _pto_ops_gen.py
-
-# 安装到 MLIR Python 包中的原生扩展
-$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core/
-└── mlir
+    ├── dialects
+    │   ├── pto.py
+    │   └── _pto_ops_gen.py
     └── _mlir_libs
         └── _pto.cpython-*.so
 
@@ -181,7 +177,7 @@ $PTO_SOURCE_DIR/build/tools/ptobc/ptobc
 #    这样在 python 中 import mlir.dialects.pto 时能正确找到
 export MLIR_PYTHON_ROOT=$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core
 export PTO_PYTHON_ROOT=$PTO_INSTALL_DIR/
-export PYTHONPATH=$MLIR_PYTHON_ROOT:$PTO_PYTHON_ROOT:$PYTHONPATH
+export PYTHONPATH=$PTO_PYTHON_ROOT:$MLIR_PYTHON_ROOT:$PYTHONPATH
 
 # 2. Library Path: 确保能加载 LLVM 和 PTO 的动态库
 export LD_LIBRARY_PATH=$LLVM_BUILD_DIR/lib:$PTO_INSTALL_DIR/lib:$LD_LIBRARY_PATH

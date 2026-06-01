@@ -65,6 +65,15 @@ static void propagateFrontendIdAttr(InitOpT initOp, Operation *pipeOp,
                   rewriter.getI32IntegerAttr(initOp.getId()));
 }
 
+template <typename InitOpT>
+static int32_t getFrontendSlotNum(InitOpT initOp) {
+  if (auto slotNumAttr = initOp.getSlotNumAttr())
+    return slotNumAttr.getInt();
+  return initOp.getDirMask() == kBidirectionalDirMask
+             ? kBidirectionalSlotNum
+             : kSingleDirectionSlotNum;
+}
+
 static std::optional<int64_t> getStaticIndexLikeValue(Value value) {
   if (auto cst = value.getDefiningOp<arith::ConstantIndexOp>())
     return cst.value();
@@ -166,9 +175,10 @@ static FailureOr<FrontendPipeHandles>
 lowerSingleDirectionFrontendInit(InitOpT initOp, IRRewriter &rewriter,
                                  PTOArch arch, Type pipeTy, int8_t dirMask,
                                  Value localAddr) {
+  int32_t slotNum = getFrontendSlotNum(initOp);
   auto pipeOr =
-      createFrontendPipe(initOp, rewriter, arch, pipeTy, dirMask,
-                         kSingleDirectionSlotNum, localAddr);
+      createFrontendPipe(initOp, rewriter, arch, pipeTy, dirMask, slotNum,
+                         localAddr);
   if (failed(pipeOr))
     return failure();
 
@@ -190,9 +200,9 @@ template <typename InitOpT>
 static FailureOr<FrontendPipeHandles>
 lowerBidirectionalFrontendInit(InitOpT initOp, IRRewriter &rewriter,
                                PTOArch arch, Type pipeTy) {
+  int32_t slotNum = getFrontendSlotNum(initOp);
   auto pipeOr = createFrontendPipe(initOp, rewriter, arch, pipeTy,
-                                   kBidirectionalDirMask,
-                                   kBidirectionalSlotNum,
+                                   kBidirectionalDirMask, slotNum,
                                    initOp.getC2vConsumerBuf(),
                                    initOp.getV2cConsumerBuf());
   if (failed(pipeOr))

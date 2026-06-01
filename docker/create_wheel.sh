@@ -18,7 +18,10 @@
 #
 # Optional environment variables:
 #   WHEEL_PLAT_NAME - Explicit wheel platform tag (for bdist_wheel --plat-name)
+#   PTO_WHEEL_STAGING_DIR - Temporary wheel staging directory
+#   PTO_WHEEL_DIST_DIR - Directory for built wheel artifacts
 #   PTOAS_PYTHON_PACKAGE_VERSION - Wheel package version override
+#   PYTHON - Python interpreter to use for wheel metadata and setup.py
 
 set -e
 
@@ -30,19 +33,45 @@ for var in PTO_SOURCE_DIR PTO_INSTALL_DIR LLVM_BUILD_DIR; do
   fi
 done
 
-PY_PACKAGE_DIR="${LLVM_BUILD_DIR}/tools/mlir/python_packages/mlir_core"
+MLIR_PYTHON_PACKAGE_DIR="${LLVM_BUILD_DIR}/tools/mlir/python_packages/mlir_core"
+WHEEL_STAGING_DIR="${PTO_WHEEL_STAGING_DIR:-${PTO_SOURCE_DIR}/build/wheel-staging}"
+WHEEL_DIST_DIR="${PTO_WHEEL_DIST_DIR:-${PTO_SOURCE_DIR}/build/wheel-dist}"
+PYTHON_BIN="${PYTHON:-python3}"
 PTOAS_PYTHON_PACKAGE_VERSION="${PTOAS_PYTHON_PACKAGE_VERSION:-${PTOAS_VERSION:-}}"
 if [ -z "${PTOAS_PYTHON_PACKAGE_VERSION}" ]; then
-  PTOAS_PYTHON_PACKAGE_VERSION="$(python "${PTO_SOURCE_DIR}/.github/scripts/compute_ptoas_version.py" --cmake-file "${PTO_SOURCE_DIR}/CMakeLists.txt" --mode dev)"
+  PTOAS_PYTHON_PACKAGE_VERSION="$("${PYTHON_BIN}" "${PTO_SOURCE_DIR}/.github/scripts/compute_ptoas_version.py" --cmake-file "${PTO_SOURCE_DIR}/CMakeLists.txt" --mode dev)"
 fi
 export PTOAS_PYTHON_PACKAGE_VERSION
 
 echo "Creating Python wheel..."
 echo "Wheel package version: ${PTOAS_PYTHON_PACKAGE_VERSION}"
 
-# Copy PTO dialect files to MLIR package directory
-echo "Copying PTO dialect files..."
-cp "${PTO_INSTALL_DIR}/mlir/dialects/"*.py "${PY_PACKAGE_DIR}/mlir/dialects/"
+rm -rf "${WHEEL_STAGING_DIR}" "${WHEEL_DIST_DIR}"
+mkdir -p "${WHEEL_STAGING_DIR}" "${WHEEL_DIST_DIR}"
+
+# Build the wheel from an isolated staging tree. The LLVM MLIR Python package is
+# a read-only input; PTOAS files are overlaid only inside WHEEL_STAGING_DIR.
+echo "Copying MLIR Python package into wheel staging..."
+cp -a "${MLIR_PYTHON_PACKAGE_DIR}/." "${WHEEL_STAGING_DIR}/"
+
+echo "Overlaying PTO dialect files..."
+mkdir -p "${WHEEL_STAGING_DIR}/mlir/dialects"
+cp "${PTO_INSTALL_DIR}/mlir/dialects/"*.py "${WHEEL_STAGING_DIR}/mlir/dialects/"
+
+echo "Overlaying PTO native extension..."
+mkdir -p "${WHEEL_STAGING_DIR}/mlir/_mlir_libs"
+cp "${PTO_INSTALL_DIR}/mlir/_mlir_libs"/_pto* "${WHEEL_STAGING_DIR}/mlir/_mlir_libs/"
+
+# Copy TileLang resources into the wheel staging tree so wheel installs keep
+# the template library and Python DSL available.
+echo "Copying TileLang resources..."
+rm -rf "${WHEEL_STAGING_DIR}/tilelang_dsl" "${WHEEL_STAGING_DIR}/TileOps"
+cp -R "${PTO_INSTALL_DIR}/tilelang_dsl" "${WHEEL_STAGING_DIR}/tilelang_dsl"
+cp -R "${PTO_INSTALL_DIR}/share/ptoas/TileOps" "${WHEEL_STAGING_DIR}/TileOps"
+
+# Copy ptodsl into the wheel so it is always shipped with ptoas
+rm -rf "${WHEEL_STAGING_DIR}/ptodsl"
+cp -R "${PTO_SOURCE_DIR}/ptodsl/ptodsl" "${WHEEL_STAGING_DIR}/ptodsl"
 
 # Copy platform-specific setup.py to package directory.
 # On macOS, use setup_mac.py and rename it to setup.py in the build dir.
@@ -51,26 +80,26 @@ if [ "$(uname -s)" = "Darwin" ] && [ -f "${PTO_SOURCE_DIR}/docker/setup_mac.py" 
   SETUP_TEMPLATE="${PTO_SOURCE_DIR}/docker/setup_mac.py"
 fi
 echo "Copying $(basename "${SETUP_TEMPLATE}") as setup.py..."
-cp "${SETUP_TEMPLATE}" "${PY_PACKAGE_DIR}/setup.py"
+cp "${SETUP_TEMPLATE}" "${WHEEL_STAGING_DIR}/setup.py"
 
 # Determine Python version tag (e.g., cp311, cp312)
-PY_VERSION=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+PY_VERSION=$("${PYTHON_BIN}" -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
 echo "Python version tag: ${PY_VERSION}"
 
 # Build the wheel with version-specific tag
 echo "Building wheel..."
-cd "${PY_PACKAGE_DIR}"
+cd "${WHEEL_STAGING_DIR}"
 if [ -n "${WHEEL_PLAT_NAME:-}" ]; then
   echo "Using wheel platform tag: ${WHEEL_PLAT_NAME}"
-  python setup.py bdist_wheel --python-tag "${PY_VERSION}" --plat-name "${WHEEL_PLAT_NAME}"
+  "${PYTHON_BIN}" setup.py bdist_wheel --python-tag "${PY_VERSION}" --plat-name "${WHEEL_PLAT_NAME}" --dist-dir "${WHEEL_DIST_DIR}"
 else
-  python setup.py bdist_wheel --python-tag "${PY_VERSION}"
+  "${PYTHON_BIN}" setup.py bdist_wheel --python-tag "${PY_VERSION}" --dist-dir "${WHEEL_DIST_DIR}"
 fi
 
-echo "Wheel created at ${PY_PACKAGE_DIR}/dist/"
-ls -la "${PY_PACKAGE_DIR}/dist/"*.whl
+echo "Wheel created at ${WHEEL_DIST_DIR}/"
+ls -la "${WHEEL_DIST_DIR}/"*.whl
 
-EXPECTED_WHEEL_GLOB="${PY_PACKAGE_DIR}/dist/ptoas-${PTOAS_PYTHON_PACKAGE_VERSION}-"*.whl
+EXPECTED_WHEEL_GLOB="${WHEEL_DIST_DIR}/ptoas-${PTOAS_PYTHON_PACKAGE_VERSION}-"*.whl
 if ! compgen -G "${EXPECTED_WHEEL_GLOB}" >/dev/null 2>&1; then
   echo "Error: expected wheel matching ${EXPECTED_WHEEL_GLOB}" >&2
   exit 1

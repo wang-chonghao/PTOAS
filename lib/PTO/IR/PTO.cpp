@@ -99,6 +99,10 @@ static bool isSupportedVecElemType(Type ty, bool allowBf16 = true,
 static bool isSupportedLoadStoreElemTypeA2A3(Type ty);
 static bool isSupportedGatherElemTypeA2A3(Type ty);
 static bool isSupportedGatherElemTypeA5(Type ty);
+static bool isA5TLoadStoreTransferElemType(Type ty);
+static bool isA5AccStorePreQuantDstType(Type srcElem, Type dstElem);
+static bool isA5LowPrecisionTCvtPair(Type srcElem, Type dstElem);
+static bool isA5SupportedTCvtPair(Type srcElem, Type dstElem);
 static ParseResult parseSyncEventOpCommon(OpAsmParser &parser,
                                           OperationState &result,
                                           StringAttr pipeAttrName,
@@ -111,10 +115,18 @@ static bool isTileLikeType(Type ty);
 static SmallVector<int64_t, 4> getShapeVec(Type ty);
 static SmallVector<int64_t, 4> getValidShapeVec(Type ty);
 static SmallVector<int64_t, 4> getValidShapeVec(Value value);
-static LogicalResult verifyTileBufCommon(Operation *op, Type ty, StringRef name);
+static bool isKnownZeroOrUnitExtent(int64_t value);
+static bool isByteIntegerType(Type ty);
+static LogicalResult verifyTileBufCommon(Operation *op, Type ty, StringRef name,
+                                         bool allowLowPrecision = false);
 static LogicalResult verifyTileBufSameElemType(Operation *op, Type lhs, Type rhs,
                                                StringRef lhsName,
                                                StringRef rhsName);
+static LogicalResult verifyTileBufSameLogicalExtent(Operation *op, Type lhs,
+                                                    Type rhs, StringRef lhsName,
+                                                    StringRef rhsName,
+                                                    bool compareValidShape);
+
 static LogicalResult verifyTileBufSameValidShape(Operation *op, Type lhs, Type rhs,
                                                  StringRef lhsName, StringRef rhsName);
 static LogicalResult verifyVecTileCommon(Operation *op, Type ty, StringRef name);
@@ -140,6 +152,9 @@ static LogicalResult verifyMatTileOperandsA5(Operation *op, Type lhsTy,
                                              Type rhsTy, Type dstTy);
 static LogicalResult verifyGemvTileOperands(Operation *op, Type lhsTy, Type rhsTy,
                                             Type dstTy);
+static LogicalResult verifyAsyncFlatContiguous1DGMViewLike(Operation *op,
+                                                           Value value,
+                                                           StringRef name);
 static LogicalResult verifyGemvTileOperandsA2A3(Operation *op, Type lhsTy,
                                                 Type rhsTy, Type dstTy);
 static LogicalResult verifyGemvTileOperandsA5(Operation *op, Type lhsTy,
@@ -171,6 +186,9 @@ static LogicalResult verifyArithmeticElemTypeForArch(
     Operation *op, Type elemTy, PTOArch targetArch, bool allowInt8OnA5,
     bool allowBf16OnA5, StringRef a2a3Error, StringRef a5Error);
 static bool isRowMajorTileBuf(Type ty);
+static ParseResult parseLegacyOrAttrPipe(OpAsmParser &parser, PipeAttr &attr);
+static ParseResult parseLegacyOrAttrEvent(OpAsmParser &parser, EventAttr &attr);
+static ParseResult parseI32LiteralAttr(OpAsmParser &parser, IntegerAttr &attr);
 
 #define GET_ENUM_CLASSES
 #include "PTO/IR/PTOEnums.cpp.inc"
@@ -376,6 +394,49 @@ static LogicalResult dispatchVerifierByArch(Operation *op, FnA2A3 &&verifyA2A3,
   }
   return failure();
 }
+static std::optional<pto::AddressSpace> parsePtrAddressSpaceKeyword(StringRef keyword) {
+  return llvm::StringSwitch<std::optional<pto::AddressSpace>>(keyword)
+      .Case("gm", pto::AddressSpace::GM)
+      .Case("mat", pto::AddressSpace::MAT)
+      .Case("l1", pto::AddressSpace::MAT)
+      .Case("left", pto::AddressSpace::LEFT)
+      .Case("l0a", pto::AddressSpace::LEFT)
+      .Case("right", pto::AddressSpace::RIGHT)
+      .Case("l0b", pto::AddressSpace::RIGHT)
+      .Case("acc", pto::AddressSpace::ACC)
+      .Case("l0c", pto::AddressSpace::ACC)
+      .Case("vec", pto::AddressSpace::VEC)
+      .Case("ub", pto::AddressSpace::VEC)
+      .Case("bias", pto::AddressSpace::BIAS)
+      .Case("bt", pto::AddressSpace::BIAS)
+      .Case("scaling", pto::AddressSpace::SCALING)
+      .Case("fb", pto::AddressSpace::SCALING)
+      .Default(std::nullopt);
+}
+
+static StringRef printPtrAddressSpaceKeyword(pto::AddressSpace space) {
+  switch (space) {
+  case pto::AddressSpace::GM:
+  case pto::AddressSpace::Zero:
+    return "gm";
+  case pto::AddressSpace::MAT:
+    return "l1";
+  case pto::AddressSpace::LEFT:
+    return "l0a";
+  case pto::AddressSpace::RIGHT:
+    return "l0b";
+  case pto::AddressSpace::ACC:
+    return "l0c";
+  case pto::AddressSpace::VEC:
+    return "ub";
+  case pto::AddressSpace::BIAS:
+    return "bt";
+  case pto::AddressSpace::SCALING:
+    return "fb";
+  default:
+    return {};
+  }
+}
 
 static ParseResult parseSyncEventOpCommon(OpAsmParser &parser,
                                           OperationState &result,
@@ -485,17 +546,23 @@ static void printSyncEventOpCommon(OpAsmPrinter &p, Operation *op,
     mlir::Type elem;
     if (failed(parser.parseType(elem)))
       return mlir::Type();
+    auto memorySpace = pto::AddressSpaceAttr::get(ctx, pto::AddressSpace::GM);
     if (succeeded(parser.parseOptionalComma())) {
-      // ptr no longer accepts an address space; consume the attr for recovery.
-      mlir::Attribute memorySpace;
-      (void)parser.parseAttribute(memorySpace);
-      parser.emitError(parser.getCurrentLocation(),
-                       "!pto.ptr no longer accepts address space; use !pto.ptr<elem>");
-      return mlir::Type();
+      StringRef memorySpaceKeyword;
+      if (failed(parser.parseKeyword(&memorySpaceKeyword)))
+        return mlir::Type();
+      auto parsed = parsePtrAddressSpaceKeyword(memorySpaceKeyword);
+      if (!parsed) {
+        parser.emitError(parser.getCurrentLocation(),
+                         "!pto.ptr address space must be one of "
+                         "`gm|ub|mat|l1|left|l0a|right|l0b|acc|l0c|vec|bias|bt|scaling|fb`");
+        return mlir::Type();
+      }
+      memorySpace = pto::AddressSpaceAttr::get(ctx, *parsed);
     }
     if (failed(parser.parseGreater()))
       return mlir::Type();
-    return mlir::pto::PtrType::get(ctx, elem);
+    return mlir::pto::PtrType::get(ctx, elem, memorySpace);
   }
 
   if (head == "pto.tensor_view") {
@@ -519,6 +586,41 @@ mlir::Type TensorViewType::parse(::mlir::AsmParser &parser) {
 
 void TensorViewType::print(::mlir::AsmPrinter &printer) const {
   printShapeAndElem(printer, getShape(), getElementType());
+}
+
+mlir::Type PtrType::parse(::mlir::AsmParser &parser) {
+  Type elementType;
+  if (failed(parser.parseLess()) || failed(parser.parseType(elementType)))
+    return {};
+
+  auto memorySpace =
+      pto::AddressSpaceAttr::get(parser.getContext(), pto::AddressSpace::GM);
+  if (succeeded(parser.parseOptionalComma())) {
+    StringRef memorySpaceKeyword;
+    if (failed(parser.parseKeyword(&memorySpaceKeyword)))
+      return {};
+    auto parsed = parsePtrAddressSpaceKeyword(memorySpaceKeyword);
+    if (!parsed) {
+      parser.emitError(parser.getCurrentLocation(),
+                       "!pto.ptr address space must be one of "
+                       "`gm|ub|mat|l1|left|l0a|right|l0b|acc|l0c|vec|bias|bt|scaling|fb`");
+      return {};
+    }
+    memorySpace = pto::AddressSpaceAttr::get(parser.getContext(), *parsed);
+  }
+
+  if (failed(parser.parseGreater()))
+    return {};
+  return PtrType::get(parser.getContext(), elementType, memorySpace);
+}
+
+void PtrType::print(::mlir::AsmPrinter &printer) const {
+  printer << "<" << getElementType();
+  StringRef memorySpaceKeyword =
+      printPtrAddressSpaceKeyword(getMemorySpace().getAddressSpace());
+  if (!memorySpaceKeyword.empty())
+    printer << ", " << memorySpaceKeyword;
+  printer << ">";
 }
 
 //===----------------------------------------------------------------------===//
@@ -1704,21 +1806,29 @@ static LogicalResult verifyRowReductionDstLayout(Operation *op, Type ty,
       return op->emitOpError() << "expects " << name
                                << " to use a DN-style column vector tile or legacy ND-style tile";
   }
-  return success();
-  auto valid = getValidShapeVec(ty);
-  if (valid.size() != 2)
-    return op->emitOpError() << "expects " << name << " to have rank-2 valid_shape";
-  if (valid[1] != ShapedType::kDynamic && valid[1] != 1)
-    return op->emitOpError() << "expects " << name << " valid_shape[1] to be 1";
+  // The dst valid_shape[1] == 1 constraint for row reductions is enforced in
+  // verifyRowReductionValidRegion (it must be conditional on the no-op-marker
+  // path), so it is intentionally not duplicated here. A previous unreachable
+  // copy of that check lived after this return and has been removed.
   return success();
 }
 
 static LogicalResult verifyRowReductionValidRegion(Operation *op, Type srcTy,
-                                                   Type dstTy) {
+                                                   Type dstTy,
+                                                   bool allowEmptyMarker) {
   auto srcValid = getValidShapeVec(srcTy);
   auto dstValid = getValidShapeVec(dstTy);
   if (srcValid.size() != 2 || dstValid.size() != 2)
     return op->emitOpError("expects src and dst to have rank-2 valid_shape");
+  // A fully-empty dst valid region (0x0) is PyPTO's dual-AIV no-op replay
+  // marker: the op writes no elements, so accept it and skip the non-empty
+  // structural constraints. Only plain reductions opt in (allowEmptyMarker);
+  // arg reductions (trowargmax/trowargmin) still produce a real per-row index,
+  // so they stay strict. One-sided empties (only one dim 0) still fall through
+  // and are rejected below. Hardware Rv=0 no-op is tracked in pto-isa#143;
+  // PTOAS only guarantees the IR is legal here.
+  if (allowEmptyMarker && dstValid[0] == 0 && dstValid[1] == 0)
+    return success();
   if (srcValid[0] != ShapedType::kDynamic && srcValid[0] == 0)
     return op->emitOpError("expects src valid_shape[0] to be non-zero");
   if (srcValid[1] != ShapedType::kDynamic && srcValid[1] == 0)
@@ -1744,7 +1854,8 @@ static LogicalResult verifyTRowReductionNoTmpCommon(Operation *op, Type srcTy,
     return failure();
   if (getElemTy(srcTy) != getElemTy(dstTy))
     return op->emitOpError("expects src and dst to have the same element type");
-  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy)))
+  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy,
+                                           /*allowEmptyMarker=*/true)))
     return failure();
   if (!isSupportedRowReductionElemType(getElemTy(srcTy)))
     return op->emitOpError(elemTypeError);
@@ -1763,7 +1874,8 @@ static LogicalResult verifyTRowReductionWithTmpCommon(Operation *op, Type srcTy,
     return failure();
   if (getElemTy(srcTy) != getElemTy(dstTy))
     return op->emitOpError("expects src and dst to have the same element type");
-  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy)))
+  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy,
+                                           /*allowEmptyMarker=*/true)))
     return failure();
   if (!isSupportedRowReductionElemType(getElemTy(srcTy)))
     return op->emitOpError(elemTypeError);
@@ -1779,7 +1891,10 @@ static LogicalResult verifyTRowArgReductionCommon(Operation *op, Type srcTy,
   if (failed(verifyTileBufSameElemType(op, srcTy, tmpTy, "src", "tmp")) ||
       failed(verifyTileBufSameValidShape(op, srcTy, tmpTy, "src", "tmp")))
     return failure();
-  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy)))
+  // Arg reductions still emit a real per-row index, so the empty-region no-op
+  // marker is not accepted here (unlike plain trowmax/trowsum above).
+  if (failed(verifyRowReductionValidRegion(op, srcTy, dstTy,
+                                           /*allowEmptyMarker=*/false)))
     return failure();
   Type srcElem = getElemTy(srcTy);
   if (!isSupportedRowReductionElemType(srcElem))
@@ -1812,6 +1927,15 @@ static LogicalResult verifyColReductionValidRegion(Operation *op, Type srcTy,
   auto dstValid = getValidShapeVec(dstTy);
   if (srcValid.size() != 2 || dstValid.size() != 2)
     return op->emitOpError("expects src and dst to have rank-2 valid_shape");
+  // Fully-empty dst valid region (0x0): dual-AIV no-op replay marker. The op
+  // writes no elements; accept and skip the non-empty constraints. One-sided
+  // empties still fall through. See pto-isa#143 for hardware Rv=0 no-op.
+  // Col arg reductions (tcolargmax/tcolargmin) never reach this point with a
+  // 0x0 dst: verifyColArgReductionDstLayout enforces dst valid_shape[0] == 1
+  // first, so they stay strict without needing a flag here (unlike the row
+  // path, whose dst-layout check does not constrain valid).
+  if (dstValid[0] == 0 && dstValid[1] == 0)
+    return success();
   if (requireNonZeroSrc) {
     if (srcValid[0] != ShapedType::kDynamic && srcValid[0] == 0)
       return op->emitOpError("expects src valid_shape[0] to be non-zero");
@@ -1988,6 +2112,78 @@ LogicalResult mlir::pto::AddPtrOp::verify() {
   return success();
 }
 
+static LogicalResult verifyPtrLikeForAddressCast(Operation *op, Type type,
+                                                 StringRef name) {
+  if (isa<mlir::pto::PtrType>(type))
+    return success();
+
+  auto memTy = dyn_cast<MemRefType>(type);
+  if (!memTy)
+    return op->emitOpError()
+           << "expects " << name << " to be !pto.ptr<...> or a GM memref";
+
+  if (memTy.getRank() != 1)
+    return op->emitOpError()
+           << "expects lowered memref " << name << " to be rank-1";
+
+  if (!isGmAddressSpaceAttr(memTy.getMemorySpace()))
+    return op->emitOpError()
+           << "expects lowered memref " << name << " to use GM address space";
+
+  return success();
+}
+
+static Type getPointerLikeElementType(Type type) {
+  if (auto ptrTy = dyn_cast<mlir::pto::PtrType>(type))
+    return ptrTy.getElementType();
+  if (auto memTy = dyn_cast<MemRefType>(type))
+    return memTy.getElementType();
+  return Type();
+}
+
+static bool isEmitCSupportedScalarType(Type type) {
+  if (!type)
+    return false;
+  if (type.isF16() || type.isBF16() || type.isF32() || type.isF64())
+    return true;
+  if (auto intTy = dyn_cast<IntegerType>(type))
+    return intTy.getWidth() == 8 || intTy.getWidth() == 16 ||
+           intTy.getWidth() == 32 || intTy.getWidth() == 64;
+  if (mlir::pto::isPTOFloat8Type(type))
+    return true;
+  if (isa<mlir::pto::HiF8Type, mlir::pto::F4E1M2x2Type,
+          mlir::pto::F4E2M1x2Type>(type))
+    return true;
+  return false;
+}
+
+LogicalResult mlir::pto::PtrToIntOp::verify() {
+  Type resultTy = getResult().getType();
+  auto intTy = dyn_cast<IntegerType>(resultTy);
+  if (!intTy || intTy.getWidth() != 64)
+    return emitOpError("result must be i64");
+
+  return verifyPtrLikeForAddressCast(getOperation(), getPtr().getType(),
+                                     "ptr operand");
+}
+
+LogicalResult mlir::pto::IntToPtrOp::verify() {
+  auto addrTy = dyn_cast<IntegerType>(getAddr().getType());
+  if (!addrTy || addrTy.getWidth() != 64)
+    return emitOpError("address operand must be i64");
+
+  if (failed(verifyPtrLikeForAddressCast(getOperation(), getResult().getType(),
+                                         "result")))
+    return failure();
+
+  Type dstElem = getPointerLikeElementType(getResult().getType());
+  if (!isEmitCSupportedScalarType(dstElem))
+    return emitOpError("result element type is not supported by EmitC: ")
+           << dstElem;
+
+  return success();
+}
+
 LogicalResult mlir::pto::LocalArrayGetOp::verify() {
   auto arrayTy = getArray().getType();
   int64_t rank = arrayTy.getRank();
@@ -2019,6 +2215,43 @@ LogicalResult mlir::pto::LocalArraySetOp::verify() {
   return success();
 }
 
+LogicalResult mlir::pto::CastPtrOp::verify() {
+  Type inputType = getInput().getType();
+  Type resultType = getResult().getType();
+
+  auto inputPtrType = dyn_cast<mlir::pto::PtrType>(inputType);
+  auto resultPtrType = dyn_cast<mlir::pto::PtrType>(resultType);
+  auto inputMemRefType = dyn_cast<BaseMemRefType>(inputType);
+  bool inputIsInteger = isa<IntegerType>(inputType);
+  bool resultIsInteger = isa<IntegerType>(resultType);
+
+  if (!inputPtrType && !inputMemRefType && !inputIsInteger)
+    return emitOpError("input must be an integer, memref, or !pto.ptr<...>");
+  if (!resultPtrType && !resultIsInteger)
+    return emitOpError("result must be an integer or !pto.ptr<...>");
+
+  if (inputIsInteger && resultIsInteger)
+    return emitOpError("integer-to-integer cast is not a ptr cast");
+
+  if (inputMemRefType && resultIsInteger)
+    return emitOpError("memref-to-integer cast is unsupported");
+
+  if (inputMemRefType && resultPtrType) {
+    auto memrefSpace = dyn_cast_or_null<mlir::pto::AddressSpaceAttr>(
+        inputMemRefType.getMemorySpace());
+    auto resultSpace = resultPtrType.getMemorySpace();
+    if (memrefSpace && memrefSpace != resultSpace)
+      return emitOpError("memref-to-ptr cast must stay within the same PTO memory space");
+  }
+
+  if (inputPtrType && resultPtrType &&
+      inputPtrType.getMemorySpace() != resultPtrType.getMemorySpace()) {
+    return emitOpError("ptr-to-ptr cast must stay within the same PTO memory space");
+  }
+
+  return success();
+}
+
 
 
 
@@ -2041,6 +2274,8 @@ void PTODialect::initialize() {
 
 
 AddressSpaceAttr mlir::pto::getPTOAddressSpaceAttr(Type type) {
+  if (auto ptrType = dyn_cast<PtrType>(type))
+    return ptrType.getMemorySpace();
   auto memRefType = dyn_cast<BaseMemRefType>(type);
   if (!memRefType)
     return {};
@@ -2052,7 +2287,7 @@ AddressSpaceAttr mlir::pto::getPTOAddressSpaceAttr(Type type) {
 
 bool mlir::pto::isScalarPtrOrMemRef(Type type) {
   if (auto pty = dyn_cast<mlir::pto::PtrType>(type))
-    return true;
+    return static_cast<bool>(pty);
   if (auto memTy = dyn_cast<MemRefType>(type))
     return isGmAddressSpaceAttr(memTy.getMemorySpace());
   return false;
@@ -2207,11 +2442,6 @@ void mlir::pto::annotatePTOEntryFunctions(ModuleOp module) {
 
 LogicalResult AllocTileOp::verify() {
   auto ty = getResult().getType(); // TileBufType
-
-  Type elemTy = ty.getElementType();
-  if (isPTOLowPrecisionType(elemTy))
-    return emitOpError() << "result dtype " << elemTy
-                         << " is not supported by pto.alloc_tile yet";
 
   if (failed(verifyTileBufLayoutConstraints(*this, ty, "result")))
     return failure();
@@ -2379,14 +2609,16 @@ LogicalResult TAssignOp::verify() {
 }
 
 LogicalResult TLoadOp::verify() {
-  auto verifyCommon = [&]() -> FailureOr<std::pair<pto::PartitionTensorViewType, pto::TileBufType>> {
+  auto verifyCommon =
+      [&](bool allowLowPrecision)
+      -> FailureOr<std::pair<pto::PartitionTensorViewType, pto::TileBufType>> {
     auto srcPart = dyn_cast<pto::PartitionTensorViewType>(getSrc().getType());
     auto dstTile = dyn_cast<pto::TileBufType>(getDst().getType());
     if (!srcPart || !dstTile) {
       emitOpError("expects src to be !pto.partition_tensor_view and dst to be !pto.tile_buf");
       return failure();
     }
-    if (failed(verifyTileBufCommon(*this, dstTile, "dst")))
+    if (failed(verifyTileBufCommon(*this, dstTile, "dst", allowLowPrecision)))
       return failure();
 
     auto srcShape = srcPart.getShape();
@@ -2398,8 +2630,8 @@ LogicalResult TLoadOp::verify() {
     }
     auto dstValid = dstTile.getValidShape();
     for (unsigned i = 0; i < dstValid.size(); ++i) {
-      if (dstValid[i] != ShapedType::kDynamic && dstValid[i] <= 0) {
-        emitOpError() << "expects dst valid_shape[" << i << "] to be positive";
+      if (dstValid[i] != ShapedType::kDynamic && dstValid[i] < 0) {
+        emitOpError() << "expects dst valid_shape[" << i << "] to be non-negative";
         return failure();
       }
     }
@@ -2407,13 +2639,15 @@ LogicalResult TLoadOp::verify() {
   };
 
   auto verifyA2A3 = [&]() -> LogicalResult {
-    auto common = verifyCommon();
+    auto common = verifyCommon(/*allowLowPrecision=*/false);
     if (failed(common))
       return failure();
     auto [srcPart, dstTile] = *common;
 
     Type srcElem = srcPart.getElementType();
     Type dstElem = dstTile.getElementType();
+    if (isPTOLowPrecisionType(srcElem) || isPTOLowPrecisionType(dstElem))
+      return emitOpError("expects A2/A3 tload low-precision element types to be unsupported");
     if (!(dstElem.isInteger(8) || dstElem.isInteger(16) || dstElem.isInteger(32) ||
           dstElem.isInteger(64) || dstElem.isF16() || dstElem.isBF16() || dstElem.isF32()))
       return emitOpError("expects A2/A3 tload dst element type to be i8/i16/i32/i64/u64/f16/bf16/f32");
@@ -2429,7 +2663,7 @@ LogicalResult TLoadOp::verify() {
   };
 
   auto verifyA5 = [&]() -> LogicalResult {
-    auto common = verifyCommon();
+    auto common = verifyCommon(/*allowLowPrecision=*/true);
     if (failed(common))
       return failure();
     auto [srcPart, dstTile] = *common;
@@ -2442,6 +2676,10 @@ LogicalResult TLoadOp::verify() {
       return emitOpError("expects src and dst element types to have the same element size");
     if (!(dstBytes == 1 || dstBytes == 2 || dstBytes == 4 || dstBytes == 8))
       return emitOpError("expects A5 tload dst element size to be 1, 2, 4, or 8 bytes");
+    if (!isA5TLoadStoreTransferElemType(srcElem))
+      return emitOpError("expects A5 tload src element type to be i8/i16/i32/i64/f16/bf16/f32/f8/hif8/fp4");
+    if (!isA5TLoadStoreTransferElemType(dstElem))
+      return emitOpError("expects A5 tload dst element type to be i8/i16/i32/i64/f16/bf16/f32/f8/hif8/fp4");
 
     if (dstElem.isInteger(64)) {
       auto pad = dstTile.getPadValueI32();
@@ -2449,6 +2687,21 @@ LogicalResult TLoadOp::verify() {
           pad != static_cast<int32_t>(pto::PadValue::Zero))
         return emitOpError("expects A5 i64/u64 tload dst pad to be null or zero");
     }
+
+    auto dstSpace = getPTOMemorySpaceEnum(dstTile);
+    if (dstSpace && *dstSpace == pto::AddressSpace::VEC) {
+      int32_t bl = dstTile.getBLayoutValueI32();
+      int32_t sl = dstTile.getSLayoutValueI32();
+      bool isND = (bl == static_cast<int32_t>(pto::BLayout::RowMajor) &&
+                   sl == static_cast<int32_t>(pto::SLayout::NoneBox));
+      bool isDN = (bl == static_cast<int32_t>(pto::BLayout::ColMajor) &&
+                   sl == static_cast<int32_t>(pto::SLayout::NoneBox));
+      bool isNZ = (bl == static_cast<int32_t>(pto::BLayout::ColMajor) &&
+                   sl == static_cast<int32_t>(pto::SLayout::RowMajor));
+      if (!isND && !isDN && !isNZ)
+        return emitOpError("expects A5 tload vec dst layout to be ND, DN, or NZ");
+    }
+
     return success();
   };
 
@@ -2456,59 +2709,108 @@ LogicalResult TLoadOp::verify() {
 }
 
 LogicalResult TPrefetchOp::verify() {
-  Type srcTy = getSrc().getType();
-  Type dstTy = getDst().getType();
+  auto verifyImpl = [&](bool allowLowPrecision) -> LogicalResult {
+    Type srcTy = getSrc().getType();
+    Type dstTy = getDst().getType();
 
-  Type srcElem;
-  Type dstElem;
+    Type srcElem;
+    Type dstElem;
 
-  if (auto srcPart = dyn_cast<pto::PartitionTensorViewType>(srcTy)) {
-    auto srcShape = srcPart.getShape();
-    for (unsigned i = 0; i < srcShape.size(); ++i) {
-      if (srcShape[i] != ShapedType::kDynamic && srcShape[i] <= 0)
-        return emitOpError() << "expects src shape[" << i << "] to be positive";
+    if (auto srcPart = dyn_cast<pto::PartitionTensorViewType>(srcTy)) {
+      auto srcShape = srcPart.getShape();
+      for (unsigned i = 0; i < srcShape.size(); ++i) {
+        if (srcShape[i] != ShapedType::kDynamic && srcShape[i] <= 0)
+          return emitOpError() << "expects src shape[" << i << "] to be positive";
+      }
+      srcElem = srcPart.getElementType();
+    } else if (auto srcMr = dyn_cast<MemRefType>(srcTy)) {
+      if (!srcMr.hasRank())
+        return emitOpError("expects src memref to be ranked");
+      for (int64_t dim : srcMr.getShape()) {
+        if (dim != ShapedType::kDynamic && dim <= 0)
+          return emitOpError("expects src memref shape to be positive");
+      }
+      srcElem = srcMr.getElementType();
+    } else {
+      return emitOpError("expects src to be !pto.partition_tensor_view or memref");
     }
-    srcElem = srcPart.getElementType();
-  } else if (auto srcMr = dyn_cast<MemRefType>(srcTy)) {
-    if (!srcMr.hasRank())
-      return emitOpError("expects src memref to be ranked");
-    for (int64_t dim : srcMr.getShape()) {
-      if (dim != ShapedType::kDynamic && dim <= 0)
-        return emitOpError("expects src memref shape to be positive");
+
+    if (auto dstTile = dyn_cast<pto::TileBufType>(dstTy)) {
+      if (failed(verifyTileBufCommon(*this, dstTile, "dst", allowLowPrecision)))
+        return failure();
+      auto dstValid = dstTile.getValidShape();
+      for (unsigned i = 0; i < dstValid.size(); ++i) {
+        if (dstValid[i] != ShapedType::kDynamic && dstValid[i] < 0)
+          return emitOpError() << "expects dst valid_shape[" << i
+                               << "] to be non-negative";
+      }
+      auto dstSpace = getPTOMemorySpaceEnum(dstTile);
+      if (!dstSpace || (*dstSpace != pto::AddressSpace::VEC &&
+                        *dstSpace != pto::AddressSpace::MAT))
+        return emitOpError("expects dst to use loc=vec or loc=mat");
+      dstElem = dstTile.getElementType();
+    } else if (auto dstMr = dyn_cast<MemRefType>(dstTy)) {
+      auto dstSpace = getPTOMemorySpaceEnum(dstMr);
+      if (!dstSpace || (*dstSpace != pto::AddressSpace::VEC &&
+                        *dstSpace != pto::AddressSpace::MAT))
+        return emitOpError("expects dst memref to use loc=vec or loc=mat");
+      if (!dstMr.hasRank())
+        return emitOpError("expects dst memref to be ranked");
+      if (failed(verifyTileBufCommon(*this, dstMr, "dst", allowLowPrecision)))
+        return failure();
+      dstElem = dstMr.getElementType();
+    } else {
+      return emitOpError("expects dst to be !pto.tile_buf or memref");
     }
-    srcElem = srcMr.getElementType();
-  } else {
-    return emitOpError("expects src to be !pto.partition_tensor_view or memref");
+
+    if (getElemByteSize(srcElem) != getElemByteSize(dstElem))
+      return emitOpError("expects src and dst element types to have the same element size");
+    if (!allowLowPrecision &&
+        (isPTOLowPrecisionType(srcElem) || isPTOLowPrecisionType(dstElem)))
+      return emitOpError("expects A2/A3 tprefetch low-precision element types to be unsupported");
+    if (allowLowPrecision &&
+        (!isA5TLoadStoreTransferElemType(srcElem) ||
+         !isA5TLoadStoreTransferElemType(dstElem)))
+      return emitOpError("expects A5 tprefetch element types to be i8/i16/i32/i64/f16/bf16/f32/f8/hif8/fp4");
+    return success();
+  };
+
+  auto verifyA2A3 = [&]() -> LogicalResult {
+    return verifyImpl(/*allowLowPrecision=*/false);
+  };
+  auto verifyA5 = [&]() -> LogicalResult {
+    return verifyImpl(/*allowLowPrecision=*/true);
+  };
+  switch (getVerifierTargetArch(getOperation())) {
+  case VerifierTargetArch::A2A3:
+    return verifyA2A3();
+  case VerifierTargetArch::A5:
+    return verifyA5();
   }
+  return failure();
+}
 
-  if (auto dstTile = dyn_cast<pto::TileBufType>(dstTy)) {
-    if (failed(verifyTileBufCommon(*this, dstTile, "dst")))
-      return failure();
-    auto dstValid = dstTile.getValidShape();
-    for (unsigned i = 0; i < dstValid.size(); ++i) {
-      if (dstValid[i] != ShapedType::kDynamic && dstValid[i] <= 0)
-        return emitOpError() << "expects dst valid_shape[" << i << "] to be positive";
-    }
-    auto dstSpace = getPTOMemorySpaceEnum(dstTile);
-    if (!dstSpace || (*dstSpace != pto::AddressSpace::VEC &&
-                      *dstSpace != pto::AddressSpace::MAT))
-      return emitOpError("expects dst to use loc=vec or loc=mat");
-    dstElem = dstTile.getElementType();
-  } else if (auto dstMr = dyn_cast<MemRefType>(dstTy)) {
-    auto dstSpace = getPTOMemorySpaceEnum(dstMr);
-    if (!dstSpace || (*dstSpace != pto::AddressSpace::VEC &&
-                      *dstSpace != pto::AddressSpace::MAT))
-      return emitOpError("expects dst memref to use loc=vec or loc=mat");
-    if (!dstMr.hasRank())
-      return emitOpError("expects dst memref to be ranked");
-    dstElem = dstMr.getElementType();
+LogicalResult MakePrefetchAsyncContextOp::verify() {
+  Type workspaceTy = getWorkspace().getType();
+  Type elemTy = nullptr;
+  if (auto ptrTy = dyn_cast<pto::PtrType>(workspaceTy)) {
+    elemTy = ptrTy.getElementType();
+  } else if (auto memTy = dyn_cast<MemRefType>(workspaceTy)) {
+    if (!isGmAddressSpaceAttr(memTy.getMemorySpace()))
+      return emitOpError("expects workspace memref to be in GM address space");
+    elemTy = memTy.getElementType();
   } else {
-    return emitOpError("expects dst to be !pto.tile_buf or memref");
+    return emitOpError("expects workspace to be !pto.ptr<i8> or GM memref<i8>");
   }
+  if (!isByteIntegerType(elemTy))
+    return emitOpError("expects workspace element type to be an 8-bit integer");
+  return success();
+}
 
-  if (getElemByteSize(srcElem) != getElemByteSize(dstElem))
-    return emitOpError("expects src and dst element types to have the same element size");
-
+LogicalResult TPrefetchAsyncOp::verify() {
+  if (failed(verifyAsyncFlatContiguous1DGMViewLike(getOperation(), getSrc(),
+                                                   "src")))
+    return failure();
   return success();
 }
 
@@ -2576,6 +2878,135 @@ void mlir::pto::SyncWaitOp::print(OpAsmPrinter &p) {
                          getEventIdAttrName().getValue());
 }
 
+ParseResult mlir::pto::SyncAllOp::parse(OpAsmParser &parser,
+                                        OperationState &result) {
+  SmallVector<OpAsmParser::UnresolvedOperand, 4> operands;
+  SmallVector<Type, 4> operandTypes;
+  Attribute modeAttr;
+  Attribute coreTypeAttr;
+
+  if (parser.parseLParen())
+    return failure();
+
+  if (failed(parser.parseOptionalRParen())) {
+    if (parser.parseOperandList(operands) || parser.parseColonTypeList(operandTypes) ||
+        parser.parseRParen())
+      return failure();
+    if (operands.size() != operandTypes.size())
+      return parser.emitError(parser.getCurrentLocation())
+             << "expects the same number of operands and operand types";
+  }
+
+  if (parser.parseKeyword("mode") || parser.parseEqual() ||
+      parser.parseAttribute(modeAttr) || parser.parseComma() ||
+      parser.parseKeyword("core_type") || parser.parseEqual() ||
+      parser.parseAttribute(coreTypeAttr))
+    return failure();
+
+  auto mode = dyn_cast<pto::SyncAllModeAttr>(modeAttr);
+  if (!mode)
+    return parser.emitError(parser.getCurrentLocation())
+           << "expects mode to be #pto.sync_all_mode<...>";
+
+  auto coreType = dyn_cast<pto::SyncCoreTypeAttr>(coreTypeAttr);
+  if (!coreType)
+    return parser.emitError(parser.getCurrentLocation())
+           << "expects core_type to be #pto.sync_core_type<...>";
+
+  result.addAttribute("mode", mode);
+  result.addAttribute("core_type", coreType);
+
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  auto addSegmentSizes = [&](int32_t gm, int32_t ub, int32_t l1,
+                             int32_t used) {
+    result.addAttribute("operandSegmentSizes",
+                        parser.getBuilder().getDenseI32ArrayAttr(
+                            {gm, ub, l1, used}));
+  };
+
+  switch (mode.getValue()) {
+  case pto::SyncAllMode::Hard:
+    if (!operands.empty())
+      return parser.emitError(parser.getCurrentLocation())
+             << "expects hard syncall to have no operands";
+    addSegmentSizes(0, 0, 0, 0);
+    return success();
+  case pto::SyncAllMode::Soft:
+    break;
+  }
+
+  switch (coreType.getValue()) {
+  case pto::SyncCoreType::AIVOnly:
+    if (operands.size() != 2 && operands.size() != 3)
+      return parser.emitError(parser.getCurrentLocation())
+             << "expects soft AIV-only syncall to have gm_workspace, "
+                "ub_workspace, and optional used_cores";
+    if (parser.resolveOperand(operands[0], operandTypes[0], result.operands) ||
+        parser.resolveOperand(operands[1], operandTypes[1], result.operands))
+      return failure();
+    if (operands.size() == 3 &&
+        parser.resolveOperand(operands[2], operandTypes[2], result.operands))
+      return failure();
+    addSegmentSizes(1, 1, 0, operands.size() == 3 ? 1 : 0);
+    return success();
+  case pto::SyncCoreType::AICOnly:
+    if (operands.size() != 2 && operands.size() != 3)
+      return parser.emitError(parser.getCurrentLocation())
+             << "expects soft AIC-only syncall to have gm_workspace, "
+                "l1_workspace, and optional used_cores";
+    if (parser.resolveOperand(operands[0], operandTypes[0], result.operands) ||
+        parser.resolveOperand(operands[1], operandTypes[1], result.operands))
+      return failure();
+    if (operands.size() == 3 &&
+        parser.resolveOperand(operands[2], operandTypes[2], result.operands))
+      return failure();
+    addSegmentSizes(1, 0, 1, operands.size() == 3 ? 1 : 0);
+    return success();
+  case pto::SyncCoreType::Mix:
+    if (operands.size() != 3 && operands.size() != 4)
+      return parser.emitError(parser.getCurrentLocation())
+             << "expects soft mixed syncall to have gm_workspace, "
+                "ub_workspace, l1_workspace, and optional used_cores";
+    if (parser.resolveOperand(operands[0], operandTypes[0], result.operands) ||
+        parser.resolveOperand(operands[1], operandTypes[1], result.operands) ||
+        parser.resolveOperand(operands[2], operandTypes[2], result.operands))
+      return failure();
+    if (operands.size() == 4 &&
+        parser.resolveOperand(operands[3], operandTypes[3], result.operands))
+      return failure();
+    addSegmentSizes(1, 1, 1, operands.size() == 4 ? 1 : 0);
+    return success();
+  }
+
+  llvm_unreachable("unhandled SyncCoreType");
+}
+
+void mlir::pto::SyncAllOp::print(OpAsmPrinter &p) {
+  SmallVector<Value, 4> operands;
+  if (getGmWorkspace())
+    operands.push_back(getGmWorkspace());
+  if (getUbWorkspace())
+    operands.push_back(getUbWorkspace());
+  if (getL1Workspace())
+    operands.push_back(getL1Workspace());
+  if (getUsedCores())
+    operands.push_back(getUsedCores());
+
+  p << "(";
+  if (!operands.empty()) {
+    p.printOperands(operands);
+    p << " : ";
+    llvm::interleaveComma(operands, p,
+                          [&](Value operand) { p.printType(operand.getType()); });
+  }
+  p << ") mode = " << getMode() << ", core_type = " << getCoreType();
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          /*elidedAttrs=*/{"operandSegmentSizes", "mode",
+                                           "core_type"});
+}
+
 LogicalResult mlir::pto::SyncWaitOp::verify() {
   bool hasStatic = getEventIdAttr() != nullptr;
   bool hasDynamic = static_cast<bool>(getEventIdDyn());
@@ -2602,14 +3033,16 @@ LogicalResult mlir::pto::SyncWaitOp::verify() {
 }
 
 LogicalResult TStoreOp::verify() {
-  auto verifyCommon = [&]() -> FailureOr<std::pair<pto::TileBufType, pto::PartitionTensorViewType>> {
+  auto verifyCommon =
+      [&](bool allowLowPrecision)
+      -> FailureOr<std::pair<pto::TileBufType, pto::PartitionTensorViewType>> {
     auto srcTile = dyn_cast<pto::TileBufType>(getSrc().getType());
     auto dstPart = dyn_cast<pto::PartitionTensorViewType>(getDst().getType());
     if (!srcTile || !dstPart) {
       emitOpError("expects src to be !pto.tile_buf and dst to be !pto.partition_tensor_view");
       return failure();
     }
-    if (failed(verifyTileBufCommon(*this, srcTile, "src")))
+    if (failed(verifyTileBufCommon(*this, srcTile, "src", allowLowPrecision)))
       return failure();
     for (auto [idx, dim] : llvm::enumerate(dstPart.getShape())) {
       if (dim != ShapedType::kDynamic && dim <= 0) {
@@ -2619,8 +3052,8 @@ LogicalResult TStoreOp::verify() {
     }
     auto srcValid = srcTile.getValidShape();
     for (auto [idx, dim] : llvm::enumerate(srcValid)) {
-      if (dim != ShapedType::kDynamic && dim <= 0) {
-        emitOpError() << "expects src valid_shape[" << idx << "] to be positive";
+      if (dim != ShapedType::kDynamic && dim < 0) {
+        emitOpError() << "expects src valid_shape[" << idx << "] to be non-negative";
         return failure();
       }
     }
@@ -2663,7 +3096,7 @@ LogicalResult TStoreOp::verify() {
   auto reluMode = getReluPreMode();
 
   auto verifyA2A3 = [&]() -> LogicalResult {
-    auto common = verifyCommon();
+    auto common = verifyCommon(/*allowLowPrecision=*/false);
     if (failed(common))
       return failure();
     auto [srcTile, dstPart] = *common;
@@ -2682,6 +3115,8 @@ LogicalResult TStoreOp::verify() {
     if (*srcSpace == pto::AddressSpace::VEC || *srcSpace == pto::AddressSpace::MAT) {
       if (hasPreQuant)
         return emitOpError("expects preQuantScalar form to use loc=acc src");
+      if (isPTOLowPrecisionType(dstElem))
+        return emitOpError("expects A2/A3 vec/mat tstore low-precision dst element types to be unsupported");
       if (!isLoadStoreElemType(srcElem))
         return emitOpError("expects A2/A3 vec/mat tstore src element type to be i8/i16/i32/i64/u64/f16/bf16/f32");
       if (getElemByteSize(srcElem) != getElemByteSize(dstElem))
@@ -2711,13 +3146,13 @@ LogicalResult TStoreOp::verify() {
       return emitOpError("expects A2/A3 acc tstore src cols to be in [1, 4095]");
     auto srcValid = srcTile.getValidShape();
     if (srcValid[1] != ShapedType::kDynamic &&
-        (srcValid[1] < 1 || srcValid[1] > 4095))
-      return emitOpError("expects A2/A3 acc tstore src valid_shape[1] to be in [1, 4095]");
+        (srcValid[1] < 0 || srcValid[1] > 4095))
+      return emitOpError("expects A2/A3 acc tstore src valid_shape[1] to be in [0, 4095]");
     return success();
   };
 
   auto verifyA5 = [&]() -> LogicalResult {
-    auto common = verifyCommon();
+    auto common = verifyCommon(/*allowLowPrecision=*/true);
     if (failed(common))
       return failure();
     auto [srcTile, dstPart] = *common;
@@ -2735,23 +3170,31 @@ LogicalResult TStoreOp::verify() {
     if (*srcSpace == pto::AddressSpace::VEC) {
       if (hasPreQuant)
         return emitOpError("expects preQuantScalar form to use loc=acc src");
-      if (!isLoadStoreElemType(srcElem))
-        return emitOpError("expects A5 vec tstore src element type to be i8/i16/i32/i64/u64/f16/bf16/f32");
+      if (!isA5TLoadStoreTransferElemType(srcElem))
+        return emitOpError("expects A5 vec tstore src element type to be i8/i16/i32/i64/f16/bf16/f32/f8/hif8/fp4");
       if (getElemByteSize(srcElem) != getElemByteSize(dstElem))
         return emitOpError("expects A5 vec tstore src and dst element types to have the same bitwidth");
+
+      int32_t bl = srcTile.getBLayoutValueI32();
+      int32_t sl = srcTile.getSLayoutValueI32();
+      bool isND = (bl == static_cast<int32_t>(pto::BLayout::RowMajor) &&
+                   sl == static_cast<int32_t>(pto::SLayout::NoneBox));
+      bool isDN = (bl == static_cast<int32_t>(pto::BLayout::ColMajor) &&
+                   sl == static_cast<int32_t>(pto::SLayout::NoneBox));
+      bool isNZ = (bl == static_cast<int32_t>(pto::BLayout::ColMajor) &&
+                   sl == static_cast<int32_t>(pto::SLayout::RowMajor));
+      auto srcShape = srcTile.getShape();
+      bool isSpecialCase = (srcShape.size() == 2 && (srcShape[0] == 1 || srcShape[1] == 1));
+      if (!isSpecialCase && !isND && !isDN && !isNZ)
+        return emitOpError("expects A5 vec tstore src layout to be ND, DN, or NZ (or special case with 1 row/col)");
       return success();
     }
 
     if (!(srcElem.isInteger(32) || srcElem.isF32()))
       return emitOpError("expects A5 acc tstore src element type to be i32 or f32");
     if (hasPreQuant) {
-      if (srcElem.isInteger(32)) {
-        if (!(isI8Like(dstElem) || dstElem.isF16() || dstElem.isBF16()))
-          return emitOpError("expects A5 acc preQuantScalar tstore dst type to be i8/ui8/f16/bf16");
-      } else if (srcElem.isF32()) {
-        if (!(isI8Like(dstElem) || dstElem.isF16() || dstElem.isBF16() || dstElem.isF32()))
-          return emitOpError("expects A5 acc preQuantScalar tstore dst type to be i8/ui8/f16/bf16/f32");
-      }
+      if (!isA5AccStorePreQuantDstType(srcElem, dstElem))
+        return emitOpError("expects A5 acc preQuantScalar tstore dst type to be i8/ui8/f16/bf16/f32/hif8/f8E4M3");
     } else {
       if (!(dstElem.isInteger(32) || dstElem.isF32() || dstElem.isF16() ||
             dstElem.isBF16()))
@@ -2825,6 +3268,36 @@ static SmallVector<int64_t, 4> getValidShapeVec(Type ty) {
   if (auto tb = dyn_cast<pto::TileBufType>(ty))
     return SmallVector<int64_t, 4>(tb.getValidShape().begin(), tb.getValidShape().end());
   return getShapeVec(ty);
+}
+
+static int64_t getLogicalTileDim(int64_t rawDim, Type elemTy,
+                                 std::optional<pto::BLayout> blayout,
+                                 unsigned dimIdx) {
+  if (rawDim == ShapedType::kDynamic || !isPTOFloat4PackedType(elemTy))
+    return rawDim;
+  pto::BLayout layout = blayout.value_or(pto::BLayout::RowMajor);
+  unsigned packedDim = layout == pto::BLayout::ColMajor ? 0 : 1;
+  return dimIdx == packedDim ? rawDim * 2 : rawDim;
+}
+
+static std::optional<pto::BLayout> getTileBufBLayout(Type ty) {
+  if (auto tb = dyn_cast<pto::TileBufType>(ty))
+    return static_cast<pto::BLayout>(tb.getBLayoutValueI32());
+  return std::nullopt;
+}
+
+static SmallVector<int64_t, 4> getLogicalTileExtentVec(Type ty,
+                                                       bool useValidShape) {
+  SmallVector<int64_t, 4> dims =
+      useValidShape ? getValidShapeVec(ty) : getShapeVec(ty);
+  if (!isTileLikeType(ty) || dims.size() != 2)
+    return dims;
+
+  Type elemTy = getElemTy(ty);
+  auto blayout = getTileBufBLayout(ty);
+  for (unsigned i = 0; i < dims.size(); ++i)
+    dims[i] = getLogicalTileDim(dims[i], elemTy, blayout, i);
+  return dims;
 }
 
 static int64_t getConstantIndexOrDynamic(Value value) {
@@ -3180,6 +3653,8 @@ static LogicalResult verifyMGatherMScatterMemOperand(Operation *op,
 
 static bool hasCompatibleKnownExtent(int64_t lhs, int64_t rhs);
 static bool isKnownUnitExtent(int64_t value);
+static bool isKnownZeroOrUnitExtent(int64_t value);
+static bool hasCompatibleKnownExtentOrZero(int64_t lhs, int64_t rhs);
 
 static LogicalResult verifyMGatherMScatterTileShape(Operation *op, Type dataTy,
                                                     Type idxTy,
@@ -3202,20 +3677,20 @@ static LogicalResult verifyMGatherMScatterTileShape(Operation *op, Type dataTy,
       static_cast<int32_t>(pto::BLayout::ColMajor);
 
   const bool rowCoalesce1xR =
-      idxRowMajor && isKnownUnitExtent(idxValid[0]) &&
+      idxRowMajor && isKnownZeroOrUnitExtent(idxValid[0]) &&
       hasCompatibleKnownExtent(idxValid[1], dataValid[0]);
   const bool rowCoalesceRx1 =
       idxColMajor && hasCompatibleKnownExtent(idxValid[0], dataValid[0]) &&
-      isKnownUnitExtent(idxValid[1]);
+      isKnownZeroOrUnitExtent(idxValid[1]);
   const bool elemCoalesce =
       hasCompatibleKnownExtent(idxValid[0], dataValid[0]) &&
       hasCompatibleKnownExtent(idxValid[1], dataValid[1]);
 
   if (!(rowCoalesce1xR || rowCoalesceRx1 || elemCoalesce))
     return op->emitOpError()
-           << "expects idx valid_shape to be [1, " << dataName
+           << "expects idx valid_shape to be [0|1, " << dataName
            << ".valid_row], [" << dataName
-           << ".valid_row, 1], or match " << dataName << " valid_shape";
+           << ".valid_row, 0|1], or match " << dataName << " valid_shape";
 
   return success();
 }
@@ -3242,19 +3717,57 @@ static LogicalResult verifyMGatherMScatterIdxTile(Operation *op, Type ty,
   return success();
 }
 
-static LogicalResult verifyTileBufCommon(Operation *op, Type ty, StringRef name) {
+static bool isA5TLoadStoreTransferElemType(Type ty) {
+  return ty.isInteger(8) || ty.isInteger(16) || ty.isInteger(32) ||
+         ty.isInteger(64) || ty.isF16() || ty.isBF16() || ty.isF32() ||
+         isPTOLowPrecisionType(ty);
+}
+
+static bool isA5AccStorePreQuantDstType(Type srcElem, Type dstElem) {
+  if (srcElem.isInteger(32))
+    return dstElem.isInteger(8) || dstElem.isF16() || dstElem.isBF16();
+  if (!srcElem.isF32())
+    return false;
+  return dstElem.isInteger(8) || dstElem.isF16() || dstElem.isBF16() ||
+         dstElem.isF32() || isPTOHiFloat8Type(dstElem) ||
+         dstElem.isFloat8E4M3() || dstElem.isFloat8E4M3FN() ||
+         dstElem.isFloat8E4M3FNUZ() || dstElem.isFloat8E4M3B11FNUZ();
+}
+
+static bool isA5LowPrecisionTCvtPair(Type srcElem, Type dstElem) {
+  if (srcElem.isF32())
+    return isPTOFloat8Type(dstElem) || isPTOHiFloat8Type(dstElem);
+  if (srcElem.isF16())
+    return isPTOHiFloat8Type(dstElem);
+  if (srcElem.isBF16())
+    return isPTOFloat4PackedType(dstElem);
+  if (isPTOFloat4PackedType(srcElem))
+    return dstElem.isBF16();
+  if (isPTOFloat8Type(srcElem) || isPTOHiFloat8Type(srcElem))
+    return dstElem.isF32();
+  return false;
+}
+
+static bool isA5SupportedTCvtPair(Type srcElem, Type dstElem) {
+  if (isPTOLowPrecisionType(srcElem) || isPTOLowPrecisionType(dstElem))
+    return isA5LowPrecisionTCvtPair(srcElem, dstElem);
+  return true;
+}
+
+static LogicalResult verifyTileBufCommon(Operation *op, Type ty, StringRef name,
+                                         bool allowLowPrecision) {
   auto tb = dyn_cast<pto::TileBufType>(ty);
   if (tb) {
     if (tb.getRank() != 2)
       return op->emitOpError() << "expects " << name << " to be a rank-2 tile_buf";
     Type elemTy = tb.getElementType();
-    if (isPTOLowPrecisionType(elemTy))
+    if (!allowLowPrecision && isPTOLowPrecisionType(elemTy))
       return op->emitOpError() << name << ": dtype " << elemTy
                                << " is not supported by this op yet";
   } else if (auto mr = dyn_cast<MemRefType>(ty)) {
     if (mr.getRank() != 2)
       return op->emitOpError() << "expects " << name << " to be a rank-2 memref";
-    if (isPTOLowPrecisionType(mr.getElementType()))
+    if (!allowLowPrecision && isPTOLowPrecisionType(mr.getElementType()))
       return op->emitOpError() << name << ": dtype " << mr.getElementType()
                                << " is not supported by this op yet";
   } else {
@@ -3301,6 +3814,33 @@ static LogicalResult verifyTileBufSameValidShape(Operation *op, Type lhs, Type r
   if (lhsValid.size() != rhsValid.size())
     return op->emitOpError() << "expects " << lhsName << " and " << rhsName
                              << " to have the same valid_shape";
+  return success();
+}
+
+static LogicalResult verifyTileBufSameLogicalExtent(Operation *op, Type lhs,
+                                                    Type rhs, StringRef lhsName,
+                                                    StringRef rhsName,
+                                                    bool compareValidShape) {
+  if (!isTileLikeType(lhs) || !isTileLikeType(rhs))
+    return success();
+
+  auto lhsExtent = getLogicalTileExtentVec(lhs, compareValidShape);
+  auto rhsExtent = getLogicalTileExtentVec(rhs, compareValidShape);
+  auto emitMismatch = [&]() -> LogicalResult {
+    if (compareValidShape)
+      return op->emitOpError() << "expects " << lhsName << " and " << rhsName
+                               << " to have the same valid_shape";
+    return op->emitOpError() << "expects " << lhsName << " and " << rhsName
+                             << " to have compatible shapes";
+  };
+  if (lhsExtent.size() != rhsExtent.size())
+    return emitMismatch();
+
+  for (size_t i = 0, e = lhsExtent.size(); i < e; ++i) {
+    if (lhsExtent[i] != ShapedType::kDynamic &&
+        rhsExtent[i] != ShapedType::kDynamic && lhsExtent[i] != rhsExtent[i])
+      return emitMismatch();
+  }
   return success();
 }
 
@@ -3371,6 +3911,27 @@ static LogicalResult verifyPartialValidPattern(Operation *op, Type src0Ty,
   if (!equalsKnown(src0Valid, dstValid) && !equalsKnown(src1Valid, dstValid))
     return op->emitOpError(
         "expects at least one of src0/src1 valid_shape to match dst valid_shape");
+  return success();
+}
+
+static LogicalResult verifyPartialValidPatternLoose(Operation *op, Type src0Ty,
+                                                    Type src1Ty, Type dstTy) {
+  auto src0Valid = getValidShapeVec(src0Ty);
+  auto src1Valid = getValidShapeVec(src1Ty);
+  auto dstValid = getValidShapeVec(dstTy);
+  if (src0Valid.size() != 2 || src1Valid.size() != 2 || dstValid.size() != 2)
+    return op->emitOpError("expects src0, src1, and dst to have rank-2 valid_shape");
+
+  auto lessEqualKnown = [](int64_t lhs, int64_t rhs) {
+    return lhs == ShapedType::kDynamic || rhs == ShapedType::kDynamic || lhs <= rhs;
+  };
+
+  for (unsigned i = 0; i < 2; ++i) {
+    if (!lessEqualKnown(src0Valid[i], dstValid[i]) ||
+        !lessEqualKnown(src1Valid[i], dstValid[i]))
+      return op->emitOpError(
+          "expects src0/src1 valid_shape to be less than or equal to dst valid_shape");
+  }
   return success();
 }
 
@@ -3456,19 +4017,20 @@ verifyNumericScalarTileOpCommon(Operation *op, Type srcTy, Type dstTy,
 
 static FailureOr<Type>
 verifyShiftLikeBinaryTileOpCommon(Operation *op, Type src0Ty, Type src1Ty,
-                                  Type dstTy) {
+                                   Type dstTy) {
   if (failed(verifyTileBufCommon(op, src0Ty, "src0")) ||
       failed(verifyTileBufCommon(op, src1Ty, "src1")) ||
       failed(verifyTileBufCommon(op, dstTy, "dst")))
     return failure();
   Type e0 = getElemTy(src0Ty);
   Type e1 = getElemTy(src1Ty);
-  if (!e0 || !e1) {
+  Type ed = getElemTy(dstTy);
+  if (!e0 || !e1 || !ed) {
     op->emitOpError("failed to get element type for operands");
     return failure();
   }
-  if (e0 != e1) {
-    op->emitOpError("expects src0 and src1 to have the same element type");
+  if (e0 != e1 || e0 != ed) {
+    op->emitOpError("expects src0, src1, and dst to have the same element type");
     return failure();
   }
   if (!isRowMajorTileBuf(src0Ty) || !isRowMajorTileBuf(src1Ty) ||
@@ -3620,7 +4182,7 @@ static LogicalResult verifyTColArgReductionOpCommon(Operation *op, Type srcTy,
                                            /*requireNonZeroSrc=*/true)))
     return failure();
   Type srcElemTy = getElemTy(srcTy);
-  unsigned srcElemBits = srcElemTy ? srcElemTy.getIntOrFloatBitWidth() : 0;
+  unsigned srcElemBits = srcElemTy ? getPTOStorageElemBitWidth(srcElemTy) : 0;
   if (!(mlir::isa<IntegerType, FloatType>(srcElemTy) &&
         (srcElemBits == 8 || srcElemBits == 16 || srcElemBits == 32)))
     return op->emitOpError(
@@ -3639,6 +4201,15 @@ static bool isKnownUnitExtent(int64_t value) {
   return value == ShapedType::kDynamic || value == 1;
 }
 
+static bool isKnownZeroOrUnitExtent(int64_t value) {
+  return value == ShapedType::kDynamic || value == 0 || value == 1;
+}
+
+static bool hasCompatibleKnownExtentOrZero(int64_t lhs, int64_t rhs) {
+  return lhs == ShapedType::kDynamic || rhs == ShapedType::kDynamic ||
+         lhs == 0 || lhs == rhs;
+}
+
 static LogicalResult verifyVecTileStorage(Operation *op, Type ty, StringRef name) {
   if (failed(verifyTileBufCommon(op, ty, name)))
     return failure();
@@ -3647,7 +4218,6 @@ static LogicalResult verifyVecTileStorage(Operation *op, Type ty, StringRef name
     return op->emitOpError() << "expects " << name << " to be in the vec address space";
   return success();
 }
-
 static LogicalResult verifyVecTileCommonA2A3(Operation *op, Type ty,
                                              StringRef name) {
   if (failed(verifyTileBufCommon(op, ty, name)))
@@ -3743,10 +4313,10 @@ static LogicalResult verifyMatTileOperandsA2A3(Operation *op, Type lhsTy,
     int64_t m = lhsValid[0];
     int64_t k = lhsValid[1];
     int64_t n = rhsValid[1];
-    if ((m != ShapedType::kDynamic && (m < 1 || m > 4095)) ||
-        (k != ShapedType::kDynamic && (k < 1 || k > 4095)) ||
-        (n != ShapedType::kDynamic && (n < 1 || n > 4095)))
-      return op->emitOpError("expects m, k, and n valid sizes to be in [1, 4095]");
+    if ((m != ShapedType::kDynamic && (m < 0 || m > 4095)) ||
+        (k != ShapedType::kDynamic && (k < 0 || k > 4095)) ||
+        (n != ShapedType::kDynamic && (n < 0 || n > 4095)))
+      return op->emitOpError("expects m, k, and n valid sizes to be in [0, 4095]");
   }
   return success();
 }
@@ -3841,6 +4411,81 @@ static LogicalResult verifyGemvTileOperands(Operation *op, Type lhsTy, Type rhsT
     return verifyGemvTileOperandsA5(op, lhsTy, rhsTy, dstTy);
   }
   return failure();
+}
+
+static LogicalResult verifyA5MxGemvTileOperands(Operation *op, Type lhsTy,
+                                                Type rhsTy, Type dstTy) {
+  if (failed(verifyTileBufCommon(op, lhsTy, "lhs", /*allowLowPrecision=*/true)) ||
+      failed(verifyTileBufCommon(op, rhsTy, "rhs", /*allowLowPrecision=*/true)) ||
+      failed(verifyAccTileCommon(op, dstTy, "dst")))
+    return failure();
+
+  auto lhsSpace = getPTOMemorySpaceEnum(lhsTy);
+  auto rhsSpace = getPTOMemorySpaceEnum(rhsTy);
+  auto dstSpace = getPTOMemorySpaceEnum(dstTy);
+  if (!lhsSpace || !rhsSpace || !dstSpace)
+    return op->emitOpError("expects lhs, rhs, and dst to have explicit address spaces");
+  if (*lhsSpace != pto::AddressSpace::LEFT || *rhsSpace != pto::AddressSpace::RIGHT ||
+      *dstSpace != pto::AddressSpace::ACC)
+    return op->emitOpError(
+        "expects lhs, rhs, and dst to use the left, right, and acc address spaces");
+
+  auto lhsShape = getMatmulLogicalShapeVec(lhsTy);
+  auto rhsShape = getMatmulLogicalShapeVec(rhsTy);
+  auto dstShape = getMatmulLogicalShapeVec(dstTy);
+  if ((lhsShape[0] != dstShape[0] || rhsShape[1] != dstShape[1] ||
+       lhsShape[1] != rhsShape[0]))
+    return op->emitOpError(
+        "expects static matmul tile shapes lhs[M,K], rhs[K,N], and dst[M,N]");
+
+  auto lhsValid = getValidShapeVec(lhsTy);
+  auto rhsValid = getValidShapeVec(rhsTy);
+  auto dstValid = getValidShapeVec(dstTy);
+  if (lhsValid.size() == 2 && rhsValid.size() == 2) {
+    int64_t m = lhsValid[0];
+    int64_t k = lhsValid[1];
+    int64_t n = rhsValid[1];
+    if ((m != ShapedType::kDynamic && (m < 1 || m > 4095)) ||
+        (k != ShapedType::kDynamic && (k < 1 || k > 4095)) ||
+        (n != ShapedType::kDynamic && (n < 1 || n > 4095)))
+      return op->emitOpError("expects m, k, and n valid sizes to be in [1, 4095]");
+  }
+
+  if (lhsValid[0] != ShapedType::kDynamic && lhsValid[0] != 1)
+    return op->emitOpError("expects lhs valid_shape[0] to be 1 for tgemv");
+  if (dstValid[0] != ShapedType::kDynamic && dstValid[0] != 1)
+    return op->emitOpError("expects dst valid_shape[0] to be 1 for tgemv");
+  if (lhsValid[1] != ShapedType::kDynamic && rhsValid[0] != ShapedType::kDynamic &&
+      lhsValid[1] != rhsValid[0])
+    return op->emitOpError()
+           << "expects lhs valid_shape[1] to equal rhs valid_shape[0], but got "
+           << lhsValid[1] << " vs " << rhsValid[0];
+  if (rhsValid[1] != ShapedType::kDynamic && dstValid[1] != ShapedType::kDynamic &&
+      rhsValid[1] != dstValid[1])
+    return op->emitOpError()
+           << "expects rhs valid_shape[1] to equal dst valid_shape[1], but got "
+           << rhsValid[1] << " vs " << dstValid[1];
+
+  auto lhsTb = dyn_cast<pto::TileBufType>(lhsTy);
+  auto rhsTb = dyn_cast<pto::TileBufType>(rhsTy);
+  auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
+  if (!lhsTb || !rhsTb || !dstTb)
+    return success();
+
+  if (lhsTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::ColMajor))
+    return op->emitOpError("expects lhs to use the col_major blayout on A5");
+  if (rhsTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor))
+    return op->emitOpError("expects rhs to use the row_major blayout on A5");
+  if (dstTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::ColMajor))
+    return op->emitOpError("expects dst to use the col_major blayout on A5");
+
+  if (lhsTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::RowMajor))
+    return op->emitOpError("expects lhs to use the row_major slayout on A5");
+  if (rhsTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::ColMajor))
+    return op->emitOpError("expects rhs to use the col_major slayout on A5");
+  if (dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::RowMajor))
+    return op->emitOpError("expects dst to use the row_major slayout on A5");
+  return success();
 }
 
 static LogicalResult verifyMatBiasTileA2A3(Operation *op, Type biasTy, Type dstTy,
@@ -3948,7 +4593,7 @@ LogicalResult pto::TAddSOp::verify() {
       "expects A2/A3 tadds element type to be i32/i16/f16/f32",
       "expects A5 tadds element type to be i32/i16/i8/f16/bf16/f32",
       /*requireValidRowsEqualOnA2A3=*/true,
-      /*requireValidRowsEqualOnA5=*/false);
+      /*requireValidRowsEqualOnA5=*/true);
 }
 
 LogicalResult pto::TAxpyOp::verify() {
@@ -4844,15 +5489,28 @@ llvm::LogicalResult mlir::pto::TCvtOp::verify() {
     return success();
   Type srcTy = getSrc().getType();
   Type dstTy = getDst().getType();
-  if (failed(verifyTileBufCommon(*this, srcTy, "src")) ||
-      failed(verifyTileBufCommon(*this, dstTy, "dst")))
+  if (failed(verifyTileBufCommon(*this, srcTy, "src", /*allowLowPrecision=*/true)) ||
+      failed(verifyTileBufCommon(*this, dstTy, "dst", /*allowLowPrecision=*/true)))
     return failure();
-  if (getShapeVec(srcTy) != getShapeVec(dstTy))
-    return emitOpError("expects src and dst to have compatible shapes");
-  if (failed(verifyTileBufSameValidShape(*this, srcTy, dstTy, "src", "dst")))
+  if (failed(verifyTileBufSameLogicalExtent(*this, srcTy, dstTy, "src", "dst",
+                                            /*compareValidShape=*/false)))
     return failure();
-
-  return mlir::success();
+  if (failed(verifyTileBufSameLogicalExtent(*this, srcTy, dstTy, "src", "dst",
+                                            /*compareValidShape=*/true)))
+    return failure();
+  Type srcElem = getElemTy(srcTy);
+  Type dstElem = getElemTy(dstTy);
+  auto verifyA2A3 = [&]() -> LogicalResult {
+    if (isPTOLowPrecisionType(srcElem) || isPTOLowPrecisionType(dstElem))
+      return emitOpError("expects A2/A3 tcvt low-precision element types to be unsupported");
+    return success();
+  };
+  auto verifyA5 = [&]() -> LogicalResult {
+    if (!isA5SupportedTCvtPair(srcElem, dstElem))
+      return emitOpError("expects A5 tcvt low-precision type pairs to match PTO-ISA support");
+    return success();
+  };
+  return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
 llvm::LogicalResult mlir::pto::TRandomOp::verify() {
@@ -5334,7 +5992,9 @@ static bool isA5Fp8LikeType(Type ty) {
 }
 
 static bool isA5MxInputType(Type ty) {
-  return isA5Fp8LikeType(ty);
+  if (auto ft = dyn_cast<FloatType>(ty))
+    return ft.isFloat8E4M3FN() || ft.isFloat8E5M2();
+  return false;
 }
 
 static LogicalResult verifyA5MxTypeTriple(Operation *op, Type lhsTy, Type rhsTy,
@@ -5344,10 +6004,12 @@ static LogicalResult verifyA5MxTypeTriple(Operation *op, Type lhsTy, Type rhsTy,
   Type rhsElem = getElemTy(rhsTy);
   Type dstElem = getElemTy(dstTy);
 
-  if (!isA5MxInputType(lhsElem) || !isA5MxInputType(rhsElem))
-    return op->emitOpError()
-           << "expects A5 mx operands " << lhsName << " and " << rhsName
-           << " to use fp8 element types";
+  if (!isA5MxInputType(lhsElem))
+    return op->emitOpError() << lhsName << ": dtype " << lhsElem
+                             << " is not supported by this op yet";
+  if (!isA5MxInputType(rhsElem))
+    return op->emitOpError() << rhsName << ": dtype " << rhsElem
+                             << " is not supported by this op yet";
 
   if (!dstElem.isF32())
     return op->emitOpError()
@@ -5552,11 +6214,8 @@ static mlir::LogicalResult verifyTFillPadLike(Operation *op, Type srcTy, Type ds
   auto dstElem = getElemTy(dstTy);
 
   auto getElemBytes = [](mlir::Type t) -> int64_t {
-    if (auto it = mlir::dyn_cast<mlir::IntegerType>(t))
-      return it.getWidth() / 8;
-    if (auto ft = mlir::dyn_cast<mlir::FloatType>(t))
-      return ft.getWidth() / 8;
-    return -1;
+    unsigned elemBytes = getPTOStorageElemByteSize(t);
+    return elemBytes == 0 ? -1 : static_cast<int64_t>(elemBytes);
   };
 
   int64_t srcB = getElemBytes(srcElem);
@@ -5679,8 +6338,10 @@ llvm::LogicalResult mlir::pto::TGatherOp::verify() {
     if (!srcSpace || !dstSpace || *srcSpace != pto::AddressSpace::VEC ||
         *dstSpace != pto::AddressSpace::VEC)
       return emitOpError("expects src and dst to be in the vec address space");
-    unsigned srcElemBytes = srcElem.getIntOrFloatBitWidth() / 8;
-    unsigned dstElemBytes = dstElem.getIntOrFloatBitWidth() / 8;
+    unsigned srcElemBytes = getPTOStorageElemByteSize(srcElem);
+    unsigned dstElemBytes = getPTOStorageElemByteSize(dstElem);
+    if (srcElemBytes == 0 || dstElemBytes == 0)
+      return emitOpError("failed to get element size for src/dst");
     if (srcElemBytes != dstElemBytes)
       return emitOpError("expects src and dst element sizes to match");
 
@@ -5873,13 +6534,10 @@ mlir::LogicalResult mlir::pto::TGatherBOp::verify() {
   };
 
   auto getElemBytes = [](Type ty) -> std::optional<unsigned> {
-    if (ty.isBF16())
-      return 2;
-    if (auto it = mlir::dyn_cast<IntegerType>(ty))
-      return it.getWidth() / 8;
-    if (auto ft = mlir::dyn_cast<FloatType>(ty))
-      return ft.getWidth() / 8;
-    return std::nullopt;
+    unsigned elemBytes = getPTOStorageElemByteSize(ty);
+    if (elemBytes == 0)
+      return std::nullopt;
+    return elemBytes;
   };
 
   auto verifyA2A3 = [&]() -> LogicalResult {
@@ -5923,7 +6581,7 @@ mlir::LogicalResult mlir::pto::TLogOp::verify() {
   auto elemTy = getElemTy(srcTy);
   if (!(elemTy.isF16() || elemTy.isF32()))
     return emitOpError() << "expects element type to be f16 or f32";
-  return mlir::success();
+  return success();
 }
 
 mlir::LogicalResult mlir::pto::TLReluOp::verify() {
@@ -5939,10 +6597,10 @@ mlir::LogicalResult mlir::pto::TLReluOp::verify() {
     auto valid = getValidShapeVec(srcTy);
     if (valid.size() != 2)
       return emitOpError("expects src to have rank-2 valid_shape");
-    if (valid[0] != ShapedType::kDynamic && valid[0] <= 0)
-      return emitOpError("expects src valid_shape[0] to be positive");
-    if (valid[1] != ShapedType::kDynamic && valid[1] <= 0)
-      return emitOpError("expects src valid_shape[1] to be positive");
+    if (valid[0] != ShapedType::kDynamic && valid[0] < 0)
+      return emitOpError("expects src valid_shape[0] to be non-negative");
+    if (valid[1] != ShapedType::kDynamic && valid[1] < 0)
+      return emitOpError("expects src valid_shape[1] to be non-negative");
     Type elemTy = getElemTy(srcTy);
     if (!(elemTy.isF16() || elemTy.isF32()))
       return emitOpError() << "expects A2/A3 tlrelu element type to be f16 or f32";
@@ -5998,7 +6656,7 @@ mlir::LogicalResult mlir::pto::TMinSOp::verify() {
       "expects A2/A3 tmins element type to be i32/i16/f16/f32",
       "expects A5 tmins element type to be i32/i16/i8/f16/bf16/f32",
       /*requireValidRowsEqualOnA2A3=*/true,
-      /*requireValidRowsEqualOnA5=*/false);
+      /*requireValidRowsEqualOnA5=*/true);
 }
 
 mlir::LogicalResult mlir::pto::TMovOp::verify() {
@@ -6260,14 +6918,19 @@ static LogicalResult verifyBufSyncOp(Operation *op, Attribute opTypeAttr,
   if (!opTypeAttr)
     return op->emitOpError("expects 'op_type' attribute");
 
-  auto opTypeOr = parseSyncOpTypeLikeAttr(opTypeAttr);
-  if (failed(opTypeOr)) {
-    auto diag =
-        op->emitOpError("expects 'op_type' to be pipe_event_type/sync_op_type, got ");
-    diag << opTypeAttr;
-    return failure();
+  pto::PIPE pipe = pto::PIPE::PIPE_UNASSIGNED;
+  if (auto pipeAttr = dyn_cast<PipeAttr>(opTypeAttr)) {
+    pipe = pipeAttr.getPipe();
+  } else {
+    auto opTypeOr = parseSyncOpTypeLikeAttr(opTypeAttr);
+    if (failed(opTypeOr)) {
+      auto diag = op->emitOpError(
+          "expects 'op_type' to be pipe_event_type/sync_op_type/pipe, got ");
+      diag << opTypeAttr;
+      return failure();
+    }
+    pipe = mapSyncOpTypeToPipe(*opTypeOr);
   }
-  pto::PIPE pipe = mapSyncOpTypeToPipe(*opTypeOr);
   if (!isConcreteSyncPipe(pipe))
     return op->emitOpError("expects 'op_type' to map to a concrete pipe, not PIPE_ALL/PIPE_UNASSIGNED");
 
@@ -6294,6 +6957,261 @@ LogicalResult GetBufOp::verify() {
 LogicalResult RlsBufOp::verify() {
   return verifyBufSyncOp(getOperation(), getOpTypeAttr(), getBufIdAttr(),
                          getModeAttr());
+}
+
+static ParseResult parseLegacyOrAttrMemBar(OpAsmParser &parser,
+                                           MemBarAttr &attr) {
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto kind = symbolizeMemBarKind(token);
+    if (!kind)
+      return parser.emitError(loc) << "invalid membar token: " << token;
+    attr = MemBarAttr::get(parser.getContext(), *kind);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto memBarAttr = dyn_cast<MemBarAttr>(parsed);
+  if (!memBarAttr)
+    return parser.emitError(loc, "expected membar attribute");
+  attr = memBarAttr;
+  return success();
+}
+
+static void printLegacyOrAttrMemBar(OpAsmPrinter &p, MemBarAttr kind,
+                                    ArrayRef<NamedAttribute> attrs) {
+  p << ' ' << '"' << stringifyMemBarKind(kind.getKind()) << '"';
+  p.printOptionalAttrDict(attrs, {"kind"});
+}
+
+static ParseResult parseLegacyOrAttrPipe(OpAsmParser &parser, PipeAttr &attr) {
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto pipe = symbolizePIPE(token);
+    if (!pipe)
+      return parser.emitError(loc) << "invalid pipe token: " << token;
+    attr = PipeAttr::get(parser.getContext(), *pipe);
+    return success();
+  }
+
+  if (succeeded(parser.parseOptionalLess())) {
+    StringRef keyword;
+    if (parser.parseKeyword(&keyword) || parser.parseGreater())
+      return failure();
+    auto pipe = symbolizePIPE(keyword);
+    if (!pipe)
+      return parser.emitError(loc) << "invalid pipe token: " << keyword;
+    attr = PipeAttr::get(parser.getContext(), *pipe);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto pipeAttr = dyn_cast<PipeAttr>(parsed);
+  if (!pipeAttr)
+    return parser.emitError(loc, "expected pipe attribute");
+  attr = pipeAttr;
+  return success();
+}
+
+static ParseResult parseLegacyOrAttrEvent(OpAsmParser &parser, EventAttr &attr) {
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto event = symbolizeEVENT(token);
+    if (!event)
+      return parser.emitError(loc) << "invalid event token: " << token;
+    attr = EventAttr::get(parser.getContext(), *event);
+    return success();
+  }
+
+  if (succeeded(parser.parseOptionalLess())) {
+    StringRef keyword;
+    if (parser.parseKeyword(&keyword) || parser.parseGreater())
+      return failure();
+    auto event = symbolizeEVENT(keyword);
+    if (!event)
+      return parser.emitError(loc) << "invalid event token: " << keyword;
+    attr = EventAttr::get(parser.getContext(), *event);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto eventAttr = dyn_cast<EventAttr>(parsed);
+  if (!eventAttr)
+    return parser.emitError(loc, "expected event attribute");
+  attr = eventAttr;
+  return success();
+}
+
+static ParseResult parseI32LiteralAttr(OpAsmParser &parser, IntegerAttr &attr) {
+  auto loc = parser.getCurrentLocation();
+  int64_t value = 0;
+  if (failed(parser.parseInteger(value)))
+    return failure();
+  if (value < std::numeric_limits<int32_t>::min() ||
+      value > std::numeric_limits<int32_t>::max())
+    return parser.emitError(loc, "expected 32-bit integer literal");
+  attr = IntegerAttr::get(IntegerType::get(parser.getContext(), 32), value);
+  return success();
+}
+
+static void printLegacySyncTriplet(OpAsmPrinter &p, PipeAttr srcPipe,
+                                   PipeAttr dstPipe, EventAttr eventId,
+                                   ArrayRef<NamedAttribute> attrs) {
+  p << "[<" << stringifyPIPE(srcPipe.getPipe()) << ">, <"
+    << stringifyPIPE(dstPipe.getPipe()) << ">, <"
+    << stringifyEVENT(eventId.getEvent()) << ">]";
+  p.printOptionalAttrDict(attrs, {"src_pipe", "dst_pipe", "event_id"});
+}
+
+ParseResult SetFlagOp::parse(OpAsmParser &parser, OperationState &result) {
+  PipeAttr srcPipe;
+  PipeAttr dstPipe;
+  EventAttr eventId;
+  if (parser.parseLSquare() || parseLegacyOrAttrPipe(parser, srcPipe) ||
+      parser.parseComma() || parseLegacyOrAttrPipe(parser, dstPipe) ||
+      parser.parseComma() || parseLegacyOrAttrEvent(parser, eventId) ||
+      parser.parseRSquare())
+    return failure();
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  result.addAttribute("src_pipe", srcPipe);
+  result.addAttribute("dst_pipe", dstPipe);
+  result.addAttribute("event_id", eventId);
+  return success();
+}
+
+void SetFlagOp::print(OpAsmPrinter &p) {
+  printLegacySyncTriplet(p, getSrcPipe(), getDstPipe(), getEventId(),
+                         (*this)->getAttrs());
+}
+
+ParseResult WaitFlagOp::parse(OpAsmParser &parser, OperationState &result) {
+  PipeAttr srcPipe;
+  PipeAttr dstPipe;
+  EventAttr eventId;
+  if (parser.parseLSquare() || parseLegacyOrAttrPipe(parser, srcPipe) ||
+      parser.parseComma() || parseLegacyOrAttrPipe(parser, dstPipe) ||
+      parser.parseComma() || parseLegacyOrAttrEvent(parser, eventId) ||
+      parser.parseRSquare())
+    return failure();
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  result.addAttribute("src_pipe", srcPipe);
+  result.addAttribute("dst_pipe", dstPipe);
+  result.addAttribute("event_id", eventId);
+  return success();
+}
+
+void WaitFlagOp::print(OpAsmPrinter &p) {
+  printLegacySyncTriplet(p, getSrcPipe(), getDstPipe(), getEventId(),
+                         (*this)->getAttrs());
+}
+
+ParseResult MemBarOp::parse(OpAsmParser &parser, OperationState &result) {
+  MemBarAttr kind;
+  if (parseLegacyOrAttrMemBar(parser, kind))
+    return failure();
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  result.addAttribute("kind", kind);
+  return success();
+}
+
+void MemBarOp::print(OpAsmPrinter &p) {
+  printLegacyOrAttrMemBar(p, getKind(), (*this)->getAttrs());
+}
+
+static ParseResult parseBufSyncOp(OpAsmParser &parser, OperationState &result) {
+  Attribute opTypeAttr;
+  IntegerAttr bufIdAttr;
+  IntegerAttr modeAttr;
+
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    if (auto pipe = symbolizePIPE(token))
+      opTypeAttr = PipeAttr::get(parser.getContext(), *pipe);
+    else if (auto opType = symbolizeSyncOpType(token))
+      opTypeAttr = PipeEventTypeAttr::get(parser.getContext(), *opType);
+    else
+      return parser.emitError(loc) << "invalid get_buf/rls_buf token: " << token;
+
+    if (parser.parseComma() || parseI32LiteralAttr(parser, bufIdAttr))
+      return failure();
+    if (succeeded(parser.parseOptionalComma())) {
+      if (parseI32LiteralAttr(parser, modeAttr))
+        return failure();
+    } else {
+      modeAttr = IntegerAttr::get(IntegerType::get(parser.getContext(), 32), 0);
+    }
+  } else if (succeeded(parser.parseOptionalLSquare())) {
+    if (parser.parseAttribute(opTypeAttr) || parser.parseComma() ||
+        parseI32LiteralAttr(parser, bufIdAttr))
+      return failure();
+    if (succeeded(parser.parseOptionalComma())) {
+      if (parseI32LiteralAttr(parser, modeAttr))
+        return failure();
+    } else {
+      modeAttr = IntegerAttr::get(IntegerType::get(parser.getContext(), 32), 0);
+    }
+    if (parser.parseRSquare())
+      return failure();
+  } else {
+    return parser.emitError(loc, "expected string pipe/op_type or '['");
+  }
+
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  result.addAttribute("op_type", opTypeAttr);
+  result.addAttribute("buf_id", bufIdAttr);
+  result.addAttribute("mode", modeAttr);
+  return success();
+}
+
+static void printBufSyncOp(OpAsmPrinter &p, Attribute opTypeAttr,
+                           IntegerAttr bufIdAttr, IntegerAttr modeAttr,
+                           ArrayRef<NamedAttribute> attrs) {
+  if (auto pipeAttr = dyn_cast<PipeAttr>(opTypeAttr)) {
+    p << " \"" << stringifyPIPE(pipeAttr.getPipe()) << "\", "
+      << bufIdAttr.getInt() << ", " << modeAttr.getInt();
+  } else if (auto pipeEventType = dyn_cast<PipeEventTypeAttr>(opTypeAttr)) {
+    p << "[" << opTypeAttr << ", " << bufIdAttr.getInt() << ", "
+      << modeAttr.getInt() << "]";
+  } else if (auto syncOpType = dyn_cast<SyncOpTypeAttr>(opTypeAttr)) {
+    p << "[" << opTypeAttr << ", " << bufIdAttr.getInt() << ", "
+      << modeAttr.getInt() << "]";
+  } else {
+    p << "[" << opTypeAttr << ", " << bufIdAttr.getInt() << ", "
+      << modeAttr.getInt() << "]";
+  }
+  p.printOptionalAttrDict(attrs, {"op_type", "buf_id", "mode"});
+}
+
+ParseResult GetBufOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseBufSyncOp(parser, result);
+}
+
+void GetBufOp::print(OpAsmPrinter &p) {
+  printBufSyncOp(p, getOpTypeAttr(), getBufIdAttr(), getModeAttr(),
+                 (*this)->getAttrs());
+}
+
+ParseResult RlsBufOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseBufSyncOp(parser, result);
+}
+
+void RlsBufOp::print(OpAsmPrinter &p) {
+  printBufSyncOp(p, getOpTypeAttr(), getBufIdAttr(), getModeAttr(),
+                 (*this)->getAttrs());
 }
 // ---- TOp ----
 LogicalResult TGemvBiasOp::verify() {
@@ -6322,11 +7240,11 @@ LogicalResult TGemvMxOp::verify() {
                                              getA().getType(), "a_scale", "a")) ||
         failed(verifyScaleTileMatchesOperand(*this, getBScale().getType(),
                                              getB().getType(), "b_scale", "b")) ||
-        failed(verifyGemvTileOperands(*this, getA().getType(), getB().getType(),
-                                      getDst().getType())))
+        failed(verifyA5MxGemvTileOperands(*this, getA().getType(), getB().getType(),
+                                          getDst().getType())))
       return failure();
     if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
-                                    getDst().getType(), "a", "b", "dst")))
+                                    getDst().getType(), "lhs", "rhs", "dst")))
       return failure();
     return verifyMatmulLike(*this, getA().getType(), getB().getType(),
                             getDst().getType());
@@ -6344,11 +7262,11 @@ LogicalResult TGemvMxAccOp::verify() {
                                              getA().getType(), "a_scale", "a")) ||
         failed(verifyScaleTileMatchesOperand(*this, getBScale().getType(),
                                              getB().getType(), "b_scale", "b")) ||
-        failed(verifyGemvTileOperands(*this, getA().getType(), getB().getType(),
-                                      getDst().getType())))
+        failed(verifyA5MxGemvTileOperands(*this, getA().getType(), getB().getType(),
+                                          getDst().getType())))
       return failure();
     if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
-                                    getDst().getType(), "a", "b", "dst")))
+                                    getDst().getType(), "lhs", "rhs", "dst")))
       return failure();
     if (failed(verifyTileBufSameElemType(*this, getCIn().getType(),
                                              getDst().getType(), "c_in", "dst")) ||
@@ -6376,7 +7294,7 @@ LogicalResult TGemvMxBiasOp::verify() {
                                  /*requireFloatBias=*/true)))
       return failure();
     if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
-                                    getDst().getType(), "a", "b", "dst")))
+                                    getDst().getType(), "lhs", "rhs", "dst")))
       return failure();
     auto biasShape = getShapeVec(getBias().getType());
     auto dstShape = getShapeVec(getDst().getType());
@@ -6423,7 +7341,7 @@ LogicalResult TMatmulMxOp::verify() {
     if (failed(verifyA2A3()))
       return failure();
     return verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
-                                getDst().getType(), "a", "b", "dst");
+                                getDst().getType(), "lhs", "rhs", "dst");
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
@@ -6440,7 +7358,7 @@ LogicalResult TMatmulMxAccOp::verify() {
     if (failed(verifyA2A3()))
       return failure();
     if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
-                                    getDst().getType(), "a", "b", "dst")))
+                                    getDst().getType(), "lhs", "rhs", "dst")))
       return failure();
     if (failed(verifyTileBufSameElemType(*this, getCIn().getType(),
                                              getDst().getType(), "c_in", "dst")) ||
@@ -6467,7 +7385,7 @@ LogicalResult TMatmulMxBiasOp::verify() {
     if (failed(verifyA2A3()))
       return failure();
     return verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
-                                getDst().getType(), "a", "b", "dst");
+                                getDst().getType(), "lhs", "rhs", "dst");
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
@@ -6515,6 +7433,18 @@ LogicalResult THistogramOp::verify() {
     auto it = dyn_cast<IntegerType>(ty);
     return it && it.getWidth() == width;
   };
+  int64_t byte = 1;
+  auto byteAttr = getByteAttr();
+  if (byteAttr)
+    byte = byteAttr.getInt();
+  if (auto legacyIsMSB = (*this)->getAttrOfType<BoolAttr>("isMSB")) {
+    int64_t legacyByte = legacyIsMSB.getValue() ? 1 : 0;
+    if (byteAttr && byte != legacyByte)
+      return emitOpError("does not allow conflicting 'byte' and legacy 'isMSB' attributes");
+    byte = legacyByte;
+  }
+  if (byte < 0 || byte > 3)
+    return emitOpError("expects byte to be in range [0, 3]");
 
   auto verifyA2A3 = [&]() -> LogicalResult {
     return emitOpError("thistogram is only supported on A5");
@@ -6550,13 +7480,11 @@ LogicalResult THistogramOp::verify() {
     if (dstTB.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
         dstTB.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::NoneBox))
       return emitOpError("expects dst to use row_major + none_box layout");
-    if (idxTB.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::ColMajor) ||
-        idxTB.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::NoneBox))
-      return emitOpError(
-          "expects idx to use DN layout (col_major + none_box)");
 
-    if (!isIntegerWidth(getElemTy(srcTy), 16))
-      return emitOpError("expects src element type to be ui16");
+    bool srcIsUi16 = isIntegerWidth(getElemTy(srcTy), 16);
+    bool srcIsUi32 = isIntegerWidth(getElemTy(srcTy), 32);
+    if (!srcIsUi16 && !srcIsUi32)
+      return emitOpError("expects src element type to be ui16 or ui32");
     if (!isIntegerWidth(getElemTy(idxTy), 8))
       return emitOpError("expects idx element type to be ui8");
     if (!isIntegerWidth(getElemTy(dstTy), 32))
@@ -6573,19 +7501,49 @@ LogicalResult THistogramOp::verify() {
       return emitOpError(
           "expects src, idx, and dst to have rank-2 shape and valid_shape");
 
-    if (!hasCompatibleKnownExtent(srcShape[0], idxShape[0]) ||
-        !hasCompatibleKnownExtent(srcValid[0], idxValid[0]))
-      return emitOpError("expects idx rows and valid rows to match src");
     if (!hasCompatibleKnownExtent(srcShape[0], dstShape[0]) ||
         !hasCompatibleKnownExtent(srcValid[0], dstValid[0]))
       return emitOpError("expects dst rows and valid rows to match src");
 
-    if (!isKnownUnitExtent(idxShape[1]) || !isKnownUnitExtent(idxValid[1]))
-      return emitOpError("expects idx to have exactly one column");
+    if (srcIsUi16) {
+      if (byte > 1)
+        return emitOpError("expects byte to be 0 or 1 when src element type is ui16");
+      if (idxTB.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::ColMajor) ||
+          idxTB.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::NoneBox))
+        return emitOpError(
+            "expects idx to use DN layout (col_major + none_box) when src element type is ui16");
+      if (!hasCompatibleKnownExtent(srcShape[0], idxShape[0]) ||
+          !hasCompatibleKnownExtent(srcValid[0], idxValid[0]))
+        return emitOpError("expects idx rows and valid rows to match src when src element type is ui16");
+      if (!isKnownUnitExtent(idxShape[1]) || !isKnownZeroOrUnitExtent(idxValid[1]))
+        return emitOpError("expects idx to have exactly one physical column and 0 or 1 valid column when src element type is ui16");
+    } else {
+      if (byte != 3) {
+        if (idxTB.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor) ||
+            idxTB.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::NoneBox))
+          return emitOpError(
+              "expects idx to use row_major + none_box layout when src element type is ui32 and byte is 0, 1, or 2");
+        if (!hasCompatibleKnownExtent(srcShape[1], idxShape[1]) ||
+            !hasCompatibleKnownExtent(srcValid[1], idxValid[1]))
+          return emitOpError(
+              "expects idx cols and valid cols to match src when src element type is ui32 and byte is 0, 1, or 2");
+
+        int64_t expectedIdxRows = 1;
+        if (byte == 1)
+          expectedIdxRows = 2;
+        else if (byte == 0)
+          expectedIdxRows = 3;
+        if (!hasCompatibleKnownExtent(idxShape[0], expectedIdxRows) ||
+            !hasCompatibleKnownExtentOrZero(idxValid[0], expectedIdxRows))
+          return emitOpError(
+              "expects idx rows to match the byte-selected filter depth and idx valid rows to be 0 or match it when src element type is ui32 and byte is 0, 1, or 2");
+      }
+    }
     if (dstShape[1] != ShapedType::kDynamic && dstShape[1] < 256)
       return emitOpError("expects dst shape[1] to be at least 256");
-    if (dstValid[1] != ShapedType::kDynamic && dstValid[1] < 256)
-      return emitOpError("expects dst valid_shape[1] to be at least 256");
+    if (dstValid[1] != ShapedType::kDynamic && dstValid[1] != 0 &&
+        dstValid[1] < 256)
+      return emitOpError("expects dst valid_shape[1] to be 0 or at least 256");
     return success();
   };
 
@@ -6956,7 +7914,7 @@ mlir::LogicalResult mlir::pto::TMulSOp::verify() {
       "expects A2/A3 tmuls element type to be i32/i16/f16/f32",
       "expects A5 tmuls element type to be i32/i16/i8/f16/bf16/f32",
       /*requireValidRowsEqualOnA2A3=*/true,
-      /*requireValidRowsEqualOnA5=*/false);
+      /*requireValidRowsEqualOnA5=*/true);
 }
 
 mlir::LogicalResult mlir::pto::TShlSOp::verify() {
@@ -7242,6 +8200,8 @@ mlir::LogicalResult mlir::pto::TPartAddOp::verify() {
     auto d = getShapeVec(dstTy);
     if (s0.size() != 2 || s1.size() != 2 || d.size() != 2)
       return emitOpError() << "expects src0/src1/dst to be rank-2 (tile-shaped)";
+    if (failed(verifyPartialValidPatternLoose(*this, src0Ty, src1Ty, dstTy)))
+      return failure();
     return mlir::success();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
@@ -7275,6 +8235,8 @@ mlir::LogicalResult mlir::pto::TPartMaxOp::verify() {
     if (!(e0.isInteger(32) || e0.isInteger(16) || e0.isInteger(8) ||
           e0.isF16() || e0.isBF16() || e0.isF32()))
       return emitOpError("expects A5 tpartmax element type to be i32/i16/i8/f16/bf16/f32");
+    if (failed(verifyPartialValidPatternLoose(*this, t0, t1, td)))
+      return failure();
     return mlir::success();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
@@ -7308,6 +8270,8 @@ mlir::LogicalResult mlir::pto::TPartMinOp::verify() {
     if (!(e0.isInteger(32) || e0.isInteger(16) || e0.isInteger(8) ||
           e0.isF16() || e0.isBF16() || e0.isF32()))
       return emitOpError("expects A5 tpartmin element type to be i32/i16/i8/f16/bf16/f32");
+    if (failed(verifyPartialValidPatternLoose(*this, t0, t1, td)))
+      return failure();
     return mlir::success();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
@@ -7434,6 +8398,8 @@ mlir::LogicalResult mlir::pto::TPartMulOp::verify() {
     if (s0.size() != 2 || s1.size() != 2 || d.size() != 2)
       return emitOpError()
              << "expects src0/src1/dst to be rank-2 (tile-shaped)";
+    if (failed(verifyPartialValidPatternLoose(*this, src0Ty, src1Ty, dstTy)))
+      return failure();
     return mlir::success();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
@@ -7704,8 +8670,8 @@ mlir::LogicalResult mlir::pto::TRemOp::verify() {
   auto tmpValid = getValidShapeVec(tmpTy);
   if (dstValid.size() != 2 || tmpValid.size() != 2)
     return emitOpError("expects tmp and dst to be rank-2 tiles");
-  if (tmpValid[0] != ShapedType::kDynamic && tmpValid[0] < 1)
-    return emitOpError("expects tmp to have at least 1 valid row");
+  if (tmpValid[0] != ShapedType::kDynamic && tmpValid[0] < 0)
+    return emitOpError("expects tmp to have non-negative valid rows");
   if (dstValid[1] != ShapedType::kDynamic && tmpValid[1] != ShapedType::kDynamic &&
       tmpValid[1] < dstValid[1])
     return emitOpError("expects tmp valid columns to cover dst valid columns");
@@ -7757,8 +8723,8 @@ mlir::LogicalResult mlir::pto::TRemSOp::verify() {
   auto tmpValid = getValidShapeVec(tt);
   if (dstValid.size() != 2 || tmpValid.size() != 2)
     return emitOpError("expects tmp and dst to be rank-2 tiles");
-  if (tmpValid[0] != ShapedType::kDynamic && tmpValid[0] < 1)
-    return emitOpError("expects tmp to have at least 1 valid row");
+  if (tmpValid[0] != ShapedType::kDynamic && tmpValid[0] < 0)
+    return emitOpError("expects tmp to have non-negative valid rows");
   if (dstValid[1] != ShapedType::kDynamic && tmpValid[1] != ShapedType::kDynamic &&
       tmpValid[1] < dstValid[1])
     return emitOpError("expects tmp valid columns to cover dst valid columns");
@@ -7939,6 +8905,22 @@ mlir::LogicalResult mlir::pto::SetValidShapeOp::verify() {
   return success();
 }
 
+mlir::LogicalResult mlir::pto::GetValidShapeOp::verify() {
+  if (auto srcTy = llvm::dyn_cast<TileBufType>(getSource().getType())) {
+    if (srcTy.getRank() != 2)
+      return emitOpError("expects rank-2 tile_buf source");
+    if (srcTy.getValidShape().size() != 2)
+      return emitOpError("expects source validShape to be rank-2");
+    return success();
+  }
+  if (auto srcTy = llvm::dyn_cast<MemRefType>(getSource().getType())) {
+    if (srcTy.getRank() != 2)
+      return emitOpError("expects rank-2 memref source after tile lowering");
+    return success();
+  }
+  return emitOpError("expects tile_buf source (or lowered memref source)");
+}
+
 
 mlir::LogicalResult mlir::pto::TReshapeOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
@@ -8051,6 +9033,11 @@ mlir::LogicalResult mlir::pto::TRowExpandOp::verify() {
     auto dstValid = getValidShapeVec(getDst());
     if (srcValid.size() != 2 || dstValid.size() != 2)
       return emitOpError("expects src and dst to have rank-2 valid_shape");
+    // Fully-empty dst valid region (0x0): dual-AIV no-op replay marker. The op
+    // writes no elements; accept and skip the non-empty constraints. One-sided
+    // empties still fall through. See pto-isa#143 for hardware Rv=0 no-op.
+    if (dstValid[0] == 0 && dstValid[1] == 0)
+      return success();
     if (srcValid[0] != ShapedType::kDynamic && dstValid[0] != ShapedType::kDynamic &&
         srcValid[0] != dstValid[0])
       return emitOpError("expects src and dst to have the same valid_shape[0]");
@@ -8347,6 +9334,8 @@ mlir::LogicalResult mlir::pto::TRowExpandDivOp::verify() {
             "expects A5 trowexpanddiv element type to be i8/i16/i32/f16/f32");
       return emitOpError("expects element type to be f16 or f32");
     }
+    if (getPrecisionType() == pto::DivPrecision::HighPrecision && !getTmp())
+      return emitOpError("expects tmp when precisionType is high_precision");
     return mlir::success();
   };
   auto verifyA2A3 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A3); };
@@ -8512,6 +9501,20 @@ static LogicalResult verifyTRowExpandReduceLikeOp(Operation *op, Type src0Ty,
   if (src0Valid.size() != 2 || src1Valid.size() != 2 || dstValid.size() != 2)
     return op->emitOpError("expects src0, src1, and dst to have rank-2 valid_shape");
 
+  // Operand-form invariant, enforced regardless of the valid region: A5 has no
+  // tmp form for these ops. Must run before the empty-marker early-accept below,
+  // otherwise a 0x0 dst would let an A5 tmp form slip through and lower to the
+  // A2/A3 4-operand TROWEXPAND* call.
+  if (hasTmp && targetArch == PTOArch::A5)
+    return op->emitOpError("expects A5 form to omit tmp");
+
+  // Fully-empty dst valid region (0x0): dual-AIV no-op replay marker. Element
+  // type/layout were already checked above; the op writes no elements, so accept
+  // and skip the non-empty broadcast/width constraints. One-sided empties still
+  // fall through. See pto-isa#143 for hardware Rv=0 no-op.
+  if (dstValid[0] == 0 && dstValid[1] == 0)
+    return success();
+
   if (dstValid[0] != ShapedType::kDynamic && dstValid[0] == 0)
     return op->emitOpError("expects dst valid_shape[0] to be non-zero");
   if (dstValid[1] != ShapedType::kDynamic && dstValid[1] == 0)
@@ -8581,8 +9584,7 @@ static LogicalResult verifyTRowExpandReduceLikeOp(Operation *op, Type src0Ty,
                                      targetArch == PTOArch::A3);
   };
 
-  if (hasTmp && targetArch == PTOArch::A5)
-    return op->emitOpError("expects A5 form to omit tmp");
+  // (A5 tmp-form invariant is checked earlier, before the empty-marker accept.)
 
   if (src0MatchesDst) {
     if (succeeded(checkFullAndBroadcast(src0Ty, src0Valid, "src0", src1Ty,
@@ -8735,6 +9737,8 @@ mlir::LogicalResult mlir::pto::TRsqrtOp::verify() {
   auto ft = mlir::dyn_cast<mlir::FloatType>(getElemTy(ts));
   if (!ft || (!ft.isF16() && !ft.isF32()))
     return emitOpError("expects element type to be f16 or f32");
+  if (getPrecisionType() == pto::RsqrtPrecision::HighPrecision && !getTmp())
+    return emitOpError("expects tmp when precisionType is high_precision");
   if (auto tmp = getTmp()) {
     Type tt = tmp.getType();
     if (failed(verifyVecTileCommon(*this, tt, "tmp")))
@@ -8803,8 +9807,8 @@ mlir::LogicalResult mlir::pto::TScatterOp::verify() {
     if (!isAllowedIndexElem(idxElem))
       return emitOpError("expects indexes element type to be i16/i32");
 
-    auto bwData = srcElem.getIntOrFloatBitWidth();
-    auto bwIdx  = idxElem.getIntOrFloatBitWidth();
+    auto bwData = getPTOStorageElemBitWidth(srcElem);
+    auto bwIdx  = getPTOStorageElemBitWidth(idxElem);
     if (bwData != 8 && bwData != 16 && bwData != 32)
       return emitOpError("unexpected src/dst element bitwidth");
 
@@ -8981,10 +9985,11 @@ mlir::LogicalResult mlir::pto::TSelSOp::verify() {
     FailureOr<Type> elemOr = verifyCommon();
     if (failed(elemOr))
       return failure();
+    Type tMask = getMask().getType();
     Type tSrc = getSrc().getType();
     Type tDst = getDst().getType();
-    if (!isRowMajorTileBuf(tSrc) || !isRowMajorTileBuf(tDst))
-      return emitOpError("expects src and dst to use row-major layout");
+    if (!isRowMajorTileBuf(tMask) || !isRowMajorTileBuf(tSrc) || !isRowMajorTileBuf(tDst))
+      return emitOpError("expects mask, src, and dst to use row-major layout");
     Type elem = *elemOr;
     bool ok = elem.isF16() || elem.isF32();
     if (auto it = mlir::dyn_cast<mlir::IntegerType>(elem))
@@ -9139,9 +10144,9 @@ mlir::LogicalResult mlir::pto::TStoreFPOp::verify() {
     if (srcValid.size() != 2)
       return emitOpError() << "expects src to have a rank-2 valid_shape";
     if (srcValid[1] != ShapedType::kDynamic &&
-        (srcValid[1] < 1 || srcValid[1] > 4095))
+        (srcValid[1] < 0 || srcValid[1] > 4095))
       return emitOpError()
-             << "expects src.valid_shape[1] to be in the range [1, 4095]";
+             << "expects src.valid_shape[1] to be in the range [0, 4095]";
     return mlir::success();
   };
   auto verifyA5 = [&]() -> LogicalResult {
@@ -9206,7 +10211,7 @@ mlir::LogicalResult mlir::pto::TSubSOp::verify() {
       "expects A2/A3 tsubs element type to be i32/i16/f16/f32",
       "expects A5 tsubs element type to be i32/i16/i8/f16/bf16/f32",
       /*requireValidRowsEqualOnA2A3=*/true,
-      /*requireValidRowsEqualOnA5=*/false);
+      /*requireValidRowsEqualOnA5=*/true);
 }
 
 
@@ -9242,7 +10247,9 @@ mlir::LogicalResult mlir::pto::TTransOp::verify() {
       if (srcTb.getBLayoutValueI32() != static_cast<int32_t>(pto::BLayout::RowMajor))
         return emitOpError() << "expects A2/A3 transpose src to use the row_major blayout";
     }
-    unsigned elemBytes = srcElem.getIntOrFloatBitWidth() / 8;
+    unsigned elemBytes = getPTOStorageElemByteSize(srcElem);
+    if (elemBytes == 0)
+      return emitOpError() << "failed to get transpose element size";
     if (elemBytes != 1 && elemBytes != 2 && elemBytes != 4)
       return emitOpError() << "expects transpose element size to be 1, 2, or 4 bytes";
     auto isAllowedWidthType = [&](Type ty) {
@@ -9269,7 +10276,9 @@ mlir::LogicalResult mlir::pto::TTransOp::verify() {
     Type dstElem = getElemTy(dstTy);
     if (!srcElem || !tmpElem || !dstElem || srcElem != dstElem || srcElem != tmpElem)
       return emitOpError() << "expects src, tmp, and dst to have the same element type";
-    unsigned elemBytes = srcElem.getIntOrFloatBitWidth() / 8;
+    unsigned elemBytes = getPTOStorageElemByteSize(srcElem);
+    if (elemBytes == 0)
+      return emitOpError() << "failed to get transpose element size";
     if (elemBytes != 1 && elemBytes != 2 && elemBytes != 4)
       return emitOpError() << "expects transpose element size to be 1, 2, or 4 bytes";
     auto isAllowedWidthType = [&](Type ty) {
@@ -9982,6 +10991,44 @@ void mlir::pto::SubViewOp::print(OpAsmPrinter &printer) {
   printer << " : " << getSource().getType() << " -> " << getResult().getType();
 }
 
+// The inferred result type derives valid_shape from `sizes` (or the explicit
+// valid operands). With the operand omitted the result type is authoritative for
+// the valid extent (any static value, including the v=0 no-op-replay marker or a
+// partial valid), so accept a static declared valid that differs from the
+// size-inferred one here; SubViewOp::verify() enforces the precise per-path rule
+// (operand clamping vs the [0, size] range). Only a dynamic declared valid that
+// disagrees with the inferred extent is incompatible -- it needs an explicit
+// operand to supply the runtime value. Every other difference (shape, element
+// type, address space, config) is still rejected as the default check would.
+bool SubViewOp::isCompatibleReturnTypes(TypeRange lhs, TypeRange rhs) {
+  if (lhs.size() != rhs.size())
+    return false;
+  for (auto [inferred, declared] : llvm::zip(lhs, rhs)) {
+    if (inferred == declared)
+      continue;
+    auto inferredTb = dyn_cast<TileBufType>(inferred);
+    auto declaredTb = dyn_cast<TileBufType>(declared);
+    if (!inferredTb || !declaredTb)
+      return false;
+    if (inferredTb.getShape() != declaredTb.getShape() ||
+        inferredTb.getElementType() != declaredTb.getElementType() ||
+        inferredTb.getMemorySpace() != declaredTb.getMemorySpace() ||
+        inferredTb.getConfigAttr() != declaredTb.getConfigAttr())
+      return false;
+    auto inferredValid = inferredTb.getValidShape();
+    auto declaredValid = declaredTb.getValidShape();
+    if (inferredValid.size() != declaredValid.size())
+      return false;
+    for (auto [inferredDim, declaredDim] : llvm::zip(inferredValid, declaredValid)) {
+      // Any static declared valid extent is accepted in place of the inferred
+      // one; only a dynamic declared valid that disagrees is incompatible.
+      if (inferredDim != declaredDim && declaredDim == ShapedType::kDynamic)
+        return false;
+    }
+  }
+  return true;
+}
+
 LogicalResult SubViewOp::inferReturnTypes(
     MLIRContext *context, std::optional<Location> location, ValueRange operands,
     DictionaryAttr attributes, OpaqueProperties properties, RegionRange regions,
@@ -10146,15 +11193,7 @@ static LogicalResult computeInnerShape(TileBufConfigAttr cfg, Type elemTy,
     return success();
   }
 
-  int64_t elemBytes = -1;
-  if (auto ft = mlir::dyn_cast<FloatType>(elemTy)) {
-    if (ft.isF16() || ft.isBF16()) elemBytes = 2;
-    else if (ft.isF32()) elemBytes = 4;
-    else if (ft.isF64()) elemBytes = 8;
-  } else if (auto it = mlir::dyn_cast<IntegerType>(elemTy)) {
-    int64_t bytes = it.getWidth() / 8;
-    elemBytes = bytes > 0 ? bytes : 1;
-  }
+  int64_t elemBytes = static_cast<int64_t>(getElemByteSize(elemTy));
   if (elemBytes <= 0) return failure();
 
   if (fr == 1024) {
@@ -10180,6 +11219,151 @@ static LogicalResult computeInnerShape(TileBufConfigAttr cfg, Type elemTy,
     }
   }
   return failure();
+}
+
+static LogicalResult
+computeExpectedTileBufMemrefStrides(TileBufType tileTy,
+                                    SmallVectorImpl<int64_t> &expectedStrides) {
+  if (tileTy.getRank() != 2)
+    return failure();
+
+  ArrayRef<int64_t> shape = tileTy.getShape();
+  if (shape.size() != 2)
+    return failure();
+  if (shape[0] == ShapedType::kDynamic || shape[1] == ShapedType::kDynamic)
+    return failure();
+
+  auto cfg = tileTy.getConfigAttr();
+  if (!cfg)
+    cfg = TileBufConfigAttr::getDefault(tileTy.getContext());
+
+  int64_t innerRows = 1, innerCols = 1;
+  bool boxed = false;
+  int32_t bl = 0, sl = 0;
+  if (failed(computeInnerShape(cfg, tileTy.getElementType(), innerRows, innerCols,
+                               boxed, bl, sl)))
+    return failure();
+
+  expectedStrides.clear();
+  if (!boxed) {
+    if (bl == 1) {
+      expectedStrides.push_back(1);
+      expectedStrides.push_back(shape[0]);
+    } else {
+      expectedStrides.push_back(shape[1]);
+      expectedStrides.push_back(1);
+    }
+    return success();
+  }
+
+  if (bl == 1) {
+    if (sl != 1)
+      return failure();
+    expectedStrides.push_back(innerCols);
+    expectedStrides.push_back(shape[0]);
+    return success();
+  }
+
+  expectedStrides.push_back(shape[1]);
+  expectedStrides.push_back(innerRows);
+  return success();
+}
+
+mlir::LogicalResult mlir::pto::SimdTileToMemrefOp::verify() {
+  auto memTy = dyn_cast<MemRefType>(getDst().getType());
+  if (!memTy)
+    return emitOpError("expects result to be memref");
+
+  Type srcTy = getSrc().getType();
+  if (auto tileTy = dyn_cast<TileBufType>(srcTy)) {
+    if (memTy.getElementType() != tileTy.getElementType())
+      return emitOpError(
+          "expects memref element type to match tile_buf element type");
+
+    if (memTy.getMemorySpace() != tileTy.getMemorySpace())
+      return emitOpError(
+          "expects memref memory space to match tile_buf memory space");
+
+    if (memTy.getRank() != tileTy.getRank())
+      return emitOpError("expects memref rank to match tile_buf rank");
+
+    ArrayRef<int64_t> tileShape = tileTy.getShape();
+    ArrayRef<int64_t> validShape = tileTy.getValidShape();
+    ArrayRef<int64_t> memShape = memTy.getShape();
+    if (tileShape.size() != memShape.size())
+      return emitOpError(
+          "expects memref shape rank to match tile_buf shape rank");
+
+    if (validShape.size() != memShape.size())
+      return emitOpError(
+          "expects tile_buf valid shape rank to match memref shape rank");
+
+    for (unsigned i = 0; i < validShape.size(); ++i) {
+      int64_t expect = validShape[i];
+      if (expect < 0) {
+        if (memShape[i] >= 0 && memShape[i] != tileShape[i]) {
+          return emitOpError()
+                 << "expects memref dim " << i
+                 << " to be dynamic or match physical tile dim " << tileShape[i]
+                 << " because tile_buf valid dim is ?";
+        }
+        continue;
+      }
+
+      if (memShape[i] != expect) {
+        return emitOpError() << "expects memref dim " << i
+                             << " to match tile_buf valid dim; got "
+                             << memShape[i] << ", expected " << expect;
+      }
+    }
+
+    SmallVector<int64_t, 4> expectedStrides;
+    if (failed(computeExpectedTileBufMemrefStrides(tileTy, expectedStrides)))
+      return emitOpError("cannot infer expected strides from tile_buf layout");
+
+    SmallVector<int64_t, 4> memStrides;
+    int64_t memOffset = ShapedType::kDynamic;
+    if (failed(getStridesAndOffset(memTy, memStrides, memOffset)))
+      return emitOpError("expects memref to use strided layout");
+    if (memOffset != 0)
+      return emitOpError("expects memref offset to be 0");
+    if (memStrides.size() != expectedStrides.size())
+      return emitOpError("expects memref stride rank to match tile_buf rank");
+    for (unsigned i = 0; i < expectedStrides.size(); ++i) {
+      if (memStrides[i] != expectedStrides[i]) {
+        return emitOpError()
+               << "expects memref strides to match tile_buf layout; got "
+               << memStrides[i] << " at dim " << i << ", expected "
+               << expectedStrides[i];
+      }
+    }
+    return success();
+  }
+
+  auto srcMemTy = dyn_cast<MemRefType>(srcTy);
+  if (!srcMemTy)
+    return emitOpError("expects src to be !pto.tile_buf or memref");
+
+  if (srcMemTy.getElementType() != memTy.getElementType())
+    return emitOpError("expects src/result memref element types to match");
+
+  if (srcMemTy.getMemorySpace() != memTy.getMemorySpace())
+    return emitOpError("expects src/result memref memory spaces to match");
+
+  if (srcMemTy.getRank() != memTy.getRank())
+    return emitOpError("expects src/result memref ranks to match");
+
+  ArrayRef<int64_t> srcShape = srcMemTy.getShape();
+  ArrayRef<int64_t> dstShape = memTy.getShape();
+  for (unsigned i = 0; i < srcShape.size(); ++i) {
+    if (srcShape[i] >= 0 && dstShape[i] >= 0 && srcShape[i] != dstShape[i]) {
+      return emitOpError()
+             << "expects compatible src/result memref shapes; dim " << i
+             << " mismatches (" << srcShape[i] << " vs " << dstShape[i] << ")";
+    }
+  }
+
+  return success();
 }
 
 mlir::LogicalResult mlir::pto::SubViewOp::verify() {
@@ -10219,14 +11403,14 @@ mlir::LogicalResult mlir::pto::SubViewOp::verify() {
   if (hasValidRow) {
     int64_t vRow = 0, vCol = 0;
     if (getConstIndex(getValidRow(), vRow)) {
-      if (vRow <= 0)
-        return emitOpError("valid_row must be positive when constant");
+      if (vRow < 0)
+        return emitOpError("valid_row must be non-negative when constant");
       if (vRow > sizeR)
         return emitOpError("valid_row must be <= subview row size");
     }
     if (getConstIndex(getValidCol(), vCol)) {
-      if (vCol <= 0)
-        return emitOpError("valid_col must be positive when constant");
+      if (vCol < 0)
+        return emitOpError("valid_col must be non-negative when constant");
       if (vCol > sizeC)
         return emitOpError("valid_col must be <= subview col size");
     }
@@ -10269,9 +11453,19 @@ mlir::LogicalResult mlir::pto::SubViewOp::verify() {
   auto dstValid = dstTy.getValidShape();
   if (dstValid.size() != 2)
     return emitOpError("expects result to have rank-2 valid_shape");
-  if (dstValid[0] != expectedVRow)
+  // With the valid operand omitted, the result type is authoritative for the
+  // valid extent: accept any static value in [0, size] (this subsumes both the
+  // full-size default and the v=0 no-op-replay empty marker). Lowering derives
+  // the bind_tile valid operand from this type. A dynamic result valid still
+  // requires an explicit operand to supply the runtime extent, so it stays
+  // rejected on this path.
+  bool rowInferred = !getValidRow() && dstValid[0] != ShapedType::kDynamic &&
+                     dstValid[0] >= 0 && dstValid[0] <= sizeR;
+  bool colInferred = !getValidCol() && dstValid[1] != ShapedType::kDynamic &&
+                     dstValid[1] >= 0 && dstValid[1] <= sizeC;
+  if (dstValid[0] != expectedVRow && !rowInferred)
     return emitOpError("expects result valid_shape[0] to match inferred/explicit valid_row");
-  if (dstValid[1] != expectedVCol)
+  if (dstValid[1] != expectedVCol && !colInferred)
     return emitOpError("expects result valid_shape[1] to match inferred/explicit valid_col");
 
   auto cfg = srcTy.getConfigAttr();
@@ -10494,6 +11688,12 @@ void TSetValOp::getEffects(
 void SetValidShapeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   PTO_ADD_WRITE(getSourceMutable());
+}
+
+// GET_VALIDSHAPE: read runtime valid row/col metadata from source tile.
+void GetValidShapeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  PTO_ADD_READ(getSourceMutable());
 }
 
 // Elementwise + reductions: mostly PIPE_V tilebuf ops
@@ -11117,6 +12317,7 @@ static ParseResult parseFrontendInitializePipeOp(OpAsmParser &parser,
   bool sawId = false;
   bool sawDirMask = false;
   bool sawSlotSize = false;
+  bool sawSlotNum = false;
   bool sawLocalSlotNum = false;
   bool sawNoSplit = false;
 
@@ -11155,6 +12356,15 @@ static ParseResult parseFrontendInitializePipeOp(OpAsmParser &parser,
                                 "slot_size", attrs))
         return failure();
       sawSlotSize = true;
+    } else if (keyword == "slot_num") {
+      if (sawSlotNum)
+        return parser.emitError(parser.getCurrentLocation(),
+                                "duplicate 'slot_num' clause");
+      IntegerAttr slotNumAttr;
+      if (parser.parseAttribute(slotNumAttr, parser.getBuilder().getI32Type(),
+                                "slot_num", attrs))
+        return failure();
+      sawSlotNum = true;
     } else if (keyword == "local_slot_num") {
       if (sawLocalSlotNum)
         return parser.emitError(parser.getCurrentLocation(),
@@ -11292,6 +12502,8 @@ static void printFrontendInitializePipeOp(InitOpT op, OpAsmPrinter &p) {
     printClause("id", op.getId());
   printClause("dir_mask", static_cast<int32_t>(op.getDirMask()));
   printClause("slot_size", op.getSlotSize());
+  if (auto slotNumAttr = op.getSlotNumAttr())
+    printClause("slot_num", slotNumAttr.getInt());
   if (auto localSlotNumAttr = op.getLocalSlotNumAttr())
     printClause("local_slot_num", localSlotNumAttr.getInt());
   if (auto noSplitAttr = op.getNosplitAttr())
@@ -11318,7 +12530,8 @@ static void printFrontendInitializePipeOp(InitOpT op, OpAsmPrinter &p) {
   p << ")";
   p.printOptionalAttrDict(
       op->getAttrs(),
-      /*elidedAttrs=*/{"id", "dir_mask", "slot_size", "local_slot_num",
+      /*elidedAttrs=*/{"id", "dir_mask", "slot_size", "slot_num",
+                       "local_slot_num",
                        "nosplit", "operandSegmentSizes"});
 }
 
@@ -11404,6 +12617,13 @@ static LogicalResult verifyFrontendInitCommon(InitOpT op,
     return op.emitOpError("expects 'dir_mask' to be 1, 2, or 3");
   if (op.getSlotSize() <= 0)
     return op.emitOpError("expects 'slot_size' to be greater than 0");
+  int32_t slotNum = dirMask == 3 ? 4 : 8;
+  if (auto slotNumAttr = op.getSlotNumAttr()) {
+    slotNum = slotNumAttr.getInt();
+    if (slotNum <= 0)
+      return op.emitOpError("expects 'slot_num' to be greater than 0");
+  }
+  PTOArch arch = getTargetArch(op.getOperation());
 
   bool hasGlobalSlotTensor = static_cast<bool>(op.getGmSlotTensor());
   bool hasC2vConsumerBuf = static_cast<bool>(op.getC2vConsumerBuf());
@@ -11417,7 +12637,7 @@ static LogicalResult verifyFrontendInitCommon(InitOpT op,
     if (op.getLocalSlotNumAttr())
       return op.emitOpError(
           "globaltensor pipe init does not use 'local_slot_num'");
-    if (getTargetArch(op.getOperation()) == PTOArch::A5) {
+    if (arch == PTOArch::A5) {
       return op.emitOpError(
           "globaltensor pipe entries are supported for a2/a3 l2g2l pipes");
     }
@@ -11436,14 +12656,16 @@ static LogicalResult verifyFrontendInitCommon(InitOpT op,
   }
 
   if (auto localSlotNumAttr = op.getLocalSlotNumAttr()) {
+    if (arch == PTOArch::A5)
+      return op.emitOpError(
+          "'local_slot_num' is only supported for a2/a3 frontend pipe lowering");
     int32_t localSlotNum = localSlotNumAttr.getInt();
     if (localSlotNum <= 0)
       return op.emitOpError("expects 'local_slot_num' to be greater than 0");
-    int32_t loweredSlotNum = dirMask == 3 ? 4 : 8;
-    if (localSlotNum > loweredSlotNum) {
+    if (localSlotNum > slotNum) {
       return op.emitOpError()
-             << "expects 'local_slot_num' to be less than or equal to "
-             << loweredSlotNum << " for dir_mask = " << static_cast<int>(dirMask);
+             << "expects 'local_slot_num' to be less than or equal to slot_num ("
+             << slotNum << ") for dir_mask = " << static_cast<int>(dirMask);
     }
   }
 
@@ -11720,8 +12942,8 @@ static LogicalResult verifyPipeShape(Operation *op, int8_t dirMask, int32_t slot
     return op->emitOpError("expects 'dir_mask' to be 1, 2, or 3");
   if (slotSize <= 0)
     return op->emitOpError("expects 'slot_size' to be greater than 0");
-  if (slotNum != 4 && slotNum != 8)
-    return op->emitOpError("expects 'slot_num' to be 4 or 8");
+  if (slotNum <= 0)
+    return op->emitOpError("expects 'slot_num' to be greater than 0");
   if (flagBase && *flagBase < 0)
     return op->emitOpError("expects 'flag_base' to be non-negative when present");
   if (flagBase) {
@@ -12001,6 +13223,131 @@ LogicalResult TTestOp::verify() {
   if (!cmpTy || cmpTy.getWidth() != 32)
     return emitOpError("expects cmp_value to be i32");
   return success();
+}
+
+static LogicalResult verifySyncAllGmWorkspace(Operation *op, Value workspace,
+                                              StringRef name) {
+  Type ty = workspace.getType();
+  if (!isa<MemRefType, pto::TensorViewType, pto::PartitionTensorViewType>(ty))
+    return op->emitOpError() << "expects " << name
+                             << " to be a GM memref/tensor_view/partition_view";
+
+  if (auto memTy = dyn_cast<MemRefType>(ty)) {
+    if (!memTy.hasRank())
+      return op->emitOpError() << "expects " << name << " to be ranked";
+    if (!isGmAddressSpaceAttr(memTy.getMemorySpace()))
+      return op->emitOpError() << "expects " << name
+                               << " to be in GM address space";
+  }
+
+  auto elemTy = dyn_cast<IntegerType>(getElemTy(ty));
+  if (!elemTy || elemTy.getWidth() != 32)
+    return op->emitOpError() << "expects " << name
+                             << " element type to be i32";
+
+  SmallVector<int64_t, 4> shape = getShapeVec(ty);
+  if (shape.empty())
+    return op->emitOpError() << "expects " << name << " to have rank >= 1";
+  for (int64_t dim : shape) {
+    if (dim != ShapedType::kDynamic && dim <= 0)
+      return op->emitOpError() << "expects " << name
+                               << " shape to be positive";
+  }
+  return success();
+}
+
+static LogicalResult verifySyncAllTileWorkspace(Operation *op, Value workspace,
+                                                StringRef name,
+                                                pto::AddressSpace expectedSpace) {
+  Type ty = workspace.getType();
+  if (!isa<pto::TileBufType, MemRefType>(ty))
+    return op->emitOpError() << "expects " << name
+                             << " to be tile_buf or memref type";
+
+  if (isa<pto::TileBufType>(ty) && failed(verifyTileBufCommon(op, ty, name)))
+    return failure();
+
+  auto as = getPTOMemorySpaceEnum(ty);
+  if (!as || *as != expectedSpace)
+    return op->emitOpError() << "expects " << name << " to be in "
+                             << (expectedSpace == pto::AddressSpace::VEC
+                                     ? "vec"
+                                     : "mat")
+                             << " address space";
+
+  Type elemTy = getElemTy(ty);
+  auto intTy = dyn_cast_or_null<IntegerType>(elemTy);
+  if (!intTy || intTy.getWidth() != 32)
+    return op->emitOpError() << "expects " << name
+                             << " element type to be i32";
+
+  auto shape = getShapeVec(ty);
+  if (shape.empty() || shape.size() > 2)
+    return op->emitOpError() << "expects " << name
+                             << " to be rank-1 or rank-2";
+  for (int64_t dim : shape) {
+    if (dim != ShapedType::kDynamic && dim <= 0)
+      return op->emitOpError() << "expects " << name
+                               << " shape to be positive";
+  }
+  return success();
+}
+
+LogicalResult SyncAllOp::verify() {
+  bool hasGm = static_cast<bool>(getGmWorkspace());
+  bool hasUb = static_cast<bool>(getUbWorkspace());
+  bool hasL1 = static_cast<bool>(getL1Workspace());
+  auto mode = getMode().getValue();
+  auto coreType = getCoreType().getValue();
+
+  if (mode == pto::SyncAllMode::Hard) {
+    if (hasGm || hasUb || hasL1 || getUsedCores())
+      return emitOpError(
+          "expects hard syncall to have no workspace operands or used_cores");
+    return success();
+  }
+
+  if (!hasGm)
+    return emitOpError("expects soft syncall to provide gm_workspace");
+  if (failed(verifySyncAllGmWorkspace(getOperation(), getGmWorkspace(),
+                                      "gm_workspace")))
+    return failure();
+
+  if (auto used = getUsedCores()) {
+    auto intTy = dyn_cast<IntegerType>(used.getType());
+    if (!intTy || intTy.getWidth() != 32)
+      return emitOpError("expects used_cores to be i32");
+  }
+
+  switch (coreType) {
+  case pto::SyncCoreType::AIVOnly:
+    if (!hasUb || hasL1)
+      return emitOpError("expects soft AIV-only syncall to use gm_workspace "
+                         "+ ub_workspace only");
+    return verifySyncAllTileWorkspace(getOperation(), getUbWorkspace(),
+                                      "ub_workspace",
+                                      pto::AddressSpace::VEC);
+  case pto::SyncCoreType::AICOnly:
+    if (hasUb || !hasL1)
+      return emitOpError("expects soft AIC-only syncall to use gm_workspace "
+                         "+ l1_workspace only");
+    return verifySyncAllTileWorkspace(getOperation(), getL1Workspace(),
+                                      "l1_workspace",
+                                      pto::AddressSpace::MAT);
+  case pto::SyncCoreType::Mix:
+    if (!hasUb || !hasL1)
+      return emitOpError("expects soft mixed syncall to use gm_workspace + "
+                         "ub_workspace + l1_workspace");
+    if (failed(verifySyncAllTileWorkspace(getOperation(), getUbWorkspace(),
+                                          "ub_workspace",
+                                          pto::AddressSpace::VEC)))
+      return failure();
+    return verifySyncAllTileWorkspace(getOperation(), getL1Workspace(),
+                                      "l1_workspace",
+                                      pto::AddressSpace::MAT);
+  }
+
+  llvm_unreachable("unhandled SyncCoreType");
 }
 
 LogicalResult TBroadcastOp::verify() {
@@ -12355,6 +13702,14 @@ void TPutOp::getEffects(
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
   addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPingMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPingMutable(), MemoryEffects::Write::get());
+  if (getPong()) {
+    auto pongRange = getPongMutable();
+    if (auto it = pongRange.begin(); it != pongRange.end()) {
+      addEffect(effects, &*it, MemoryEffects::Read::get());
+      addEffect(effects, &*it, MemoryEffects::Write::get());
+    }
+  }
 }
 
 void TGetOp::getEffects(
@@ -12363,6 +13718,14 @@ void TGetOp::getEffects(
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
   addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPingMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPingMutable(), MemoryEffects::Write::get());
+  if (getPong()) {
+    auto pongRange = getPongMutable();
+    if (auto it = pongRange.begin(); it != pongRange.end()) {
+      addEffect(effects, &*it, MemoryEffects::Read::get());
+      addEffect(effects, &*it, MemoryEffects::Write::get());
+    }
+  }
 }
 
 void TNotifyOp::getEffects(
@@ -12391,12 +13754,17 @@ void TBroadcastOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPingMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPingMutable(), MemoryEffects::Write::get());
   if (getPong()) {
     auto pongRange = getPongMutable();
-    if (auto it = pongRange.begin(); it != pongRange.end())
+    if (auto it = pongRange.begin(); it != pongRange.end()) {
+      addEffect(effects, &*it, MemoryEffects::Read::get());
       addEffect(effects, &*it, MemoryEffects::Write::get());
+    }
   }
+  for (OpOperand &operand : getGroupMutable())
+    addEffect(effects, &operand, MemoryEffects::Write::get());
 }
 
 void CommTGatherOp::getEffects(
@@ -12404,18 +13772,33 @@ void CommTGatherOp::getEffects(
         &effects) {
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
   addEffect(effects, &getPingMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPingMutable(), MemoryEffects::Write::get());
+  if (getPong()) {
+    auto pongRange = getPongMutable();
+    if (auto it = pongRange.begin(); it != pongRange.end()) {
+      addEffect(effects, &*it, MemoryEffects::Read::get());
+      addEffect(effects, &*it, MemoryEffects::Write::get());
+    }
+  }
+  for (OpOperand &operand : getGroupMutable())
+    addEffect(effects, &operand, MemoryEffects::Read::get());
 }
 
 void CommTScatterOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPingMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPingMutable(), MemoryEffects::Write::get());
   if (getPong()) {
     auto pongRange = getPongMutable();
-    if (auto it = pongRange.begin(); it != pongRange.end())
+    if (auto it = pongRange.begin(); it != pongRange.end()) {
+      addEffect(effects, &*it, MemoryEffects::Read::get());
       addEffect(effects, &*it, MemoryEffects::Write::get());
+    }
   }
+  for (OpOperand &operand : getGroupMutable())
+    addEffect(effects, &operand, MemoryEffects::Write::get());
 }
 
 void TReduceOp::getEffects(
@@ -12424,7 +13807,17 @@ void TReduceOp::getEffects(
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
   addEffect(effects, &getAccMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getAccMutable(), MemoryEffects::Write::get());
+  addEffect(effects, &getRecvPingMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getRecvPingMutable(), MemoryEffects::Write::get());
+  if (getRecvPong()) {
+    auto recvPongRange = getRecvPongMutable();
+    if (auto it = recvPongRange.begin(); it != recvPongRange.end()) {
+      addEffect(effects, &*it, MemoryEffects::Read::get());
+      addEffect(effects, &*it, MemoryEffects::Write::get());
+    }
+  }
+  for (OpOperand &operand : getGroupMutable())
+    addEffect(effects, &operand, MemoryEffects::Read::get());
 }
 
 void WaitAsyncEventOp::getEffects(
@@ -12499,5 +13892,6 @@ void TFreeOp::getEffects(
 
 // [Include 必须放在最后]
 #include "PTO/IR/PTOInterfaces.cpp.inc"
+#include "PTO/IR/VPTOInterfaces.cpp.inc"
 #define GET_OP_CLASSES
 #include "PTO/IR/PTOOps.cpp.inc"

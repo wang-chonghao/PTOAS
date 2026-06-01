@@ -29,6 +29,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassRegistry.h"
 
 namespace mlir {
 namespace pto {
@@ -178,6 +179,16 @@ static void lookupValidDims(Value v, Value &vRow, Value &vCol) {
   }
   vRow = Value();
   vCol = Value();
+}
+
+template <typename OpTy, typename... Args>
+static OpTy replaceOpWithClonedAttrs(IRRewriter &rewriter, Operation *op,
+                                     Args &&...args) {
+  auto newOp =
+      rewriter.create<OpTy>(op->getLoc(), std::forward<Args>(args)...);
+  newOp->setAttrs(op->getAttrs());
+  rewriter.replaceOp(op, newOp->getResults());
+  return newOp;
 }
 
 // =============================================================================
@@ -535,11 +546,19 @@ static bool foldAddPtrChainIntoOffset(IRRewriter &rewriter, Location loc,
 
 static Value clampSubViewValidDim(IRRewriter &rewriter, Location loc,
                                   Value explicitValid, int64_t size,
-                                  Operation *anchorOp) {
-  Value sizeVal = rewriter.create<arith::ConstantIndexOp>(loc, size);
-  if (!explicitValid)
-    return sizeVal;
+                                  int64_t inferredValid, Operation *anchorOp) {
+  if (!explicitValid) {
+    // No explicit valid operand: take the valid extent the result type
+    // declares. For an ordinary subview this equals `size`; for an empty
+    // tail/no-op-replay tile the type carries 0, which must survive to
+    // bind_tile rather than being widened back to `size`. A dynamic declared
+    // extent is materialized via markForceDynamicValidShape, so fall back to
+    // `size` here.
+    int64_t fallback = inferredValid >= 0 ? inferredValid : size;
+    return rewriter.create<arith::ConstantIndexOp>(loc, fallback);
+  }
 
+  Value sizeVal = rewriter.create<arith::ConstantIndexOp>(loc, size);
   int64_t cst = 0;
   if (getConstIndexValue(explicitValid, cst))
     return rewriter.create<arith::ConstantIndexOp>(loc, std::min(cst, size));
@@ -584,7 +603,7 @@ static Type convertPTOTypeToMemRef(Type t) {
   // 1. 处理 !pto.ptr<T>
   if (auto pty = dyn_cast<mlir::pto::PtrType>(t)) {
     return MemRefType::get({ShapedType::kDynamic}, pty.getElementType(),
-                           MemRefLayoutAttrInterface(), Attribute());
+                           MemRefLayoutAttrInterface(), pty.getMemorySpace());
   }
 
   // 2. 处理 !pto.tile_buf<...>
@@ -829,6 +848,127 @@ static void markForceDynamicValidShape(Operation *op, bool force,
     markForceDynamicValidShape(bindOp, tbTy.hasDynamicValid(), ctx);
     rewriter.replaceOp(op, bindOp.getResult());
   }
+  return success();
+}
+
+static Value castIndexToI64(IRRewriter &rewriter, Location loc, Value value) {
+  Type i64Ty = rewriter.getI64Type();
+  if (value.getType() == i64Ty)
+    return value;
+  return rewriter.create<arith::IndexCastOp>(loc, i64Ty, value).getResult();
+}
+
+static FailureOr<Value>
+materializePtrToIntAddPtrAddress(IRRewriter &rewriter, Location loc,
+                                 mlir::pto::PtrToIntOp anchor, Value source) {
+  SmallVector<mlir::pto::AddPtrOp, 4> addPtrChain;
+  Value base = source;
+  while (auto add = base.getDefiningOp<mlir::pto::AddPtrOp>()) {
+    addPtrChain.push_back(add);
+    base = add.getOperand(0);
+  }
+
+  if (addPtrChain.empty())
+    return failure();
+
+  auto baseMemTy = dyn_cast<MemRefType>(base.getType());
+  if (!baseMemTy) {
+    anchor.emitOpError(
+        "pto.addptr source base could not be lowered to a GM memref");
+    return failure();
+  }
+
+  Value byteAddress = rewriter.create<mlir::pto::PtrToIntOp>(
+      loc, rewriter.getI64Type(), base);
+  for (auto add : addPtrChain) {
+    auto addPtrTy = dyn_cast<mlir::pto::PtrType>(add.getResult().getType());
+    if (!addPtrTy) {
+      anchor.emitOpError("requires pto.addptr source to have !pto.ptr result "
+                         "type before byte-address lowering");
+      return failure();
+    }
+
+    unsigned elemBytes =
+        mlir::pto::getPTOStorageElemByteSize(addPtrTy.getElementType());
+    if (elemBytes == 0) {
+      anchor.emitOpError("cannot lower pto.addptr source with unknown element "
+                         "byte size to a byte address");
+      return failure();
+    }
+
+    Value byteOffset = castIndexToI64(rewriter, loc, add.getOffset());
+    if (elemBytes != 1) {
+      Value elemBytesValue =
+          rewriter.create<arith::ConstantIntOp>(loc, elemBytes, 64);
+      byteOffset =
+          rewriter.create<arith::MulIOp>(loc, byteOffset, elemBytesValue)
+              .getResult();
+    }
+    byteAddress =
+        rewriter.create<arith::AddIOp>(loc, byteAddress, byteOffset).getResult();
+  }
+
+  return byteAddress;
+}
+
+static LogicalResult lowerIntToPtrOps(func::FuncOp func, MLIRContext *ctx) {
+  DefaultInlineVector<mlir::pto::IntToPtrOp> intToPtrs;
+  func.walk([&](mlir::pto::IntToPtrOp op) { intToPtrs.push_back(op); });
+
+  for (auto op : intToPtrs) {
+    if (!isa<mlir::pto::PtrType>(op.getResult().getType()))
+      continue;
+
+    auto targetTy =
+        dyn_cast<MemRefType>(convertPTOTypeToMemRef(op.getResult().getType()));
+    if (!targetTy) {
+      op.emitError("failed to convert inttoptr result to memref type");
+      return failure();
+    }
+
+    IRRewriter rewriter(ctx);
+    rewriter.setInsertionPoint(op);
+    auto lowered =
+        rewriter.create<mlir::pto::IntToPtrOp>(op.getLoc(), targetTy,
+                                               op.getAddr());
+    lowered->setAttrs(op->getAttrs());
+    rewriter.replaceOp(op, lowered.getResult());
+  }
+
+  return success();
+}
+
+static LogicalResult lowerPtrToIntOps(func::FuncOp func, MLIRContext *ctx) {
+  DefaultInlineVector<mlir::pto::PtrToIntOp> ptrToInts;
+  func.walk([&](mlir::pto::PtrToIntOp op) { ptrToInts.push_back(op); });
+
+  for (auto op : ptrToInts) {
+    Value source = op.getPtr();
+    if (source.getDefiningOp<mlir::pto::AddPtrOp>()) {
+      IRRewriter rewriter(ctx);
+      rewriter.setInsertionPoint(op);
+      FailureOr<Value> byteAddress =
+          materializePtrToIntAddPtrAddress(rewriter, op.getLoc(), op, source);
+      if (failed(byteAddress))
+        return failure();
+      rewriter.replaceOp(op, *byteAddress);
+      continue;
+    }
+
+    if (isa<mlir::pto::PtrType>(source.getType()))
+      continue;
+  }
+
+  DefaultInlineVector<mlir::pto::PtrToIntOp> remaining;
+  func.walk([&](mlir::pto::PtrToIntOp op) {
+    if (isa<mlir::pto::PtrType>(op.getPtr().getType()))
+      remaining.push_back(op);
+  });
+  for (auto op : remaining) {
+    op.emitError("ptrtoint source could not be lowered to a GM memref");
+    return failure();
+  }
+
   return success();
 }
 
@@ -1121,14 +1261,24 @@ static LogicalResult lowerSubViewOps(func::FuncOp func, MLIRContext *ctx) {
                                                  mixedOffsets, mixedSizes,
                                                  mixedStrides);
 
+    // When a valid operand is omitted, fall back to the extent the result type
+    // declares (which the verifier pins to either `sizes` or an empty 0 marker)
+    // rather than the physical subview size, so a no-op-replay v_row/v_col=0
+    // survives lowering.
+    ArrayRef<int64_t> resultValid =
+        resultTileTy ? resultTileTy.getValidShape() : ArrayRef<int64_t>{};
+    auto inferredValidDim = [&](unsigned d) -> int64_t {
+      return d < resultValid.size() ? resultValid[d] : ShapedType::kDynamic;
+    };
+
     Value vRow;
     Value vCol;
     if (!staticSizes.empty())
       vRow = clampSubViewValidDim(rewriter, loc, op.getValidRow(),
-                                  staticSizes[0], op);
+                                  staticSizes[0], inferredValidDim(0), op);
     if (staticSizes.size() > 1)
       vCol = clampSubViewValidDim(rewriter, loc, op.getValidCol(),
-                                  staticSizes[1], op);
+                                  staticSizes[1], inferredValidDim(1), op);
 
     auto bindOp = rewriter.create<pto::BindTileOp>(
         loc, resultMemRefType, sv.getResult(), vRow ? vRow : Value(),
@@ -1238,11 +1388,19 @@ struct PTOViewToMemrefPass
     for (auto func : mod.getOps<func::FuncOp>()) {
       if (func.isExternal()) continue;
 
+      // ------------------------------------------------------------------
+      // Stage 0: ensure inttoptr values remain scalar-load/store only.
+      // ------------------------------------------------------------------
+      if (failed(validateIntToPtrUses(func))) {
+        signalPassFailure();
+        return;
+      }
+
       Block &entry = func.front();
       auto fnTy = func.getFunctionType();
 
       // ------------------------------------------------------------------
-      // Stage 0: Rewrite Function Signature
+      // Stage 0.10: Rewrite Function Signature
       // ------------------------------------------------------------------
       SmallVector<Type> newInputs;
       for (Type t : fnTy.getInputs()) newInputs.push_back(convertPTOTypeToMemRef(t));
@@ -1259,6 +1417,57 @@ struct PTOViewToMemrefPass
 
       // Update function type
       func.setFunctionType(FunctionType::get(ctx, newInputs, newResults));
+
+      // ------------------------------------------------------------------
+      // Stage 0.20: lower pto.inttoptr result types to GM memrefs.
+      // ------------------------------------------------------------------
+      if (failed(lowerIntToPtrOps(func, ctx))) {
+        signalPassFailure();
+        return;
+      }
+
+      // ------------------------------------------------------------------
+      // Stage 0.30: materialize pto.ptrtoint(addptr ...) byte offsets.
+      // ------------------------------------------------------------------
+      if (failed(lowerPtrToIntOps(func, ctx))) {
+        signalPassFailure();
+        return;
+      }
+
+      // Stage 0.40 Insert pto.bind_tile for function args that were tile_buf.
+      // ------------------------------------------------------------------
+      // Later materialization and intrinsic folding use BindTileOp as the
+      // anchor to recover tile metadata after the Stage-0 type rewrite.
+      {
+        IRRewriter rewriter(ctx);
+        // Insert after existing block args, before any existing ops.
+        rewriter.setInsertionPointToStart(&entry);
+        for (unsigned i = 0; i < entry.getNumArguments(); ++i) {
+          Type origTy = fnTy.getInputs()[i];
+          auto tbTy = dyn_cast<mlir::pto::TileBufType>(origTy);
+          if (!tbTy)
+            continue;
+
+          auto configAttr = tbTy.getConfigAttr();
+          if (!configAttr) configAttr = pto::TileBufConfigAttr::getDefault(ctx);
+
+          Value vRow, vCol;
+          auto vs = tbTy.getValidShape();
+          if (vs.size() == 2) {
+            if (vs[0] != ShapedType::kDynamic)
+              vRow = rewriter.create<arith::ConstantIndexOp>(func.getLoc(), vs[0]);
+            if (vs[1] != ShapedType::kDynamic)
+              vCol = rewriter.create<arith::ConstantIndexOp>(func.getLoc(), vs[1]);
+          }
+
+          auto bindOp = rewriter.create<pto::BindTileOp>(
+              func.getLoc(), newInputs[i], entry.getArgument(i),
+              vRow ? vRow : Value(), vCol ? vCol : Value(), configAttr);
+          markForceDynamicValidShape(bindOp, tbTy.hasDynamicValid(), ctx);
+
+          entry.getArgument(i).replaceAllUsesExcept(bindOp.getResult(), bindOp);
+        }
+      }
 
       // ------------------------------------------------------------------
       // Stage 0.5: lower pto.alloc_tile -> memref.alloc + pto.bind_tile
@@ -1718,7 +1927,50 @@ struct PTOViewToMemrefPass
       }
 
       // ------------------------------------------------------------------
-      // Stage 1.5: Fold pto.addptr chains into load/store_scalar.
+      // Stage 1.5: Lower pto.get_tensor_view_stride -> strided memref metadata
+      // ------------------------------------------------------------------
+      SmallVector<mlir::pto::GetTensorViewStrideOp, 8> tvStrides;
+      func.walk([&](mlir::pto::GetTensorViewStrideOp op) { tvStrides.push_back(op); });
+
+      for (auto op : tvStrides) {
+        IRRewriter rewriter(ctx);
+        rewriter.setInsertionPoint(op);
+        Location loc = op.getLoc();
+
+        Value view = op.getTensorView();
+        auto mrTy = dyn_cast<MemRefType>(view.getType());
+        if (!mrTy)
+          continue; // leave it to later passes if it hasn't been lowered yet
+
+        int64_t dimIndex = 0;
+        if (!getConstIndexValue(op.getDimIndex(), dimIndex)) {
+          op.emitError("get_tensor_view_stride currently expects a constant dim index");
+          signalPassFailure();
+          return;
+        }
+        if (dimIndex < 0 || dimIndex >= mrTy.getRank()) {
+          op.emitError("get_tensor_view_stride dim index is out of bounds");
+          signalPassFailure();
+          return;
+        }
+
+        SmallVector<int64_t> staticStrides;
+        int64_t offset = ShapedType::kDynamic;
+        if (succeeded(getStridesAndOffset(mrTy, staticStrides, offset)) &&
+            dimIndex < (int64_t)staticStrides.size() &&
+            staticStrides[dimIndex] != ShapedType::kDynamic) {
+          rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(
+              op, staticStrides[dimIndex]);
+          continue;
+        }
+
+        auto metadata =
+            rewriter.create<memref::ExtractStridedMetadataOp>(loc, view);
+        rewriter.replaceOp(op, metadata.getStrides()[dimIndex]);
+      }
+
+      // ------------------------------------------------------------------
+      // Stage 1.6: Fold pto.addptr chains into load/store_scalar.
       // ------------------------------------------------------------------
       DefaultInlineVector<mlir::pto::LoadScalarOp> loadScalars;
       func.walk([&](mlir::pto::LoadScalarOp op) { loadScalars.push_back(op); });
@@ -1905,8 +2157,8 @@ struct PTOViewToMemrefPass
       for (auto op : trans) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
-        rewriter.replaceOpWithNewOp<pto::TTransOp>(
-            op, TypeRange{}, op->getOperand(0), op->getOperand(1),
+        replaceOpWithClonedAttrs<pto::TTransOp>(
+            rewriter, op, TypeRange{}, op->getOperand(0), op->getOperand(1),
             op->getOperand(kThirdOperandIndex));
       }
 
@@ -1916,8 +2168,9 @@ struct PTOViewToMemrefPass
       for (auto op : exp) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
-        rewriter.replaceOpWithNewOp<pto::TExpOp>(
-            op, TypeRange{}, op->getOperand(0), op->getOperand(1));
+        replaceOpWithClonedAttrs<pto::TExpOp>(rewriter, op, TypeRange{},
+                                              op->getOperand(0),
+                                              op->getOperand(1), op.getPrecisionTypeAttr());
       }
 
       // --- TMulOp [Src, Scalar, Dst] ---
@@ -1926,8 +2179,8 @@ struct PTOViewToMemrefPass
       for (auto op : mul) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
-        rewriter.replaceOpWithNewOp<pto::TMulOp>(
-            op, op->getOperand(0), op.getOperand(1),
+        replaceOpWithClonedAttrs<pto::TMulOp>(
+            rewriter, op, op->getOperand(0), op.getOperand(1),
             op->getOperand(kThirdOperandIndex));
       }
 
@@ -1937,8 +2190,8 @@ struct PTOViewToMemrefPass
       for (auto op : muls) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
-        rewriter.replaceOpWithNewOp<pto::TMulSOp>(
-            op, op->getOperand(0), op.getScalar(),
+        replaceOpWithClonedAttrs<pto::TMulSOp>(
+            rewriter, op, op->getOperand(0), op.getScalar(),
             op->getOperand(kThirdOperandIndex));
       }
 
@@ -1949,9 +2202,8 @@ struct PTOViewToMemrefPass
           IRRewriter rewriter(ctx);
           rewriter.setInsertionPoint(op);
           
-          rewriter.replaceOpWithNewOp<pto::TAddOp>(
-              op, TypeRange{}, 
-              op->getOperand(0), op->getOperand(1),
+          replaceOpWithClonedAttrs<pto::TAddOp>(
+              rewriter, op, TypeRange{}, op->getOperand(0), op->getOperand(1),
               op->getOperand(kThirdOperandIndex));
       }
 
@@ -1992,7 +2244,7 @@ struct PTOViewToMemrefPass
           op, TypeRange{}, 
           op->getOperand(0), op->getOperand(1),
           op->getOperand(kThirdOperandIndex),
-          op->getOperand(kFourthOperandIndex));
+          op->getOperand(kFourthOperandIndex), op.getAccPhaseAttr());
       }
 
       // --- TMatmulMxOp---
@@ -2006,7 +2258,7 @@ struct PTOViewToMemrefPass
           op->getOperand(0), op->getOperand(1),
           op->getOperand(kThirdOperandIndex),
           op->getOperand(kFourthOperandIndex),
-          op->getOperand(kFifthOperandIndex));
+          op->getOperand(kFifthOperandIndex), op.getAccPhaseAttr());
       }
 
       // --- TMatmulMxAccOp  ---
@@ -2021,7 +2273,7 @@ struct PTOViewToMemrefPass
           op->getOperand(kThirdOperandIndex),
           op->getOperand(kFourthOperandIndex),
           op->getOperand(kFifthOperandIndex),
-          op->getOperand(kSixthOperandIndex));
+          op->getOperand(kSixthOperandIndex), op.getAccPhaseAttr());
       }
 
       // --- TMatmulMxBiasOp ---
@@ -2051,7 +2303,7 @@ struct PTOViewToMemrefPass
         Value dst = op->getOperand(kThirdOperandIndex);
 
         rewriter.replaceOpWithNewOp<pto::TGemvOp>(
-          op, TypeRange{}, lhs, rhs, dst);
+          op, TypeRange{}, lhs, rhs, dst, op.getAccPhaseAttr());
       }
 
       // --- TGemvAccOp [Acc, Lhs, Rhs, Dst] ---
@@ -2064,7 +2316,7 @@ struct PTOViewToMemrefPass
           op, TypeRange{}, 
           op->getOperand(0), op->getOperand(1),
           op->getOperand(kThirdOperandIndex),
-          op->getOperand(kFourthOperandIndex));
+          op->getOperand(kFourthOperandIndex), op.getAccPhaseAttr());
       }
 
       // --- TGemvBiasOp [Acc, Lhs, Rhs, Bias, Dst] ---
@@ -2077,7 +2329,7 @@ struct PTOViewToMemrefPass
           op, TypeRange{}, 
           op->getOperand(0), op->getOperand(1),
           op->getOperand(kThirdOperandIndex),
-          op->getOperand(kFourthOperandIndex));
+          op->getOperand(kFourthOperandIndex), op.getAccPhaseAttr());
       }
 
       // --- TGemvMxOp [A, AScale, B, BScale, Dst] ---
@@ -2091,7 +2343,7 @@ struct PTOViewToMemrefPass
           op->getOperand(0), op->getOperand(1),
           op->getOperand(kThirdOperandIndex),
           op->getOperand(kFourthOperandIndex),
-          op->getOperand(kFifthOperandIndex));
+          op->getOperand(kFifthOperandIndex), op.getAccPhaseAttr());
       }
 
       // --- TGemvMxAccOp [CIn, A, AScale, B, BScale, Dst] ---
@@ -2106,7 +2358,7 @@ struct PTOViewToMemrefPass
           op->getOperand(kThirdOperandIndex),
           op->getOperand(kFourthOperandIndex),
           op->getOperand(kFifthOperandIndex),
-          op->getOperand(kSixthOperandIndex));
+          op->getOperand(kSixthOperandIndex), op.getAccPhaseAttr());
       }
 
       // --- TGemvMxBiasOp [A, AScale, B, BScale, Bias, Dst] ---
@@ -2211,12 +2463,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TAddSOp>(
-            op,
-            TypeRange{},
-            src,
-            scalar,
-            dst);
+        replaceOpWithClonedAttrs<pto::TAddSOp>(rewriter, op, TypeRange{}, src,
+                                               scalar, dst);
       }
 
       DefaultInlineVector<mlir::pto::TAddSCOp> addscops;
@@ -2742,12 +2990,13 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TDivOp>(
+        replaceOpWithClonedAttrs<pto::TDivOp>(rewriter,
             op,
             TypeRange{},
             src0,
             src1,
-            dst);
+            dst,
+            op.getPrecisionTypeAttr());
       }
 
       DefaultInlineVector<mlir::pto::TDivSOp> divsops;
@@ -2797,12 +3046,13 @@ struct PTOViewToMemrefPass
           signalPassFailure();
           return;
         }
-        rewriter.replaceOpWithNewOp<pto::TDivSOp>(
+        replaceOpWithClonedAttrs<pto::TDivSOp>(rewriter,
             op,
             TypeRange{},
             src,
             scale,
-            dst);
+            dst,
+            op.getPrecisionTypeAttr());
       }
 
       DefaultInlineVector<mlir::pto::TExpandsOp> expandsops;
@@ -2822,11 +3072,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TExpandsOp>(
-            op,
-            TypeRange{},
-            scalar,
-            dst);
+        replaceOpWithClonedAttrs<pto::TExpandsOp>(rewriter, op, TypeRange{},
+                                                  scalar, dst);
       }
 
       DefaultInlineVector<mlir::pto::TExtractOp> extractops;
@@ -3112,7 +3359,8 @@ struct PTOViewToMemrefPass
             op,
             TypeRange{},
             src,
-            dst);
+            dst,
+            op.getPrecisionTypeAttr());
       }
 
       DefaultInlineVector<mlir::pto::TLReluOp> lreluops;
@@ -3163,7 +3411,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TMaxOp>(
+        replaceOpWithClonedAttrs<pto::TMaxOp>(rewriter,
             op,
             TypeRange{},
             src0,
@@ -3191,7 +3439,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TMaxSOp>(
+        replaceOpWithClonedAttrs<pto::TMaxSOp>(rewriter,
             op,
             TypeRange{},
             src,
@@ -3219,7 +3467,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TMinOp>(
+        replaceOpWithClonedAttrs<pto::TMinOp>(rewriter,
             op,
             TypeRange{},
             src0,
@@ -3247,7 +3495,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TMinSOp>(
+        replaceOpWithClonedAttrs<pto::TMinSOp>(rewriter,
             op,
             TypeRange{},
             src,

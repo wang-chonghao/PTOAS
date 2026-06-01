@@ -26,10 +26,11 @@ COPY cmake/LinuxHardeningCache.cmake /tmp/LinuxHardeningCache.cmake
 # setting build directories
 ENV WORKSPACE_DIR=/llvm-workspace
 ENV LLVM_SOURCE_DIR=$WORKSPACE_DIR/llvm-project
-ENV LLVM_BUILD_DIR=$LLVM_SOURCE_DIR/build-shared
+ENV LLVM_BUILD_DIR=$LLVM_SOURCE_DIR/build-release
 
 ENV PTO_SOURCE_DIR=$WORKSPACE_DIR/PTOAS
-ENV PTO_INSTALL_DIR=$PTO_SOURCE_DIR/install
+ENV PTO_BUILD_DIR=$PTO_SOURCE_DIR/build-release
+ENV PTO_INSTALL_DIR=$PTO_SOURCE_DIR/install-release
 
 # build LLVM
 WORKDIR $WORKSPACE_DIR
@@ -39,6 +40,7 @@ WORKDIR $LLVM_SOURCE_DIR
 RUN cmake -C /tmp/LinuxHardeningCache.cmake -G Ninja -S llvm -B $LLVM_BUILD_DIR \
     -DLLVM_ENABLE_PROJECTS="mlir;clang" \
     -DBUILD_SHARED_LIBS=ON \
+    -DLLVM_ENABLE_ASSERTIONS=OFF \
     -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
     -DPython3_EXECUTABLE=${PY_PATH}/bin/python \
     -DCMAKE_BUILD_TYPE=Release \
@@ -54,7 +56,7 @@ RUN git clone https://github.com/zhangstevenunity/PTOAS.git
 WORKDIR $PTO_SOURCE_DIR
 RUN cmake -C /tmp/LinuxHardeningCache.cmake -G Ninja \
     -S . \
-    -B build \
+    -B $PTO_BUILD_DIR \
     -DLLVM_DIR=$LLVM_BUILD_DIR/lib/cmake/llvm \
     -DMLIR_DIR=$LLVM_BUILD_DIR/lib/cmake/mlir \
     -DPython3_ROOT_DIR=${PY_PATH} \
@@ -62,26 +64,20 @@ RUN cmake -C /tmp/LinuxHardeningCache.cmake -G Ninja \
     -DPython3_FIND_STRATEGY=LOCATION \
     -Dpybind11_DIR=$(python -m pybind11 --cmakedir) \
     -DMLIR_PYTHON_PACKAGE_DIR=${LLVM_BUILD_DIR}/tools/mlir/python_packages/mlir_core \
-    -DCMAKE_INSTALL_PREFIX=${PTO_INSTALL_DIR}
+    -DCMAKE_INSTALL_PREFIX=${PTO_INSTALL_DIR} \
+    -DCMAKE_BUILD_TYPE=Release
 
-RUN ninja -C build && ninja -C build install
+RUN ninja -C $PTO_BUILD_DIR && ninja -C $PTO_BUILD_DIR install
 
 # create python wheel
-ENV PY_PACKAGE_DIR=$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core/
-
-# copy pto.py, _pto_ops_gen.py 
-RUN cp $PTO_INSTALL_DIR/mlir/dialects/*.py $PY_PACKAGE_DIR/mlir/dialects/
-
-COPY ./setup.py $PY_PACKAGE_DIR/
-
-WORKDIR $PY_PACKAGE_DIR
-RUN python setup.py bdist_wheel
+ENV PTO_WHEEL_DIST_DIR=$PTO_SOURCE_DIR/build/wheel-dist
+RUN bash "$PTO_SOURCE_DIR/docker/create_wheel.sh"
 
 # fix missing so
 RUN export LD_LIBRARY_PATH=$LLVM_BUILD_DIR/lib:$PTO_INSTALL_DIR/lib:$LD_LIBRARY_PATH \
-    && auditwheel repair --plat manylinux_2_34_${ARCH} dist/ptoas*.whl
+    && auditwheel repair --plat manylinux_2_34_${ARCH} "$PTO_WHEEL_DIST_DIR"/ptoas*.whl -w /wheelhouse
 
-RUN pip install wheelhouse/ptoas*.whl
+RUN pip install /wheelhouse/ptoas*.whl
 
 # test import without adjusting $PYTHONPATH and $LD_LIBRARY_PATH, in some irrelevant dir
 WORKDIR /test
@@ -89,7 +85,7 @@ RUN python -c "import mlir.ir"
 RUN python -c "from mlir.dialects import pto"
 
 # test ptoas cli
-ENV PATH=$PTO_SOURCE_DIR/build/tools/ptoas:$PATH
+ENV PATH=$PTO_BUILD_DIR/tools/ptoas:$PATH
 RUN which ptoas
 
 WORKDIR $PTO_SOURCE_DIR/test/samples/MatMul/
@@ -117,8 +113,8 @@ FROM quay.io/ascend/cann:8.5.0-910b-ubuntu22.04-py3.11 AS runtime
 # - the `ascend/cann` image has the full CANN for on-device execution, but is very big (10 GB)
 
 # Copy only the wheel, ptoas binary, its .so dependencies, and test scripts from builder
-COPY --from=builder /llvm-workspace/llvm-project/build-shared/tools/mlir/python_packages/mlir_core/wheelhouse/ptoas*.whl /tmp/
-COPY --from=builder /llvm-workspace/PTOAS/build/tools/ptoas/ptoas /usr/local/bin/ptoas
+COPY --from=builder /wheelhouse/ptoas*.whl /tmp/
+COPY --from=builder /llvm-workspace/PTOAS/build-release/tools/ptoas/ptoas /usr/local/bin/ptoas
 
 RUN mkdir -p /usr/local/lib/ptoas
 COPY --from=builder /ptoas-deps/. /usr/local/lib/ptoas/

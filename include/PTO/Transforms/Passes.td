@@ -15,6 +15,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+// The VPTO backend is emitted from tools/ptoas rather than a TableGen pass;
+// these registrations continue to describe the shared pre-backend pipeline.
+
 #ifndef MLIR_DIALECT_PTO_PASSES
 #define MLIR_DIALECT_PTO_PASSES
 
@@ -54,6 +57,30 @@ def PTOInjectBarrierAllSync : Pass<"pto-inject-barrier-all-sync", "func::FuncOp"
     "mlir::pto::PTODialect",
     "mlir::memref::MemRefDialect",
     "mlir::arith::ArithDialect"
+  ];
+}
+
+def PTOBufidSync : Pass<"pto-bufid-sync", "func::FuncOp"> {
+  let summary = "Insert get_buf/rls_buf synchronization for PTO dialect";
+  let description = [{
+    Analyzes cross-pipeline local buffer dependencies and wraps dependent
+    operations with A5 buffer-id synchronization. Unlike pto-insert-sync, this
+    pass emits get_buf/rls_buf pairs instead of set_flag/wait_flag events.
+  }];
+
+  let constructor = "mlir::pto::createPTOBufidSyncPass()";
+
+  let options = [
+    Option<"enableBufidSyncDebug", "enable-bufid-sync-debug",
+           "bool", "false",
+           "Enable verbose debug printing for the bufid_sync pass">
+  ];
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect"
   ];
 }
 
@@ -167,6 +194,42 @@ def PTOLoweringSyncToPipe : Pass<"pto-lowering-sync-to-pipe", "func::FuncOp"> {
   ];
 }
 
+def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
+  let summary = "Build conservative tile-fusion planning groups from block-local analysis";
+  let description = [{
+    Consumes PreFusionAnalysis results, forms conservative block-local fusion
+    groups for currently supported tile-native compute ops, and annotates
+    accepted group members with:
+      - pto.fusion.group_id
+      - pto.fusion.order
+  }];
+  let constructor = "mlir::pto::createFusionPlanPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def OpScheduling : Pass<"pto-op-scheduling", "func::FuncOp"> {
+  let summary = "Compact planned fusion groups into block-local contiguous spans";
+  let description = [{
+    Consumes fusion planning metadata emitted by FusionPlanPass and performs
+    block-local instruction scheduling to make each accepted fusion group a
+    contiguous span without redefining group membership.
+  }];
+  let constructor = "mlir::pto::createOpSchedulingPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def PTOMarkLastUse : Pass<"pto-mark-last-use", "func::FuncOp"> {
+  let summary = "Mark scheduled tile-fusion operand last-use slots";
+  let description = [{
+    Walks scheduled tile-fusion spans identified by pto.fusion.group_id /
+    pto.fusion.order and annotates each op with a stable per-input last-use
+    bit mask. The analysis considers both later in-span uses and later
+    post-span uses in the enclosing block.
+  }];
+  let constructor = "mlir::pto::createPTOMarkLastUsePass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
 def PTOWrapFunctionsInSections : Pass<"pto-wrap-functions-in-sections", "func::FuncOp"> {
   let summary = "Wrap attributed single-core functions in PTO cube/vector sections";
   let description = [{
@@ -182,6 +245,43 @@ def PTOWrapFunctionsInSections : Pass<"pto-wrap-functions-in-sections", "func::F
   let dependentDialects = [
     "mlir::pto::PTODialect",
     "mlir::func::FuncDialect"
+  ];
+}
+
+def VPTOSplitCVModule : Pass<"vpto-split-cv-module", "ModuleOp"> {
+  let summary = "Split a VPTO module with cube/vector sections into kernel modules";
+  let description = [{
+    Rewrites a single-module VPTO input where one `pto.kernel` function
+    contains `pto.section.cube` / `pto.section.vector` regions into the
+    normalized fatobj input form with one child module per kernel kind.
+
+    The pass clones the original module for each target kind, removes the
+    opposite section kind, and inlines the target section body. It does not
+    analyze cross-section SSA dependencies; normal MLIR verification catches
+    illegal uses after the non-target section is removed.
+  }];
+
+  let constructor = "mlir::pto::createVPTOSplitCVModulePass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
+def VPTONormalizeContainer : Pass<"vpto-normalize-container", "ModuleOp"> {
+  let summary = "Normalize and verify VPTO kernel container shape";
+  let description = [{
+    Normalizes a VPTO kernel module carrying `pto.kernel_kind` into the canonical
+    outer container form. Existing containers are left in place. The pass
+    verifies that the resulting top-level module contains only child modules and
+    that every child module carries `pto.kernel_kind`.
+  }];
+
+  let constructor = "mlir::pto::createVPTONormalizeContainerPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect"
   ];
 }
 
@@ -265,6 +365,100 @@ def PTOResolveReservedBuffers : Pass<"pto-resolve-reserved-buffers", "ModuleOp">
   ];
 }
 
+def ExpandTileOp : Pass<"pto-expand-tile-op", "ModuleOp"> {
+  let summary = "Expand tile ops into calls to TileLang DSL template functions";
+  let description = [{
+    Expands tile-level operations (pto.tadd, pto.tsub, etc.) by invoking the
+    TileLang Python DSL to instantiate template libraries. The generated
+    template functions use tile_buf parameters and contain vector-level
+    implementations (pto.vecscope, pto.vlds, pto.vadd, pto.vsts, etc.).
+
+    Each tile op is replaced by a func.call to the generated template function,
+    with tile_buf operands passed directly (no type bridging).
+
+    After this pass, the Inline pass inlines template bodies, and
+    FoldTileBufIntrinsics resolves tile_buf_addr / tile_valid_rows /
+    tile_valid_cols.
+  }];
+  let constructor = "mlir::pto::createExpandTileOpPass()";
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect"
+  ];
+  let options = [
+    Option<"tilelangPath", "tilelang-path", "std::string",
+           /*default=*/"\"\"",
+           "Path to directory of .py tilelang DSL template files">,
+    Option<"tilelangPkgPath", "tilelang-pkg-path", "std::string",
+           /*default=*/"\"\"",
+           "PYTHONPATH for tilelang_dsl package (added to env)">,
+    Option<"pythonExe", "python-exe", "std::string",
+           /*default=*/"\"python3\"",
+           "Python executable for tilelang DSL invocation">,
+    Option<"daemonSocketPath", "daemon-socket-path", "std::string",
+           /*default=*/"\"\"",
+           "Path to Unix domain socket for daemon RPC (if empty, uses subprocess)">
+  ];
+}
+
+def FoldTileBufIntrinsics : Pass<"pto-fold-tile-buf-intrinsics", "mlir::func::FuncOp"> {
+  let summary = "Fold structured-view intrinsics after template inlining";
+  let description = [{
+    After TileLang DSL template functions are inlined, the IR contains
+    structured-view intrinsics whose operands are now bound to concrete values.
+
+    This pass resolves them:
+    - pto.tile_buf_addr → replaced by the memref recovered from the active
+      materialized tile handle, or by pto.castptr when the requested result
+      type is !pto.ptr
+    - pto.tile_valid_rows → folded to arith.constant if v_row is static,
+      or replaced with the dynamic valid_row operand carried by the
+      materialized tile handle
+    - pto.tile_valid_cols → same as above for v_col
+
+    tensor_view family:
+    - pto.tensor_view_addr → traces through unrealized_conversion_cast →
+      subview → reinterpret_cast, then folds to the base memref or to
+      pto.castptr/pto.addptr on the base memref
+    - pto.get_tensor_view_dim → folded to arith.constant for static subview
+      sizes, or to the subview size SSA operand for dynamic dims
+    - pto.get_tensor_view_stride → folded to the reinterpret_cast stride
+      operand, multiplied by the subview stride when needed
+
+    Dead unrealized_conversion_cast, memref.subview, and
+    memref.reinterpret_cast ops exposed by folding are cleaned up after the
+    rewrite.
+  }];
+  let constructor = "mlir::pto::createFoldTileBufIntrinsicsPass()";
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
+def PTOInlineLibCall : Pass<"pto-inline-libcall", "ModuleOp"> {
+  let summary = "Materialize OP-Lib instance bodies and inline OP-Lib calls";
+  let description = [{
+    Resolves OP-Lib instance declarations generated by OP-Lib lowering,
+    materializes instance bodies, and inlines OP-Lib calls into caller/fused
+    helper functions. Function signatures stay in !pto.tile_buf form.
+  }];
+  let constructor = "mlir::pto::createPTOInlineLibCallPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect"];
+  let options = [Option<
+      "debug", "debug", "bool",
+      /*default=*/"false",
+      "Enable verbose debug logging for OP-Lib instantiation/inlining">];
+}
+
 def PTOVerifyTFree : Pass<"pto-verify-tfree", "func::FuncOp"> {
   let summary = "Verify explicit matching pto.tfree placement for pto.tpop";
   let description = [{
@@ -294,6 +488,22 @@ def PTOViewToMemref : Pass<"pto-view-to-memref", "ModuleOp"> {
     "mlir::pto::PTODialect",
     "mlir::memref::MemRefDialect",
     "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
+def PTOValidateIntToPtrUses : Pass<"pto-validate-inttoptr-uses", "func::FuncOp"> {
+  let summary = "Validate restricted uses of PTO inttoptr results";
+  let description = [{
+    Verifies that `pto.inttoptr` results do not escape into general pointer IR.
+    The result may only be used directly as the pointer operand of
+    `pto.load_scalar` or `pto.store_scalar`.
+  }];
+
+  let constructor = "mlir::pto::createPTOValidateIntToPtrUsesPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
     "mlir::func::FuncDialect"
   ];
 }
@@ -345,6 +555,130 @@ def PTOResolveBufferSelect : Pass<"pto-resolve-buffer-select", "ModuleOp"> {
     "mlir::memref::MemRefDialect",
     "mlir::arith::ArithDialect"
   ];
+def PTOInferVPTOVecScope
+    : Pass<"pto-infer-vpto-vecscope", "func::FuncOp"> {
+  let summary =
+      "Infer missing pto.vecscope regions for VPTO vector operation clusters";
+  let description = [{
+    Runs near the VPTO emission boundary after inlining, canonicalization,
+    CSE, pointer normalization, and wrapper-op expansion have exposed the final
+    SSA shape. The pass greedily clusters contiguous VPTO vector operations
+    into `pto.vecscope` regions while preserving explicit vector-scope carriers
+    and treating DMA/copy/sync, unresolved calls, terminators, and forbidden
+    operations as boundaries.
+
+    The inferred `pto.vecscope` form remains resultless. Values whose type is
+    `!pto.vreg`, `!pto.mask`, or `!pto.align` must not escape the inferred
+    scope.
+  }];
+  let constructor = "mlir::pto::createPTOInferVPTOVecScopePass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def PTOValidateVPTOIR : Pass<"pto-validate-vpto-ir", "ModuleOp"> {
+  let summary =
+      "Validate authoring-stage VPTO legality before ptr-boundary canonicalization";
+  let description = [{
+    Runs the authoring-stage VPTO legality verifier on post-mainline VPTO IR.
+    This stage keeps the memref-first authoring surface legal, while checking
+    the shared structural contracts that must hold before emission-boundary
+    canonicalization.
+  }];
+  let constructor = "mlir::pto::createPTOValidateVPTOIRPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def PTOValidateVPTOEmissionIR
+    : Pass<"pto-validate-vpto-emission-ir", "ModuleOp"> {
+  let summary =
+      "Validate emission-stage VPTO legality after ptr-boundary canonicalization";
+  let description = [{
+    Runs the emission-stage VPTO legality verifier on ptr-form VPTO IR after
+    `PTOVPTOPtrBoundary`. This stage re-checks the shared authoring contracts
+    and confirms the final emission surface no longer carries memref boundary
+    state or residual wrapper scaffold.
+  }];
+  let constructor = "mlir::pto::createPTOValidateVPTOEmissionIRPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def VPTOExpandWrapperOps
+    : Pass<"vpto-expand-wrapper-ops", "func::FuncOp"> {
+  let summary =
+      "Expand VPTO wrapper ops to emission-ready low-level VPTO IR";
+  let description = [{
+    Expand higher-level VPTO wrapper operations, including bridge, DMA, cube,
+    accumulator-store, and MAD semantic forms, to the low-level pointer/raw VPTO
+    operations consumed by backend emission.
+  }];
+  let constructor = "mlir::pto::createVPTOExpandWrapperOpsPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::LLVM::LLVMDialect",
+                           "mlir::pto::PTODialect"];
+}
+
+def PTOVPTOPtrBoundary
+    : Pass<"pto-vpto-ptr-boundary", "ModuleOp"> {
+  let summary =
+      "Canonicalize the final VPTO emission boundary from memref-first IR to ptr ABI";
+  let description = [{
+    Runs the final emission-boundary ptr canonicalization after the backend
+    mainline has finished its memref-first optimization pipeline. This pass
+    rewrites eligible memref function arguments to same-space `!pto.ptr`,
+    rejects memref function results, canonicalizes supported body-level VPTO
+    buffer-like ops to ptr-form, and drops dead boundary/view scaffold such as
+    trivial `pto.castptr`, `pto.bind_tile`, `memref.subview`,
+    `memref.reinterpret_cast`, and `memref.memory_space_cast` once they become
+    unused.
+  }];
+  let constructor = "mlir::pto::createPTOVPTOPtrBoundaryPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect"];
+}
+
+def VPTOPtrNormalize
+    : Pass<"vpto-ptr-normalize", "ModuleOp"> {
+  let summary =
+      "Normalize VPTO ptr-like values and users into a uniform !pto.ptr form";
+  let description = [{
+    Uses MLIR's conversion framework to normalize VPTO ptr-related forms before
+    the existing VPTO ptr-boundary canonicalization runs. This pass rewrites
+    supported tile-buffer and memref view producers such as `pto.tile_buf_addr`
+    and `memref.subview`, and updates VPTO memory ops to consume the normalized
+    ptr-form consistently.
+  }];
+  let constructor = "mlir::pto::createVPTOPtrNormalizePass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::arith::ArithDialect"];
+}
+
+def VPTOPtrCastCleanup
+    : Pass<"vpto-ptr-cast-cleanup", "ModuleOp"> {
+  let summary = "Collapse transient ptr-memref-ptr bridge casts after VPTO ptr normalization";
+  let description = [{
+    Eliminates bridge chains such as
+    `!pto.ptr -> builtin.unrealized_conversion_cast -> memref.cast ->
+     builtin.unrealized_conversion_cast -> !pto.ptr`
+    when the outer ptr types already match.
+  }];
+  let constructor = "mlir::pto::createVPTOPtrCastCleanupPass()";
+  let dependentDialects = ["mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect"];
 }
 
 #endif // MLIR_DIALECT_PTO_PASSES

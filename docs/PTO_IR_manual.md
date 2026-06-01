@@ -99,15 +99,20 @@ number of scalar FP4 elements.
 Operation support is still opt-in. Defining the type in PTO IR does not by
 itself imply that any particular operation accepts it.
 
-### 2.2 `!pto.ptr<elementType>`
+### 2.2 `!pto.ptr<elementType[, memorySpace]>`
 
-A pointer to global memory.
+A typed pointer. `memorySpace` is optional and defaults to `gm`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `elementType` | `element-type(i1/i8/i16/i32/f16/f32/bf16...)` | Element type pointed to |
+| `memorySpace` | `gm` or `ub` | Pointer address space alias (`gm` -> global memory, `ub` -> vector/UB memory) |
 
-**Syntax:** `!pto.ptr<f16>`
+**Syntax:** `!pto.ptr<f16>` or `!pto.ptr<f16, ub>`
+
+Pointer conversions are modeled explicitly with [`pto.castptr`](#ptocastptr).
+Between two `!pto.ptr` types, casts are only legal when both pointers stay in
+the same PTO memory space.
 
 ---
 
@@ -154,7 +159,11 @@ A logical partition (slice) of a `tensor_view`. Holds shape and stride informati
 | `fractal` | `int32` | Fractal size |
 | `pad` | `PadValue` mnemonic or integer literal | Padding policy/value selector (tests commonly use `pad=0`) |
 
-Here, `?` denotes a dynamic symbol resolved at runtime.
+Here, `?` denotes a dynamic symbol resolved at runtime. Static and dynamic
+valid dimensions are non-negative counts; a static `v_row=0` or `v_col=0`
+represents an empty valid region. Physical `rows`/`cols` may still describe the
+storage extent, for example an even physical row count with an odd or zero
+`v_row` on a tail tile.
 
 For `dtype=!pto.f4E1M2x2` and `dtype=!pto.f4E2M1x2`, the `rows`/`cols` and
 `v_row`/`v_col` values are physical packed extents. In other words, the packed
@@ -383,6 +392,83 @@ NOTE: These third-party ops are supported only to the extent required by PTOAS f
 
 ### 4.1 Pointer & View Operations
 
+##### `pto.ptrtoint` - Convert Pointer to Byte Address
+
+**Summary:** Converts a global pointer to an `i64` byte address.
+
+**Semantics:**
+
+```
+result = reinterpret_cast<i64>(ptr)
+```
+
+If the source is produced by `pto.addptr`, the addptr offset is materialized as an explicit byte offset:
+
+```
+pto.ptrtoint(pto.addptr %p, %idx) == pto.ptrtoint(%p) + idx * sizeof(elementType)
+```
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `ptr` | `!pto.ptr<elementType>` | Source global pointer |
+
+**Results:** `i64`
+
+**Lowering Notes:**
+
+- PTO view lowering accepts either PTO pointer form or the lowered rank-1 GM memref form.
+- `pto.addptr` sources are folded into explicit byte-address arithmetic before EmitC lowering.
+- EmitC lowering emits a C++ `reinterpret_cast<int64_t>`.
+
+##### `pto.inttoptr` - Convert Byte Address to Pointer
+
+**Summary:** Converts an `i64` byte address to a global pointer of the requested element type.
+
+**Semantics:**
+
+```
+result = reinterpret_cast<result-element-type *>(addr)
+```
+
+This op is an escape hatch for explicit byte-address arithmetic and
+cross-element-type pointer reinterpretation.
+
+To limit provenance loss from integer-derived pointers, the result is
+restricted to scalar memory access: every direct use must be the pointer operand
+of `pto.load_scalar` or `pto.store_scalar`. The result cannot feed
+`pto.addptr`, `pto.make_tensor_view`, returns, or other general pointer users.
+Use the offset operand on `pto.load_scalar` / `pto.store_scalar` for element
+offsets from an `inttoptr` pointer.
+
+The result element type must be representable by EmitC scalar pointer lowering:
+floating-point element types (`f16`, `bf16`, `f32`, `f64`), 8/16/32/64-bit
+integer element types, and PTO low-precision floating-point element types are
+accepted. Non-scalar element types such as `index` are rejected by the verifier.
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `addr` | `i64` | Source byte address |
+
+**Results:** `!pto.ptr<resultElementType>`
+
+**Lowering Notes:**
+
+- PTO view lowering rewrites the result to an equivalent rank-1 GM memref form.
+- EmitC lowering emits a C++ `reinterpret_cast<__gm__ T*>`.
+
+**Basic Example:**
+
+```mlir
+%p64_off = pto.addptr %p64, %idx : !pto.ptr<ui64> -> !pto.ptr<ui64>
+%addr = pto.ptrtoint %p64_off : !pto.ptr<ui64> -> i64
+%p32 = pto.inttoptr %addr : i64 -> !pto.ptr<ui32>
+%val = pto.load_scalar %p32[%c0] : !pto.ptr<ui32> -> ui32
+```
+
 ##### `pto.addptr` - Add Element Offset to Pointer
 
 **Summary:** Computes a new pointer by adding an element offset to the base pointer.
@@ -417,6 +503,39 @@ result = ptr + offset   // offset is in elements, not bytes
 %ptr_off = pto.addptr %base, %offset : !pto.ptr<f32> -> !pto.ptr<f32>
 ```
 
+##### `pto.castptr` - Explicit Pointer Cast
+
+**Summary:** Performs an explicit cast between integer addresses and `!pto.ptr`,
+or between two `!pto.ptr` types.
+
+**Semantics:**
+
+```mlir
+%p0 = pto.castptr %addr : i64 -> !pto.ptr<f32, ub>
+%p1 = pto.castptr %p0 : !pto.ptr<f32, ub> -> !pto.ptr<i8, ub>
+%addr2 = pto.castptr %p1 : !pto.ptr<i8, ub> -> i64
+```
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `input` | `integer` or `!pto.ptr<...>` | Source value to cast |
+
+**Results:** `integer` or `!pto.ptr<...>`
+
+**Constraints & Verification:**
+
+- Integer-to-integer casts are rejected; use normal integer cast ops instead
+- Descriptor values such as `!pto.tensor_view<...>` and `!pto.partition_tensor_view<...>` are not legal direct inputs; extract a memref address first
+- Pointer-to-pointer casts are only legal when source and destination stay in
+  the same PTO memory space (`gm` or `ub`)
+- The operation is pure (no side effects)
+
+**Hardware Mapping:**
+
+- No hardware pipeline (representation conversion only)
+
 ##### `pto.make_tensor_view` - Create Tensor View
 
 **Summary:** Constructs a global tensor view from a pointer, declaring the physical base and strides (no allocation, no data movement).
@@ -446,6 +565,9 @@ This operation defines the physical "base" and stride rules for global memory. I
   - `ptr` must be `!pto.ptr<...>` and its element type must match the result element type
   - `shape` and `strides` operand counts must match the tensor_view rank
   - If `layout` is provided with static shapes/strides, it must be consistent with inferred layout
+- `pto.inttoptr` results cannot feed `pto.make_tensor_view`. Tensor views must
+  be constructed from a source pointer that already carries the desired element
+  type.
 
 **Notes:**
 
@@ -496,6 +618,43 @@ This op is primarily defined on `!pto.tensor_view`.
 %pv = pto.partition_view %tv,
        offsets = [%c0, %c0], sizes = [%h, %w]
        : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
+```
+
+---
+
+##### `pto.get_tensor_view_stride` - Get Tensor View Dimension Stride
+
+**Summary:** Returns the logical stride of a given dimension of a tensor view.
+
+**Semantics:**
+
+```mlir
+stride = get_tensor_view_stride(tv_or_mr, dim_index)
+```
+
+This op is defined on `!pto.tensor_view`. During internal lowering, the same
+query may temporarily appear on the memref form lowered from the tensor view.
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `tensor_view` | `!pto.tensor_view<...>` or `memref<...>` | Logical tensor view or its lowered memref form |
+| `dim_index` | `index` | Dimension index (0-based) |
+
+**Results:** `index` — the logical stride of the requested dimension, measured
+in elements rather than bytes.
+
+**Notes:**
+
+- This op is the IR counterpart of the DSL-side `TensorView.strides` metadata access.
+- After lowering to memref, static strides may be folded into constants, while dynamic strides are derived from memref metadata.
+
+**Basic Example:**
+
+```mlir
+%s0 = pto.get_tensor_view_stride %tv, %c0 : !pto.tensor_view<?x?xf32> -> index
+%s1 = pto.get_tensor_view_stride %tv, %c1 : !pto.tensor_view<?x?xf32> -> index
 ```
 
 ---
@@ -566,6 +725,7 @@ result = alloc_tile(base_addr, valid_row, valid_col)   // operands are optional
 **Constraints & Verification:**
 
 - The operation has a custom verifier that checks:
+  - The result tile type may use standard or PTO low-precision element types.
   - If result `v_row`/`v_col` are dynamic (`?`), the corresponding operands must be present
   - If result `v_row`/`v_col` are static, the corresponding operands must be absent
 - If `base_addr` is omitted, the address is assigned by the compiler
@@ -705,9 +865,14 @@ result.valid = clip(explicit_valid_or_sizes, sizes)
   - For boxed row-major tiles, the subview must keep the full source column extent, and the column offset must be the constant `0`.
   - For boxed col-major tiles, the subview must keep the full source row extent, and the row offset must be the constant `0`.
 - `valid_row` and `valid_col` must be both present or both absent.
-- If `valid_row/valid_col` are omitted, result `valid_shape` defaults to `sizes`.
+- If `valid_row/valid_col` are omitted, the result type is authoritative for the
+  valid extent: any static `valid_shape` in `[0, sizes]` is accepted (this covers
+  the full-size default and a `v_row=0`/`v_col=0` no-op-replay empty marker), and
+  lowering takes the valid extent from the result type rather than `sizes`. A
+  dynamic result valid (`?`) still requires an explicit `valid_row`/`valid_col`
+  operand to supply the runtime extent.
 - If `valid_row/valid_col` are provided:
-  - constant values must be positive and `<= sizes` in each dimension
+  - constant values must be non-negative and `<= sizes` in each dimension
   - non-constant values are represented as dynamic valid dims in the result type
 - The inferred result type uses:
   - `shape = sizes` (logical subview size)
@@ -717,6 +882,8 @@ result.valid = clip(explicit_valid_or_sizes, sizes)
   - if explicit `valid_row/valid_col` are provided, `valid_shape` is clipped by `sizes`
 - Lowering keeps parent physical stride/base semantics for non-compact access,
   so EmitC behavior remains unchanged from the previous implementation.
+- If an explicit valid dimension is zero, the subview still has the requested
+  physical `sizes`, but its valid region is empty in that dimension.
 
 **Hardware Mapping:**
 
@@ -906,8 +1073,9 @@ For each element (i, j) in the tile valid region:
   - Tile element type must be one of: `i8`, `i16`, `i32`, `i64`, `f16`, `bf16`, `f32`.
   - The destination tile must use `loc=vec` or `loc=mat`.
   - The destination tile element type and source partition element type must have the same bitwidth.
-  - Runtime: all source partition extents and the destination valid region must be positive.
+  - Runtime: all source partition extents must be positive; the destination valid region must be non-negative.
 - **Implementation checks (A5)**
+  - The source partition and destination tile element types must be one of `i8/i16/i32/i64/f16/bf16/f32/f8E4M3*/f8E5M2*/!pto.hif8/!pto.f4E1M2x2/!pto.f4E2M1x2`.
   - The destination tile element size must be `1`, `2`, `4`, or `8` bytes, and must match the source partition element size.
   - For `i64`, the destination tile `pad` must be `null` or `zero`.
 
@@ -951,8 +1119,9 @@ op is modeled as writing the prefetched data into `dst`.
 - `src` must be a partition view before lowering, or the corresponding lowered ranked memref form after `PTOViewToMemref`.
 - `dst` must be a tile buffer before lowering, or the corresponding lowered ranked memref form after `PTOViewToMemref`.
 - `dst` must use `loc=vec` or `loc=mat`.
-- Static source extents and static destination valid extents must be positive when known.
+- Static source extents must be positive when known; static destination valid extents must be non-negative when known.
 - `src` and `dst` element types must have the same element size in bytes.
+- Low-precision element types (`f8E4M3*`, `f8E5M2*`, `!pto.hif8`, `!pto.f4E1M2x2`, `!pto.f4E2M1x2`) are only accepted on A5.
 
 **Hardware Mapping:**
 
@@ -965,6 +1134,57 @@ pto.tprefetch ins(%pv : !pto.partition_tensor_view<16x16xf16>)
               outs(%tb : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16,
                     v_row=16, v_col=16, blayout=row_major, slayout=none_box,
                     fractal=512, pad=0>)
+```
+
+---
+
+##### `pto.tprefetch_async` - Asynchronous GM Prefetch into L2
+
+**Summary:** Starts an SDMA-backed asynchronous prefetch from GM into cache and returns the async event. The associated async session is obtained separately from an explicit prefetch context SSA value.
+
+**Semantics:**
+
+```
+%event = pto.tprefetch_async(%src, %ctx)
+%session = pto.get_prefetch_async_session %ctx
+```
+
+Lowering maps `%ctx` to `pto::PrefetchAsyncContext`, emits
+`TPREFETCH_ASYNC(src, ctx)`, and projects `ctx.session` through
+`pto.get_prefetch_async_session`.
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `src` | GM memref / `pto.tensor_view` / `pto.partition_tensor_view` | Source GM region to prefetch |
+| `ctx` | `!pto.prefetch_async_context` | Explicit PTO prefetch async context |
+
+**Results:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `event` | `!pto.async_event` | Async completion event returned by PTO-ISA |
+
+**Constraints & Verification:**
+
+- `src` must be a flat contiguous logical-1D GM view-like value.
+- `ctx` must be a valid `!pto.prefetch_async_context`.
+- This op intentionally mirrors the PTO-ISA API input checks in `verify()`, so shape/address-space mismatches fail at PTO IR verification time.
+
+**Basic Example:**
+
+```mlir
+%ctx = pto.make_prefetch_async_context(%workspace : !pto.ptr<i8>)
+    -> !pto.prefetch_async_context
+%event = pto.tprefetch_async(
+    %src, %ctx
+    : memref<128xf32, #pto.address_space<gm>>,
+      !pto.prefetch_async_context)
+    -> !pto.async_event
+%session = pto.get_prefetch_async_session %ctx
+    : !pto.prefetch_async_context -> !pto.async_session
+%done = pto.comm.wait_async_event(%event, %session : !pto.async_event, !pto.async_session) -> i1
 ```
 
 ---
@@ -997,7 +1217,8 @@ For each element (i, j) in the tile valid region:
 
 - Common checks:
   - `src` must be `!pto.tile_buf`, `dst` must be `!pto.partition_tensor_view`.
-  - Static `dst` shape dims and static `src` valid-shape dims must be positive.
+  - Static `dst` shape dims must be positive, and static `src` valid-shape dims
+    must be non-negative.
   - If `preQuantScalar` is present, `src` must be `loc=acc`.
   - If `reluPreMode != no_relu`, `src` must be `loc=acc`.
 - A2/A3 checks:
@@ -1017,14 +1238,14 @@ For each element (i, j) in the tile valid region:
   - `src.loc` must be `vec` or `acc` (A5 does not support `mat` here).
   - For `loc=vec`:
     - `preQuantScalar` is not allowed.
-    - `src` element type must be one of `i8/i16/i32/i64/f16/bf16/f32`.
+    - `src` element type must be one of `i8/i16/i32/i64/f16/bf16/f32/f8E4M3*/f8E5M2*/!pto.hif8/!pto.f4E1M2x2/!pto.f4E2M1x2`.
     - `src`/`dst` element bitwidth must match.
   - For `loc=acc`:
     - `src` element type must be `i32` or `f32`.
     - Without `preQuantScalar`: `dst` element type must be `i32/f32/f16/bf16`.
     - With `preQuantScalar`:
       - `src=i32` -> `dst=i8(ui8)/f16/bf16`
-      - `src=f32` -> `dst=i8(ui8)/f16/bf16/f32`
+      - `src=f32` -> `dst=i8(ui8)/f16/bf16/f32/!pto.hif8/f8E4M3*`
 
 **Type Note (PTO IR):**
 
@@ -1321,7 +1542,7 @@ For each (i, j):
     - `(f32, bf16, bf16)`
   - Shape constraints: `lhs.rows == dst.rows`, `lhs.cols == rhs.rows`, and `rhs.cols == dst.cols`.
   - Tile locations: `lhs.loc=left`, `rhs.loc=right`, `dst.loc=acc`.
-  - Runtime: `m/k/n` (taken from `lhs valid row`, `lhs valid column`, `rhs valid column`) must be in `[1, 4095]`.
+  - Runtime: `m/k/n` (taken from `lhs valid row`, `lhs valid column`, `rhs valid column`) must be in `[0, 4095]`.
 - **Implementation checks (A5)**
   - The destination element type must be `i32` or `f32`.
     - If the destination element type is `i32`, the lhs and rhs element types must both be `i8`.
@@ -1331,7 +1552,7 @@ For each (i, j):
     - `lhs.loc=left`, `lhs.blayout=col_major`, `lhs.slayout=row_major`
     - `rhs.loc=right`, `rhs.blayout=row_major`, `rhs.slayout=col_major`
     - `dst.loc=acc`, `dst.blayout=col_major`, `dst.slayout=row_major`
-  - Runtime: `m/k/n` (taken from `lhs valid row`, `lhs valid column`, `rhs valid column`) must be in `[1, 4095]`.
+  - Runtime: `m/k/n` (taken from `lhs valid row`, `lhs valid column`, `rhs valid column`) must be in `[0, 4095]`.
 
 **Hardware Mapping:**
 
@@ -1598,7 +1819,7 @@ For each row i:
     - `(f32, bf16, bf16)`
   - Shape constraints: `lhs.rows == dst.rows`, `lhs.cols == rhs.rows`, and `rhs.cols == dst.cols`.
   - Tile locations: `lhs.loc=left`, `rhs.loc=right`, `dst.loc=acc`.
-  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[1, 4095]`.
+  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[0, 4095]`.
 - **Implementation checks (A5)**
   - The destination element type must be `i32` or `f32`.
     - If the destination element type is `i32`, the lhs and rhs element types must both be `i8`.
@@ -1609,7 +1830,7 @@ For each row i:
     - `rhs.loc=right`, `rhs.blayout=row_major`, `rhs.slayout=col_major`
     - `dst.loc=acc`, `dst.blayout=col_major`, `dst.slayout=row_major`
   - No explicit runtime range checks on `m/k/n` are enforced in `TMATMUL_IMPL` on this target.
-  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[1, 4095]`.
+  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[0, 4095]`.
 
 **Hardware Mapping:**
 
@@ -1656,7 +1877,7 @@ dst = acc_in + (lhs * rhs)
     - `(f32, bf16, bf16)`
   - Shape constraints: `lhs.rows == dst.rows`, `lhs.cols == rhs.rows`, and `rhs.cols == dst.cols`.
   - Tile locations: `lhs.loc=left`, `rhs.loc=right`, `dst.loc=acc`.
-  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[1, 4095]`.
+  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[0, 4095]`.
 - **Implementation checks (A5)**
   - The destination element type must be `i32` or `f32`.
     - If the destination element type is `i32`, the lhs and rhs element types must both be `i8`.
@@ -1667,7 +1888,7 @@ dst = acc_in + (lhs * rhs)
     - `rhs.loc=right`, `rhs.blayout=row_major`, `rhs.slayout=col_major`
     - `dst.loc=acc`, `dst.blayout=col_major`, `dst.slayout=row_major`
   - No explicit runtime range checks on `m/k/n` are enforced in `TMATMUL_IMPL` on this target.
-  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[1, 4095]`.
+  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[0, 4095]`.
 
 **Hardware Mapping:**
 
@@ -1713,7 +1934,7 @@ dst = (lhs * rhs) + bias
     - `(f32, bf16, bf16)`
   - Shape constraints: `lhs.rows == dst.rows`, `lhs.cols == rhs.rows`, and `rhs.cols == dst.cols`.
   - Tile locations: `lhs.loc=left`, `rhs.loc=right`, `dst.loc=acc`.
-  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[1, 4095]`.
+  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[0, 4095]`.
   - Bias checks:
     - The bias tile element type must exactly match the result tile element type.
     - The bias tile must be configured as a single row.
@@ -1728,7 +1949,7 @@ dst = (lhs * rhs) + bias
     - `rhs.loc=right`, `rhs.blayout=row_major`, `rhs.slayout=col_major`
     - `dst.loc=acc`, `dst.blayout=col_major`, `dst.slayout=row_major`
   - No explicit runtime range checks on `m/k/n` are enforced in `TMATMUL_IMPL` on this target.
-  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[1, 4095]`.
+  - Runtime: `m` must be `1`; `k/n` (taken from `rhs valid row`, `rhs valid column`) must be in `[0, 4095]`.
   - Bias checks:
     - The bias tile element type must exactly match the result tile element type.
     - The bias tile must be configured as a single row.
@@ -4088,7 +4309,7 @@ pto.tlrelu ins(<src>, <slope> : <src_type>, <slope_type>)
 - **Implementation checks (A2A3)**
   - Tile element type must be one of: `f16`, `f32`.
   - Tile must use `loc=vec`.
-  - Valid bounds: `0 < valid row <= rows` and `0 < valid column <= cols`.
+  - Valid bounds: `0 <= valid row <= rows` and `0 <= valid column <= cols`.
   - Runtime: `src` and `dst` tiles should have the same `validRow/validCol`.
 - **Implementation checks (A5)**
   - Tile element type must be one of: `f16`, `f32`.
@@ -4554,26 +4775,34 @@ pto.trowprod ins(%src, %tmp : !pto.tile_buf<loc=vec, dtype=i16, rows=16, cols=16
 
 ##### `pto.thistogram` - Row-wise Histogram Accumulation
 
-**Summary:** Updates a 256-bin histogram row in `dst` using each source row and a per-row index selector. This op is only supported on A5.
+**Summary:** Updates a 256-bin histogram row in `dst` using A5 `THISTOGRAM` modes selected by the `byte` attribute.
 
 **Semantics:**
 
 ```
-For each row i:
-    bin = idx[i, 0]
-    dst[i, bin] = histogram_update(dst[i, bin], src[i, :])
+For `src : ui16`, each row updates one histogram bin selected by `idx[i, 0]`.
+
+For `src : ui32`, the exact filtering behavior is defined by the backend `THISTOGRAM<HistByte::BYTE_n>` intrinsic:
+- `byte = 3`: histogram byte 3 directly
+- `byte = 2`: histogram byte 2, filtered by byte 3
+- `byte = 1`: histogram byte 1, filtered by bytes 3 and 2
+- `byte = 0`: histogram byte 0, filtered by bytes 3, 2, and 1
 ```
 
-The exact accumulation performed inside the selected bin is target-defined by the hardware `THISTOGRAM` intrinsic. The `isMSB` attribute selects the intrinsic mode.
+The exact accumulation performed inside the selected bin is target-defined by the hardware `THISTOGRAM` intrinsic. The `byte` attribute maps directly to `HistByte::BYTE_<byte>`.
 
 **Arguments:**
 
 | Name | Type | Description |
 |------|------|-------------|
-| `src` | `pto.tile_buf` | Source tile buffer, one logical row per histogram update |
-| `idx` | `pto.tile_buf` | Per-row bin selector tile |
+| `src` | `pto.tile_buf` | Source tile buffer (`ui16` or `ui32`) |
+| `idx` | `pto.tile_buf` | Selector/filter tile interpreted according to `src` dtype and `byte` |
 | `dst` | `pto.tile_buf` | Destination histogram tile |
-| `isMSB` | `BoolAttr` (default: `true`) | Selects the `THISTOGRAM<...>` intrinsic mode |
+| `byte` | `I32Attr` (default: `1`) | Selects `THISTOGRAM<HistByte::BYTE_<byte>>`, valid range `[0, 3]` |
+
+Legacy inputs using `isMSB` are accepted for compatibility: `isMSB = false`
+maps to `byte = 0`, and `isMSB = true` maps to `byte = 1`. Specifying both
+`byte` and a conflicting legacy `isMSB` is rejected.
 
 **Results:** None. Writes into `dst` via DPS pattern.
 
@@ -4582,7 +4811,7 @@ The exact accumulation performed inside the selected bin is target-defined by th
 ```
 pto.thistogram ins(<src>, <idx> : <src_type>, <idx_type>)
                outs(<dst> : <dst_type>)
-               {isMSB = true}
+               {byte = 1 : i32}
 ```
 
 **Constraints & Verification:**
@@ -4592,15 +4821,24 @@ pto.thistogram ins(<src>, <idx> : <src_type>, <idx_type>)
 - **Implementation checks (A5)**
   - `src`, `idx`, and `dst` must all be `tile_buf` values in `loc=vec`.
   - `src` and `dst` must use `row_major + none_box` layout.
-  - `idx` must use DN-style layout (`col_major + none_box`).
-  - `src` element type must be `ui16`.
+  - `src` element type must be `ui16` or `ui32`.
   - `idx` element type must be `ui8`.
   - `dst` element type must be `ui32`.
+  - `byte` must be in `[0, 3]`.
   - `src`, `idx`, and `dst` must all be rank-2 tiles.
-  - `idx` rows and valid rows must match `src`.
   - `dst` rows and valid rows must match `src`.
-  - `idx` must have exactly one column.
   - `dst` shape[1] and valid_shape[1] must be at least `256`.
+  - When `src` is `ui16`:
+    - `byte` must be `0` or `1`.
+    - `idx` must use DN-style layout (`col_major + none_box`).
+    - `idx` rows and valid rows must match `src`.
+    - `idx` must have exactly one column.
+  - When `src` is `ui32`:
+    - When `byte = 3`, `idx` is accepted but not semantically used by the A5 backend intrinsic; no additional layout or shape constraints are imposed beyond the generic `tile_buf`, `loc=vec`, `dtype=ui8`, and rank-2 requirements.
+    - When `byte = 2`, `1`, or `0`, `idx` must use `row_major + none_box` layout. `idx` cols and valid cols must match `src`.
+    - When `byte = 2`, `idx` rows / valid rows must be `1`.
+    - When `byte = 1`, `idx` rows / valid rows must be `2`.
+    - When `byte = 0`, `idx` rows / valid rows must be `3`.
 
 **Hardware Mapping:**
 
@@ -4618,7 +4856,7 @@ pto.thistogram ins(%src, %idx : !pto.tile_buf<loc=vec, dtype=ui16, rows=8, cols=
                    fractal=512, pad=0>)
                outs(%dst : !pto.tile_buf<loc=vec, dtype=ui32, rows=8, cols=256,
                    v_row=8, v_col=256, blayout=row_major, slayout=none_box,
-                   fractal=512, pad=0>) {isMSB = false}
+                   fractal=512, pad=0>) {byte = 0 : i32}
 ```
 
 ---
@@ -7556,7 +7794,20 @@ dst[i, j] = saturate(cast(src[i, j], rmode), satmode)
 - `dst` and `src` must be compatible in shape/valid region as required by the implementation.
 - `satmode = ON` requests destination-range clamping after rounding; `OFF` preserves the target's non-saturating conversion path.
 - **A2/A3 and A5 notes:**
-  - The current implementation does not add extra compile-time or runtime checks for the type pair; unsupported conversions are target-defined.
+  - A2/A3 reject all low-precision `tcvt` operands.
+  - A5 only accepts the following low-precision pairs: 
+    `f32 -> f8E4M3*`, 
+    `f32 -> f8E5M2*`, 
+    `f32 -> !pto.hif8`, 
+    `f16 -> !pto.hif8`, 
+    `bf16 -> !pto.f4E1M2x2`, 
+    `bf16 -> !pto.f4E2M1x2`, 
+    `!pto.f4E1M2x2 -> bf16`, 
+    `!pto.f4E2M1x2 -> bf16`, 
+    `f8E4M3* -> f32`, 
+    `f8E5M2* -> f32`, 
+    `!pto.hif8 -> f32`.
+  - Non-low-precision pairs continue to use the existing target-defined behavior.
 
 **Hardware Mapping:**
 
@@ -8033,6 +8284,61 @@ pto.wait_event [#pto.pipe_event_type<EVENT_LOAD_FROM_GM>, #pto.pipe_event_type<E
 
 #### Cross-Core Synchronization
 
+##### `pto.syncall`
+
+**Summary:** Models the PTO-ISA `SYNCALL` family for all-participant synchronization across AIC/AIV cores.
+
+**Forms:**
+
+- Hard sync: no workspace operands
+- Soft AIV-only sync: `gm_workspace + ub_workspace [+ used_cores]`
+- Soft AIC-only sync: `gm_workspace + l1_workspace [+ used_cores]`
+- Soft mixed sync: `gm_workspace + ub_workspace + l1_workspace [+ used_cores]`
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `gm_workspace` | optional GM memref of `i32` | Global shared workspace used by soft mode |
+| `ub_workspace` | optional VEC tile/memref of `i32` | Vector-core local workspace for soft mode |
+| `l1_workspace` | optional MAT tile/memref of `i32` | Cube-core local workspace for soft mode |
+| `used_cores` | optional `i32` | Explicit participant count for soft mode |
+| `mode` | `#pto.sync_all_mode<...>` | `hard` or `soft` |
+| `core_type` | `#pto.sync_core_type<...>` | `aiv_only`, `aic_only`, or `mix` |
+
+**Results:** None.
+
+**Constraints & Verification:**
+
+- Hard mode requires no workspace operands and no `used_cores`.
+- Soft mode always requires `gm_workspace`.
+- Soft `aiv_only` requires `ub_workspace` and forbids `l1_workspace`.
+- Soft `aic_only` requires `l1_workspace` and forbids `ub_workspace`.
+- Soft `mix` requires both `ub_workspace` and `l1_workspace`.
+- `gm_workspace` must be a ranked GM memref of `i32`.
+- `ub_workspace` / `l1_workspace` must be rank-1 or rank-2 `i32` tile/memref values in `vec` / `mat` address space respectively.
+- These constraints intentionally mirror the corresponding PTO-ISA API parameter checks in `verify()`.
+
+**Basic Example:**
+
+```mlir
+"pto.syncall"(%gm, %ub, %used) {
+  operandSegmentSizes = array<i32: 1, 1, 0, 1>,
+  mode = #pto.sync_all_mode<soft>,
+  core_type = #pto.sync_core_type<aiv_only>
+} : (memref<64xi32, #pto.address_space<gm>>,
+     memref<64xi32, #pto.address_space<vec>>,
+     i32) -> ()
+
+"pto.syncall"() {
+  operandSegmentSizes = array<i32: 0, 0, 0, 0>,
+  mode = #pto.sync_all_mode<hard>,
+  core_type = #pto.sync_core_type<mix>
+} : () -> ()
+```
+
+---
+
 ##### `pto.sync.set`
 
 **Summary:** Sets a synchronization signal between cube and vector cores.
@@ -8260,11 +8566,21 @@ frontend/framework generated IR. The detailed design document is:
   function.
 - `slot_size` is expressed in bytes and uses the pre-split logical pipe-entry
   size.
+- `slot_num` is an optional compile-time integer attribute on
+  `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`. It controls the pipe
+  FIFO depth. The `effective_slot_num` is the explicit value when present, or
+  the default value: `8` for `dir_mask = 1/2` or `4` for `dir_mask = 3`.
 - `local_slot_num` is an optional compile-time integer attribute on
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`.
   On A2/A3 it overrides the default consumer-side local FIFO slot count only
   when the pipe uses a local consumer FIFO buffer. Global-only GM FIFO pipes
   omit it.
+- `pto.reserve_buffer.size` is the byte size of the consumer-side local FIFO
+  buffer. For A2/A3 local FIFO pipes, it should be
+  `slot_size * effective_local_slot_num`, where `effective_local_slot_num` is
+  the explicit `local_slot_num` when present or the effective `slot_num`
+  otherwise. For A5 local FIFO pipes, `local_slot_num` is not configurable and
+  the reserved byte size should be `slot_size * effective_slot_num`.
 - `nosplit` is an optional compile-time boolean attribute on
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`.
 - `split` is a compile-time attribute, not a runtime SSA operand.
@@ -8283,9 +8599,10 @@ frontend/framework generated IR. The detailed design document is:
   (`pto.initialize_l2g2l_pipe`). It does not implicitly execute `pto.tstore` or
   `pto.tload`; callers move data explicitly before `tpush` or after `tpop`.
 - When every transfer op bound to one pipe id uses a global entry, the pipe is
-  a global-only GM FIFO. Its frontend initialize op carries only
-  `gm_slot_tensor`; `gm_slot_buffer`, `c2v_consumer_buf`, `v2c_consumer_buf`, `local_slot_num`,
-  `pto.reserve_buffer`, and `pto.import_reserved_buffer` are not used.
+  a global-only GM FIFO. Its frontend initialize op carries `gm_slot_tensor`
+  and may carry `slot_num`; `gm_slot_buffer`, `c2v_consumer_buf`,
+  `v2c_consumer_buf`, `local_slot_num`, `pto.reserve_buffer`, and
+  `pto.import_reserved_buffer` are not used.
 - For global entries, the matched initialize op's `gm_slot_tensor` describes
   one FIFO slot entry, not the full multi-slot FIFO buffer. Its dtype, shape,
   stride, and layout must match the `tensor_view` returned by `talloc` /
@@ -8355,7 +8672,10 @@ When the address is already fixed in the input IR:
 **Arguments:**
 
 - `name`: string attribute identifying the logical reserved buffer
-- `size`: reserved buffer size in bytes
+- `size`: reserved buffer size in bytes. For A2/A3 local FIFO pipes this is
+  `slot_size * effective_local_slot_num`; for A5 local FIFO pipes this is
+  `slot_size * effective_slot_num`. Global-only GM FIFO pipes do not use
+  `pto.reserve_buffer`.
 - `location`: local address-space attribute, typically `vec` or `mat`
 - `auto`: boolean allocation-mode flag in textual IR
 - `base`: optional explicit local base address
@@ -8366,6 +8686,9 @@ When the address is already fixed in the input IR:
 
 - Multiple `pto.reserve_buffer` ops are allowed in one function, but `name`
   must be unique within that function
+- `size` must be greater than `0`; PTOAS allocates exactly the requested byte
+  size, so it should match the local FIFO sizing rule of the pipe that consumes
+  this buffer
 - `location` must be a supported local address space
 - Op-level verification requires:
   - `auto = false` must provide `base`
@@ -8419,7 +8742,7 @@ this op.
 
 ```mlir
 // A2/A3 (with GM slot buffer):
-pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, local_slot_num = 1}
+pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, slot_num = 2, local_slot_num = 1}
   (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
    c2v_consumer_buf = %c2v_import : i32,
    v2c_consumer_buf = %c0_i32 : i32)
@@ -8443,6 +8766,8 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
   the same function
 - `dir_mask`: communication direction encoding
 - `slot_size`: logical slot size in bytes
+- `slot_num`: optional GM ring FIFO slot count; omitted defaults to `8` for
+  `dir_mask = 1/2` or `4` for `dir_mask = 3`
 - `local_slot_num`: optional A2/A3-only local FIFO slot count override for the
   lowered `pto.initialize_l2g2l_pipe`; omitted for global-only GM FIFO
 - `nosplit`: optional compile-time boolean controlling no-split pipe mode
@@ -8465,12 +8790,16 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
 - Must appear in Cube kernels
 - Multiple `pto.aic_initialize_pipe` ops are allowed in one Cube function, but
   `id` must be unique among frontend initialize ops in that function
+- If `slot_num` is present, it must be greater than `0`
 - If `local_slot_num` is present, it must be greater than `0` and no greater
-  than the legacy slot count implied by `dir_mask`
-  (`8` for `dir_mask = 1/2`, `4` for `dir_mask = 3`)
+  than the effective `slot_num`
+- On A5, `local_slot_num` must be omitted; A5 frontend pipes lower to
+  `pto.initialize_l2l_pipe`, which does not use a local FIFO slot-count
+  template parameter. Its consumer-side `pto.reserve_buffer.size` should be
+  `slot_size * effective_slot_num`
 - A global-only GM FIFO initialize carries only `gm_slot_tensor`; it must not
   carry `gm_slot_buffer`, `local_slot_num`, `c2v_consumer_buf`, or
-  `v2c_consumer_buf`
+  `v2c_consumer_buf`; it may carry `slot_num`
 - For global-only GM FIFO, `slot_size` must match the byte size of
   `gm_slot_tensor`
 - Global-entry `talloc` / `tpush` / `tpop` / `tfree` entry types must match the
@@ -8490,7 +8819,7 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
 
 ```mlir
 // A2/A3 (with GM slot buffer):
-pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, local_slot_num = 1}
+pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, slot_num = 2, local_slot_num = 1}
   (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
    c2v_consumer_buf = %c2v_local : i32,
    v2c_consumer_buf = %c0_i32 : i32)
@@ -9284,6 +9613,16 @@ pto.comm.tget(%dst, %src, buf(%ping, %pong) : !pto.partition_tensor_view<128xf32
 
 - `signal` must be a GM-shaped value with element type `i32`.
 - `value` / `cmpValue` must be signless integer scalars.
+
+**Lowering ordering guarantee:**
+
+- `pto.comm.tnotify` is lowered with a `pipe_barrier(PIPE_ALL)` emitted
+  immediately before the `pto::comm::TNOTIFY(...)` call. `TNOTIFY_IMPL` writes
+  the signal on the scalar pipe and only issues its trailing barrier *after*
+  the store, so this preceding drain is what makes the
+  `peer_TWAIT_returns ⇒ everything I issued before my TNOTIFY is visible`
+  contract hold across `pto.tload` / `pto.tstore` (local or peer-addressed).
+  Callers do not need to insert manual sync.
 
 **Examples:**
 

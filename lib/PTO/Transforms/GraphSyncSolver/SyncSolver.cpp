@@ -166,7 +166,8 @@ bool Solver::checkSkipParallelLoop(Occurrence *occ1, Occurrence *occ2) {
   auto [parOcc1, parOcc2] = Occurrence::getLCAPair(occ1, occ2);
   assert(parOcc1 != nullptr && parOcc2 != nullptr);
   auto *parentLCALoopOcc = Occurrence::getParentloop(parOcc1);
-  assert(parentLCALoopOcc != nullptr);
+  if (parentLCALoopOcc == nullptr)
+    return false;
   auto *parentLCALoopOp = llvm::cast<Loop>(parentLCALoopOcc->op);
   return parentLCALoopOp->isParallel;
 }

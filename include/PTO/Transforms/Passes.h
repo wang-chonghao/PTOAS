@@ -39,11 +39,15 @@ std::unique_ptr<Pass> createPTOLowerFrontendPipeOpsPass();
 std::unique_ptr<Pass> createPTOInferValidatePipeInitPass();
 std::unique_ptr<Pass> createPTOResolveReservedBuffersPass();
 std::unique_ptr<Pass> createPTOWrapFunctionsInSectionsPass();
+std::unique_ptr<Pass> createVPTOSplitCVModulePass();
+std::unique_ptr<Pass> createVPTONormalizeContainerPass();
 std::unique_ptr<Pass> createPTOVerifyTFreePass();
 
 // Creates a pass for ...
 std::unique_ptr<Pass> createPTOInsertSyncPass();
 std::unique_ptr<Pass> createPTOInjectBarrierAllSyncPass();
+std::unique_ptr<Pass>
+createPTOBufidSyncPass(const PTOBufidSyncOptions &options = {});
 
 // Graph-based intra-core sync solver (coexists with PTOInsertSync).
 std::unique_ptr<Pass>
@@ -67,10 +71,34 @@ createPlanMemoryPass(const PlanMemoryOptions &planMemoryOption = {});
 
 std::unique_ptr<Pass> createPTORemoveRedundantBarrierPass();
 std::unique_ptr<Pass> createPTOViewToMemrefPass();
+std::unique_ptr<Pass> createPTOValidateIntToPtrUsesPass();
 std::unique_ptr<Pass> createPTOMaterializeTileHandlesPass();
 std::unique_ptr<Pass> createPTOResolveBufferSelectPass();
 std::unique_ptr<Pass> createInferPTOLayoutPass();
 std::unique_ptr<Pass> createPTOA5NormalizeTMovPass();
+std::unique_ptr<Pass> createFusionPlanPass();
+std::unique_ptr<Pass> createOpSchedulingPass();
+std::unique_ptr<Pass> createPTOMarkLastUsePass();
+
+LogicalResult validateIntToPtrUses(func::FuncOp func);
+
+std::unique_ptr<Pass> createPTOInferVPTOVecScopePass();
+std::unique_ptr<Pass> createVPTOExpandWrapperOpsPass();
+std::unique_ptr<Pass> createPTOVPTOPtrBoundaryPass();
+std::unique_ptr<Pass> createVPTOPtrNormalizePass();
+std::unique_ptr<Pass> createVPTOPtrCastCleanupPass();
+LogicalResult validateVPTOAuthoringIR(ModuleOp module,
+                                      llvm::raw_ostream *diagOS = nullptr);
+LogicalResult validateVPTOEmissionIR(ModuleOp module,
+                                     llvm::raw_ostream *diagOS = nullptr);
+std::unique_ptr<Pass> createPTOValidateVPTOIRPass();
+std::unique_ptr<Pass> createPTOValidateVPTOEmissionIRPass();
+std::unique_ptr<Pass> createExpandTileOpPass();
+std::unique_ptr<Pass> createExpandTileOpPass(const ExpandTileOpOptions &options);
+std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass();
+std::unique_ptr<Pass>
+createPTOInlineLibCallPass(const PTOInlineLibCallOptions &options = {});
+void registerPTOViewToMemrefPass();
 
 //===----------------------------------------------------------------------===//
 // Registration

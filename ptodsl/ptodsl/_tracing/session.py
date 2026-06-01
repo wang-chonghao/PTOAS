@@ -1,0 +1,215 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+"""Trace-session objects shared by PTODSL tracing runtimes."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import dataclass
+
+from .control_flow import (
+    build_carry_loop_frame,
+    finish_carry_loop_frame,
+    yield_carry_loop_state,
+)
+from .._surface_values import unwrap_surface_value, wrap_like_surface_value
+
+from mlir.dialects import arith, func
+from mlir.dialects import pto as _pto
+from mlir.ir import InsertionPoint, IntegerType, UnitAttr
+
+
+@dataclass(frozen=True)
+class HelperFunctionSpec:
+    """Declarative description of a helper function emitted during tracing."""
+
+    symbol_name: str
+    arg_types: tuple
+    result_types: tuple = ()
+    attributes: tuple[tuple[str, object], ...] = ()
+
+
+@dataclass(frozen=True)
+class SubkernelTraceFrame:
+    """Active inline-lowering frame for one PTODSL subkernel call."""
+
+    role: str
+    symbol_name: str
+    target: str
+
+
+class TraceSession:
+    """Shared per-build state for a traced PTODSL module."""
+
+    def __init__(self, module_spec, module, entry_function):
+        self.module_spec = module_spec
+        self.module = module
+        self.entry_function = entry_function
+        self.entry_block = None
+        self._function_stack = [entry_function]
+        self._function_symbol_table = entry_function.operation.parent.regions[0].blocks[0]
+        self._helpers: dict[str, object] = {}
+        self._subkernel_stack: list[SubkernelTraceFrame] = []
+        self._carry_loop_stack = []
+
+    @property
+    def current_function(self):
+        return self._function_stack[-1]
+
+    @property
+    def current_subkernel(self):
+        if not self._subkernel_stack:
+            return None
+        return self._subkernel_stack[-1]
+
+    @property
+    def subkernel_stack_depth(self):
+        return len(self._subkernel_stack)
+
+    @property
+    def current_carry_loop(self):
+        if not self._carry_loop_stack:
+            return None
+        return self._carry_loop_stack[-1]
+
+    def bind_entry_block(self, entry_block) -> None:
+        """Record the root entry block for the active trace."""
+        self.entry_block = entry_block
+
+    @contextmanager
+    def enter_function(self, ir_fn):
+        """Push *ir_fn* as the current active function in this session."""
+        self._function_stack.append(ir_fn)
+        try:
+            yield ir_fn
+        finally:
+            popped = self._function_stack.pop()
+            if popped is not ir_fn:
+                raise RuntimeError("PTODSL trace-session function stack corruption detected")
+
+    @contextmanager
+    def enter_inline_subkernel(self, role: str, symbol_name: str, target: str):
+        """Push one inline subkernel frame onto the active tracing stack."""
+        frame = SubkernelTraceFrame(
+            role=role,
+            symbol_name=symbol_name,
+            target=target,
+        )
+        self._subkernel_stack.append(frame)
+        try:
+            yield frame
+        finally:
+            popped = self._subkernel_stack.pop()
+            if popped is not frame:
+                raise RuntimeError("PTODSL trace-session subkernel stack corruption detected")
+
+    @contextmanager
+    def enter_subkernel(self, subkernel):
+        """Push *subkernel* as the current active inline-lowering frame."""
+        with self.enter_inline_subkernel(
+            subkernel.spec.role.value,
+            subkernel.spec.symbol_name,
+            subkernel.spec.target,
+        ) as frame:
+            yield frame
+
+    def lower_inline_subkernel(self, subkernel, *args, **kwargs):
+        """Lower one inline PTODSL subkernel call through the shared session."""
+        with self.enter_subkernel(subkernel):
+            return subkernel.emit_body(*args, **kwargs)
+
+    def begin_carry_loop(self, start, stop, step, state_items):
+        """Materialize one authored ``pto.for_(...).carry(...)`` loop body."""
+        frame = build_carry_loop_frame(start, stop, step, state_items)
+        self._carry_loop_stack.append(frame)
+        return frame
+
+    def update_carry_loop(self, frame, **kwargs):
+        """Emit the one legal ``loop.update(...)`` for the active carry loop."""
+        active = self.current_carry_loop
+        if active is None or active is not frame:
+            raise RuntimeError("loop.update(...) may only be called inside the active carry loop body")
+        yield_carry_loop_state(frame, **kwargs)
+
+    def finish_carry_loop(self, frame, exc_type, exc, tb):
+        """Finalize one active authored carry loop and close its body insertion point."""
+        if not self._carry_loop_stack:
+            raise RuntimeError("carry-loop exit without a matching active PTODSL trace-session frame")
+        popped = self._carry_loop_stack.pop()
+        if popped is not frame:
+            raise RuntimeError("PTODSL trace-session carry-loop stack corruption detected")
+        finish_carry_loop_frame(frame, exc_type, exc, tb)
+
+    def lower_simt_helper_subkernel(self, subkernel, *args, **kwargs):
+        """Lower one ``@pto.simt`` call through a dedicated helper function."""
+        outer_frame = self.current_subkernel
+        if outer_frame is not None and outer_frame.role == "simt":
+            raise RuntimeError("@pto.simt helper lowering does not support nested SIMT helper calls")
+
+        arg_templates = tuple(args)
+        arg_types = tuple(unwrap_surface_value(arg).type for arg in arg_templates)
+        helper_spec = HelperFunctionSpec(
+            symbol_name=subkernel.spec.symbol_name,
+            arg_types=arg_types,
+            attributes=(("pto.simt_entry", UnitAttr.get()),),
+        )
+        helper_fn, created = self.get_or_create_helper_function(helper_spec)
+
+        if created:
+            entry_block = helper_fn.add_entry_block()
+            wrapped_args = tuple(
+                wrap_like_surface_value(template, value)
+                for template, value in zip(arg_templates, entry_block.arguments)
+            )
+            with self.enter_function(helper_fn), self.enter_subkernel(subkernel), InsertionPoint(entry_block):
+                subkernel.emit_body(*wrapped_args, **kwargs)
+                func.ReturnOp([])
+
+        i32 = IntegerType.get_signless(32)
+        dim_z = arith.ConstantOp(i32, 1).result
+        dim_y = arith.ConstantOp(i32, 1).result
+        dim_x = arith.ConstantOp(i32, 1).result
+        _pto.StoreVfSimtInfoOp(dim_z, dim_y, dim_x)
+        func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in arg_templates])
+
+    def lookup_helper(self, symbol_name: str):
+        """Return a previously declared helper function, or ``None``."""
+        return self._helpers.get(symbol_name)
+
+    def get_or_create_helper_function(self, spec: HelperFunctionSpec):
+        """
+        Look up or create a helper ``func.func`` in the current symbol table.
+
+        Returns ``(helper_fn, created)`` where *created* reports whether a new
+        symbol was emitted in this trace session.
+        """
+        helper = self._helpers.get(spec.symbol_name)
+        if helper is not None:
+            return helper, False
+
+        fn_ty = func.FunctionType.get(list(spec.arg_types), list(spec.result_types))
+        with InsertionPoint(self._function_symbol_table):
+            helper = func.FuncOp(spec.symbol_name, fn_ty)
+            for attr_name, attr_value in spec.attributes:
+                helper.attributes[attr_name] = attr_value
+        self._helpers[spec.symbol_name] = helper
+        return helper, True
+
+    def validate_final_state(self) -> None:
+        """Check that tracing-time session stacks were fully unwound."""
+        if self._subkernel_stack:
+            raise RuntimeError("PTODSL trace-session exited with an open subkernel lowering frame")
+        if self._carry_loop_stack:
+            raise RuntimeError("PTODSL trace-session exited with an open loop-carry lowering frame")
+
+
+__all__ = [
+    "HelperFunctionSpec",
+    "SubkernelTraceFrame",
+    "TraceSession",
+]
