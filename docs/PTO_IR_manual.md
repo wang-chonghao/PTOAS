@@ -7082,7 +7082,8 @@ pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<P0101>} : !pto.tile_buf<
             outs(%dst : !pto.tile_buf<...>)
 ```
 
-`maskPattern` form is currently intended for A3 / CPU-sim style backends. A5 rejects this form.
+`maskPattern` form lowers to the `pto-isa` `TSCATTER<MaskPattern, ScatterType>` overload on
+backends that provide it, including A2/A3 and A5.
 
 ---
 

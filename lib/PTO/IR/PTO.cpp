@@ -9784,7 +9784,7 @@ mlir::LogicalResult mlir::pto::TScatterOp::verify() {
   };
   auto verifyA5 = [&]() -> LogicalResult {
     if (hasMaskPattern)
-      return emitOpError("mask-pattern tscatter is not supported on A5 yet");
+      return verifyMaskForm();
     return verifyIndexedForm();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
