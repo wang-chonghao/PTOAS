@@ -50,6 +50,7 @@ def _build_flat_aicore_module(spec: KernelModuleSpec, arg_types):
     with InsertionPoint(module.body):
         ir_fn = func.FuncOp(spec.function_name, fn_ty)
         ir_fn.attributes["pto.aicore"] = UnitAttr.get()
+        ir_fn.attributes["pto.kernel_kind"] = _kernel_kind_attr(spec.kernel_kind)
     return module, ir_fn
 
 
@@ -68,6 +69,7 @@ def _build_nested_module(spec: KernelModuleSpec, arg_types):
         with InsertionPoint(inner_body):
             fn_ty = func.FunctionType.get(arg_types, [])
             ir_fn = func.FuncOp(spec.function_name, fn_ty)
+            ir_fn.attributes["pto.kernel_kind"] = _kernel_kind_attr(spec.kernel_kind)
 
     return outer, ir_fn
 

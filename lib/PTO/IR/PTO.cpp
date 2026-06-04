@@ -12212,6 +12212,20 @@ static bool isInsideSectionVector(Operation *op) {
 }
 
 static std::optional<FunctionKernelKind>
+getEnclosingModuleKernelKind(Operation *op) {
+  for (Operation *parent = op; parent; parent = parent->getParentOp()) {
+    auto moduleOp = dyn_cast<ModuleOp>(parent);
+    if (!moduleOp)
+      continue;
+    auto kernelKindAttr = moduleOp->getAttrOfType<FunctionKernelKindAttr>(
+        FunctionKernelKindAttr::name);
+    if (kernelKindAttr)
+      return kernelKindAttr.getKernelKind();
+  }
+  return std::nullopt;
+}
+
+static std::optional<FunctionKernelKind>
 getEnclosingFunctionKernelKind(Operation *op) {
   auto funcOp = op->getParentOfType<func::FuncOp>();
   if (!funcOp)
@@ -12228,7 +12242,8 @@ getEnclosingFunctionKernelKind(Operation *op) {
 
 static bool isInsideSectionOrAttributedKernel(Operation *op) {
   return isInsideSectionCube(op) || isInsideSectionVector(op) ||
-         getEnclosingFunctionKernelKind(op).has_value();
+         getEnclosingFunctionKernelKind(op).has_value() ||
+         getEnclosingModuleKernelKind(op).has_value();
 }
 
 static LogicalResult verifySplitAttr(Operation *op, int64_t split) {
@@ -12240,10 +12255,28 @@ static LogicalResult verifySplitAttr(Operation *op, int64_t split) {
 static LogicalResult verifyFrontendKernelKind(Operation *op,
                                               FunctionKernelKind expected,
                                               StringRef kernelName) {
-  auto kernelKind = getEnclosingFunctionKernelKind(op);
-  if (!kernelKind || *kernelKind != expected) {
+  if (isInsideSectionCube(op)) {
+    if (expected == FunctionKernelKind::Cube)
+      return success();
     return op->emitOpError("must be inside a ")
-           << kernelName << " kernel function";
+           << kernelName << " kernel function or section";
+  }
+  if (isInsideSectionVector(op)) {
+    if (expected == FunctionKernelKind::Vector)
+      return success();
+    return op->emitOpError("must be inside a ")
+           << kernelName << " kernel function or section";
+  }
+
+  std::optional<FunctionKernelKind> kernelKind =
+      getEnclosingFunctionKernelKind(op);
+  if (!kernelKind)
+    kernelKind = getEnclosingModuleKernelKind(op);
+  if (!kernelKind)
+    return success();
+  if (*kernelKind != expected) {
+    return op->emitOpError("must be inside a ")
+           << kernelName << " kernel function or section";
   }
   return success();
 }
@@ -12582,14 +12615,22 @@ static LogicalResult verifyFrontendInitCommon(InitOpT op,
         op.getOperation(), op.getGmSlotTensor(), dirMask, op.getSlotSize());
   }
 
-  if (hasC2vConsumerBuf != hasV2cConsumerBuf) {
+  if (!hasC2vConsumerBuf && !hasV2cConsumerBuf) {
     return op.emitOpError(
-        "expects 'c2v_consumer_buf' and 'v2c_consumer_buf' to be provided together");
+        "expects local pipe init to provide at least one consumer buffer "
+        "operand; use 'gm_slot_tensor' for globaltensor pipe entries");
   }
-  if (!hasC2vConsumerBuf) {
+  if (dirMask == 1 && !hasC2vConsumerBuf) {
     return op.emitOpError(
-        "expects local pipe init to provide 'c2v_consumer_buf' and "
-        "'v2c_consumer_buf'; use 'gm_slot_tensor' for globaltensor pipe entries");
+        "expects 'c2v_consumer_buf' when dir_mask is 1");
+  }
+  if (dirMask == 2 && !hasV2cConsumerBuf) {
+    return op.emitOpError(
+        "expects 'v2c_consumer_buf' when dir_mask is 2");
+  }
+  if (dirMask == 3 && (!hasC2vConsumerBuf || !hasV2cConsumerBuf)) {
+    return op.emitOpError(
+        "expects both 'c2v_consumer_buf' and 'v2c_consumer_buf' when dir_mask is 3");
   }
 
   if (auto localSlotNumAttr = op.getLocalSlotNumAttr()) {
