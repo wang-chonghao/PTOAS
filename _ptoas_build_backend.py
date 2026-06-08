@@ -94,6 +94,10 @@ def build_sdist(sdist_directory, config_settings=None):
     )
 
 
+def _should_use_linux_hardening_cache() -> bool:
+    return sys.platform.startswith("linux")
+
+
 def _cmake_configure_and_build():
     """CMake configure + Ninja build + install."""
     _BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -126,7 +130,7 @@ def _cmake_configure_and_build():
         cmake_cmd.append(f"-DPTOAS_RELEASE_VERSION_OVERRIDE={release_version}")
 
     hardening_cache = _REPO / "cmake" / "LinuxHardeningCache.cmake"
-    if hardening_cache.exists():
+    if _should_use_linux_hardening_cache() and hardening_cache.exists():
         cmake_cmd.insert(1, f"-C{hardening_cache}")
 
     subprocess.check_call(cmake_cmd)
