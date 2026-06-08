@@ -1117,6 +1117,64 @@ static void rewriteEventIdArrayMarkers(std::string &cpp) {
   rewriteMarkerCallsToSubscripts(cpp, kEventIdMarkerRewrites);
 }
 
+static bool isPreprocessorDirectiveLine(llvm::StringRef trimmedLine) {
+  return trimmedLine.starts_with("#");
+}
+
+// Nested emitc.verbatim ops inside emitc.for / emitc.if regions currently
+// pick up an extra trailing semicolon from EmitC C++ emission, which produces
+// invalid lines such as `#if defined(__DAV_VEC__);` and `set_mask_norm();;`.
+// Trim only those malformed suffixes here so bisheng can compile the emitted
+// source until the upstream printer behavior is fixed.
+static void rewriteMalformedVerbatimSemicolons(std::string &cpp) {
+  if (cpp.empty())
+    return;
+
+  llvm::StringRef input(cpp);
+  std::string rewritten;
+  rewritten.reserve(cpp.size());
+
+  bool prevWasPreprocessorDirective = false;
+  size_t offset = 0;
+  while (offset < input.size()) {
+    size_t newlinePos = input.find('\n', offset);
+    bool hasNewline = newlinePos != llvm::StringRef::npos;
+    llvm::StringRef line =
+        hasNewline ? input.slice(offset, newlinePos) : input.drop_front(offset);
+    std::string current(line.str());
+    llvm::StringRef trimmed = llvm::StringRef(current).trim();
+
+    if (trimmed == ";" && prevWasPreprocessorDirective) {
+      // `#endif ...` in nested verbatim blocks currently materializes as the
+      // directive line followed by a standalone `;` on the next line.
+      prevWasPreprocessorDirective = false;
+    } else {
+      if (isPreprocessorDirectiveLine(trimmed) && trimmed.ends_with(";")) {
+        size_t semicolonPos = current.find_last_of(';');
+        if (semicolonPos != std::string::npos)
+          current.erase(semicolonPos, 1);
+      } else if (!trimmed.empty() && !trimmed.starts_with("//") &&
+                 !trimmed.starts_with("/*") && trimmed.ends_with(";;")) {
+        size_t semicolonPos = current.find_last_of(';');
+        if (semicolonPos != std::string::npos)
+          current.erase(semicolonPos, 1);
+      }
+
+      rewritten.append(current);
+      if (hasNewline)
+        rewritten.push_back('\n');
+      prevWasPreprocessorDirective =
+          isPreprocessorDirectiveLine(llvm::StringRef(current).trim());
+    }
+
+    if (!hasNewline)
+      break;
+    offset = newlinePos + 1;
+  }
+
+  cpp.swap(rewritten);
+}
+
 static bool rewriteAddPtrTraceMarkers(std::string &cpp, bool showTrace) {
   size_t searchPos = 0;
   bool changed = false;
@@ -1881,6 +1939,7 @@ int mlir::pto::compilePTOASModule(
   rewriteEventIdArrayMarkers(cppOutput);
   pto::rewriteLastUseMarkersInCpp(cppOutput);
   rewriteAddPtrTraceMarkers(cppOutput, emitAddPtrTrace);
+  rewriteMalformedVerbatimSemicolons(cppOutput);
   rewriteScalarConstantDecls(cppOutput);
   rewriteHoistedGlobalTensorDecls(cppOutput);
 
