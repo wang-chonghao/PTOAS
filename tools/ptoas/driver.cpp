@@ -15,6 +15,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/Parser/Parser.h"
 #include "ptobc/ptobc_decode.h"
 #include "llvm/ADT/ScopeExit.h"
@@ -180,21 +181,27 @@ loadInputModule(std::unique_ptr<llvm::MemoryBuffer> inputBuffer,
   if (cliArchSpecified) {
     moduleOp->setAttr("pto.target_arch",
                       mlir::StringAttr::get(moduleOp->getContext(), arch));
-    return module;
-  }
-
-  if (auto archAttr = moduleOp->getAttrOfType<StringAttr>("pto.target_arch")) {
+  } else if (auto archAttr = moduleOp->getAttrOfType<StringAttr>("pto.target_arch")) {
     std::string moduleArch = normalizePTOASArch(archAttr.getValue());
     if (isSupportedPTOASArch(moduleArch)) {
       arch = std::move(moduleArch);
-      return module;
+    } else {
+      if (!isSupportedPTOASArch(arch))
+        arch = "a3";
+      moduleOp->setAttr("pto.target_arch",
+                        mlir::StringAttr::get(moduleOp->getContext(), arch));
     }
+  } else {
+    if (!isSupportedPTOASArch(arch))
+      arch = "a3";
+    moduleOp->setAttr("pto.target_arch",
+                      mlir::StringAttr::get(moduleOp->getContext(), arch));
   }
 
-  if (!isSupportedPTOASArch(arch))
-    arch = "a3";
-  moduleOp->setAttr("pto.target_arch",
-                    mlir::StringAttr::get(moduleOp->getContext(), arch));
+  if (failed(mlir::verify(*module))) {
+    llvm::errs() << "Error: input module verification failed.\n";
+    return {};
+  }
   return module;
 }
 

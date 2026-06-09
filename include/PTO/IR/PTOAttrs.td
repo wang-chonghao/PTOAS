@@ -991,6 +991,16 @@ def PTO_GatherOOBAttr : EnumAttr<PTO_Dialect, PTO_GatherOOBEnum, "gather_oob"> {
   let summary = "MGATHER out-of-bounds handling mode";
 }
 
+def PTO_CoalesceEnum : PTO_I32Enum<
+  "Coalesce", "PTO MGATHER/MSCATTER coalesce mode", [
+    I32EnumAttrCase<"Row", 0, "row">,
+    I32EnumAttrCase<"Elem", 1, "elem">
+  ]>;
+
+def PTO_CoalesceAttr : EnumAttr<PTO_Dialect, PTO_CoalesceEnum, "coalesce"> {
+  let summary = "MGATHER/MSCATTER coalesce mode";
+}
+
 def PTO_ScatterAtomicOpEnum : PTO_I32Enum<
   "ScatterAtomicOp", "PTO MSCATTER atomic mode", [
     I32EnumAttrCase<"None", 0, "none">,
@@ -1013,6 +1023,16 @@ def PTO_ScatterOOBEnum : PTO_I32Enum<
 
 def PTO_ScatterOOBAttr : EnumAttr<PTO_Dialect, PTO_ScatterOOBEnum, "scatter_oob"> {
   let summary = "MSCATTER out-of-bounds handling mode";
+}
+
+def PTO_ScatterConflictEnum : PTO_I32Enum<
+  "ScatterConflict", "PTO MSCATTER scatter conflict handling", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"Last", 1, "last">
+  ]>;
+
+def PTO_ScatterConflictAttr : EnumAttr<PTO_Dialect, PTO_ScatterConflictEnum, "scatter_conflict"> {
+  let summary = "MSCATTER scatter conflict handling mode";
 }
 
 def PTO_AccToVecMode_Enum : PTO_I32Enum<"AccToVecMode", "TMOV acc-to-vec mode", [

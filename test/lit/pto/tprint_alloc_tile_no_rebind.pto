@@ -18,4 +18,4 @@ module {
 // CHECK-NOT: TASSIGN(
 // CHECK-NOT: .data()
 // CHECK-NOT: reinterpret_cast<uint64_t>
-// CHECK: TPRINT([[TILE]]);
+// CHECK: TPRINT{{(<.*>)?}}([[TILE]]);

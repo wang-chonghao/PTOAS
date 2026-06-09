@@ -5672,6 +5672,7 @@ For each element (i, j):
 |------|------|-------------|
 | `src0` | `pto.tile_buf` | Source tile buffer |
 | `src1` | `pto.tile_buf` | Per-row scalar vector |
+| `tmp` | `pto.tile_buf` (optional) | Optional scratch tile forwarded to the `pto-isa` tmp-buffer overload |
 | `dst` | `pto.tile_buf` | Destination tile buffer |
 
 **Results:** None. Writes into `dst` via DPS pattern.
@@ -5679,12 +5680,11 @@ For each element (i, j):
 **Assembly Format:**
 
 ```
-pto.trowexpandadd ins(<src0>, <src1> : <src0_type>, <src1_type>)
+pto.trowexpandadd ins(<src0>, <src1> [, <tmp>] : <src0_type>, <src1_type> [, <tmp_type>])
                   outs(<dst> : <dst_type>)
 ```
 
 **Constraints & Verification:**
-
 - **Implementation checks**:
   - `dst`, `src0`, and `src1` must have the same element type.
   - Element type:
@@ -7089,7 +7089,7 @@ backends that provide it, including A2/A3 and A5.
 
 ##### `pto.mgather` - Gather-Load from Global Memory
 
-**Summary:** Loads elements from a global table into a VEC tile using per-element indices. Supports an optional A5-only out-of-bounds mode that lowers to the corresponding `MGATHER<...>` template overload.
+**Summary:** Loads elements from a global table into a VEC tile using per-element indices. Supports optional `coalesce` and `gatherOob` attributes that lower to the corresponding `MGATHER<...>` template overload.
 
 **Semantics:**
 
@@ -7105,7 +7105,8 @@ elem mode:          dst[i, j] = mem[idx[i, j]]
 | `mem` | `!pto.partition_tensor_view<...>` / GM memref | `NA` | Global source table |
 | `idx` | `pto.tile_buf` | `NA` | Index tile |
 | `dst` | `pto.tile_buf` | `NA` | Destination VEC tile |
-| `gatherOob` | `#pto<gather_oob ...>` | `undefined` | A5-only out-of-bounds mode (`undefined/clamp/wrap/zero`) |
+| `coalesce` | `#pto<coalesce ...>` | inferred | Explicit coalesce mode (`row` / `elem`) |
+| `gatherOob` | `#pto<gather_oob ...>` | `undefined` | Out-of-bounds mode (`undefined/clamp/wrap/zero`) |
 
 **Results:** None. Writes into `dst` via DPS pattern.
 
@@ -7129,7 +7130,12 @@ elem mode:          dst[i, j] = mem[idx[i, j]]
 
 - **Out-of-bounds mode**
   - Default `gatherOob = undefined` lowers to the default `MGATHER(dst, mem, idx)` overload.
-  - Non-default `gatherOob` values are only supported on **A5** and lower to `MGATHER<GatherOOB::...>(dst, mem, idx)`.
+  - Non-default `gatherOob` values lower to `MGATHER<Coalesce, GatherOOB::...>(dst, mem, idx)`.
+- **Coalesce mode**
+  - If `coalesce` is omitted, PTOAS preserves the existing inference from the `idx` tile shape/layout.
+  - If `coalesce` is specified, the `idx` tile shape/layout must match that mode.
+  - `coalesce = #pto<coalesce row>` lowers to `MGATHER<pto::Coalesce::Row, ...>`.
+  - `coalesce = #pto<coalesce elem>` lowers to `MGATHER<pto::Coalesce::Elem, ...>`.
 
 **Hardware Mapping:**
 
@@ -7143,6 +7149,10 @@ pto.mgather ins(%mem, %idx : memref<...>, !pto.tile_buf<...>)
 
 pto.mgather ins(%mem, %idx : memref<...>, !pto.tile_buf<...>)
            outs(%dst : !pto.tile_buf<...>)
+           {coalesce = #pto<coalesce elem>}
+
+pto.mgather ins(%mem, %idx : memref<...>, !pto.tile_buf<...>)
+           outs(%dst : !pto.tile_buf<...>)
            {gatherOob = #pto<gather_oob zero>}
 ```
 
@@ -7150,7 +7160,7 @@ pto.mgather ins(%mem, %idx : memref<...>, !pto.tile_buf<...>)
 
 ##### `pto.mscatter` - Scatter-Store to Global Memory
 
-**Summary:** Stores elements from a VEC tile into a global table using per-element indices. Supports optional A5-only atomic and out-of-bounds modes that lower to the corresponding `MSCATTER<...>` template overload family.
+**Summary:** Stores elements from a VEC tile into a global table using per-element indices. Supports optional `coalesce`, atomic, out-of-bounds, and A5-only conflict-mode attributes that lower to the corresponding `MSCATTER<...>` template overload family.
 
 **Semantics:**
 
@@ -7166,8 +7176,10 @@ elem mode:          mem[idx[i, j]] = src[i, j]
 | `src` | `pto.tile_buf` | `NA` | Source VEC tile |
 | `idx` | `pto.tile_buf` | `NA` | Index tile |
 | `mem` | `!pto.partition_tensor_view<...>` / GM memref | `NA` | Global destination table |
-| `scatterAtomicOp` | `#pto<scatter_atomic_op ...>` | `none` | A5-only atomic mode (`none/add/max/min`) |
-| `scatterOob` | `#pto<scatter_oob ...>` | `undefined` | A5-only out-of-bounds mode (`undefined/skip/clamp/wrap`) |
+| `coalesce` | `#pto<coalesce ...>` | inferred | Explicit coalesce mode (`row` / `elem`) |
+| `scatterAtomicOp` | `#pto<scatter_atomic_op ...>` | `none` | Atomic mode (`none/add/max/min`) |
+| `scatterOob` | `#pto<scatter_oob ...>` | `undefined` | Out-of-bounds mode (`undefined/skip/clamp/wrap`) |
+| `scatterConflict` | `#pto<scatter_conflict ...>` | omitted | Optional A5 conflict mode (`default` / `last`) |
 
 **Results:** None. Writes into `mem` via DPS pattern.
 
@@ -7191,13 +7203,17 @@ elem mode:          mem[idx[i, j]] = src[i, j]
 
 - **Atomic modes**  
   - Default `scatterAtomicOp = none` lowers to the default `MSCATTER(mem, src, idx)` overload.
-  - Non-default `scatterAtomicOp` values are only supported on **A5**.
+  - Non-default `scatterAtomicOp` values lower to `MSCATTER<Coalesce, ScatterAtomicOp::...>(mem, src, idx)`.
   - `add` requires `i32`/`f16`/`f32`.
   - `max`/`min` require signless `i32` or `f32`.
 
 - **Out-of-bounds modes**
-  - Default `scatterOob = undefined` lowers to the 1-template-parameter `MSCATTER<Atomic>(mem, src, idx)` form when only atomic is specified, or to the default overload when both attrs are default.
-  - Non-default `scatterOob` values are only supported on **A5** and lower to `MSCATTER<ScatterAtomicOp::..., ScatterOOB::...>(mem, src, idx)`.
+  - Default `scatterOob = undefined` lowers to the `MSCATTER<Coalesce, ScatterAtomicOp::...>(mem, src, idx)` form when only atomic is specified, or to the default overload when both attrs are default.
+  - Non-default `scatterOob` values lower to `MSCATTER<Coalesce, ScatterAtomicOp::..., ScatterOOB::...>(mem, src, idx)`.
+- **Coalesce and conflict modes**
+  - If `coalesce` is omitted, PTOAS preserves the existing inference from the `idx` tile shape/layout.
+  - If `coalesce` is specified, the `idx` tile shape/layout must match that mode.
+  - `scatterConflict` is only meaningful on A5 and lowers by filling the full `MSCATTER<Coalesce, Atomic, Oob, Conflict>` template parameter list.
 
 **Hardware Mapping:**
 
@@ -7217,6 +7233,11 @@ pto.mscatter ins(%src, %idx : !pto.tile_buf<...>, !pto.tile_buf<...>)
             outs(%mem : memref<...>)
             {scatterAtomicOp = #pto<scatter_atomic_op add>,
              scatterOob = #pto<scatter_oob skip>}
+
+pto.mscatter ins(%src, %idx : !pto.tile_buf<...>, !pto.tile_buf<...>)
+            outs(%mem : memref<...>)
+            {coalesce = #pto<coalesce elem>,
+             scatterConflict = #pto<scatter_conflict last>}
 ```
 
 ---
@@ -7363,6 +7384,7 @@ For padded elements: dst = PadVal(dst)
 |------|------|-------------|
 | `src` | `pto.tile_buf` | Source tile |
 | `dst` | `pto.tile_buf` | Destination tile (with pad config) |
+| `padValue` | `#pto.pad_value<...>` (optional) | Explicit `TFILLPAD<PadValue>` template argument for `loc=mat`. When present, it must match `dst`'s tile pad configuration. |
 
 **Results:** None. Writes into `dst` via DPS pattern.
 
@@ -7371,6 +7393,7 @@ For padded elements: dst = PadVal(dst)
 - `dst.pad` must not be `null`.
 - `src` and `dst` element sizes must match, and the element size must be `1`, `2`, or `4` bytes.
 - `dst.rows/cols` must match `src.rows/cols`.
+- If `padValue` is present, `dst` must be `loc=mat` and `padValue` must equal the tile type's `pad`.
 - For `loc=mat`, `src` and `dst` must be lowerable to the same `TFILLPAD` tile specialization, i.e. `validShape` and `pad` must be identical.
 
 **Hardware Mapping:**
@@ -7381,6 +7404,9 @@ For padded elements: dst = PadVal(dst)
 
 ```mlir
 pto.tfillpad ins(%src : !pto.tile_buf<...>) outs(%dst : !pto.tile_buf<...>)
+
+pto.tfillpad ins(%src : !pto.tile_buf<...>) outs(%dst : !pto.tile_buf<...>)
+           {padValue = #pto.pad_value<max>}
 ```
 
 ---
@@ -7709,6 +7735,7 @@ dst[i, j] = S + linear_index(i, j)   // or descending if requested
 | Name | Type | Description |
 |------|------|-------------|
 | `S` | `Integer` | Starting value |
+| `tmp` | `pto.tile_buf` (optional) | Optional scratch tile forwarded to the `pto-isa` tmp-buffer overload |
 | `dst` | `pto.tile_buf` | Destination tile |
 | `descending` | `BoolAttr` (default: false) | Generate descending sequence |
 
@@ -7729,6 +7756,7 @@ dst[i, j] = S + linear_index(i, j)   // or descending if requested
 
 ```mlir
 pto.tci ins(%start : i32) outs(%dst : !pto.tile_buf<...>)
+pto.tci ins(%start, %tmp : i32, !pto.tile_buf<...>) outs(%dst : !pto.tile_buf<...>)
 ```
 
 ---
@@ -9172,7 +9200,8 @@ print(src)
 
 | Name | Type | Description |
 |------|------|-------------|
-| `src` | `pto.tile_buf` | Tile to print |
+| `src` | `pto.tile_buf` / global-memory view | Tile or global-memory view to print |
+| `printFormat` | `i32` (optional, default: `0`) | Print format selector: `0=Width8_Precision4`, `1=Width8_Precision2`, `2=Width10_Precision6` |
 
 **Results:** None.
 
@@ -9199,8 +9228,9 @@ print(src)
 
 - **Formatting**:
 
-  - Floating-point values: printed as `%6.2f`
-  - Integer values: printed as `%6d`
+  - `printFormat = 0`: `Width8_Precision4`
+  - `printFormat = 1`: `Width8_Precision2`
+  - `printFormat = 2`: `Width10_Precision6`
   - For `GlobalTensor`, due to data size and buffer limitations, only elements within its logical shape (defined by `Shape`) are printed.
   - For `tile_buf`, elements outside `valid_shape` are still printed and are marked with a `|` separator when partial validity is specified.
 
@@ -9212,6 +9242,7 @@ print(src)
 
 ```mlir
 pto.tprint ins(%src : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+pto.tprint ins(%src : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {printFormat = 1 : i32}
 ```
 
 ---

@@ -2799,6 +2799,7 @@ def MGatherOp : PTO_TOp<"mgather", [
     PTODpsType:$mem,
     PTODpsType:$idx,
     PTODpsType:$dst,
+    OptionalAttr<PTO_CoalesceAttr>:$coalesce,
     DefaultValuedAttr<PTO_GatherOOBAttr, "::mlir::pto::GatherOOB::Undefined">:$gatherOob);
 
   let results = (outs);
@@ -2977,8 +2978,10 @@ def MScatterOp : PTO_TOp<"mscatter", [
     PTODpsType:$src,
     PTODpsType:$idx,
     PTODpsType:$mem,               // outs target
+    OptionalAttr<PTO_CoalesceAttr>:$coalesce,
     DefaultValuedAttr<PTO_ScatterAtomicOpAttr, "::mlir::pto::ScatterAtomicOp::None">:$scatterAtomicOp,
-    DefaultValuedAttr<PTO_ScatterOOBAttr, "::mlir::pto::ScatterOOB::Undefined">:$scatterOob
+    DefaultValuedAttr<PTO_ScatterOOBAttr, "::mlir::pto::ScatterOOB::Undefined">:$scatterOob,
+    OptionalAttr<PTO_ScatterConflictAttr>:$scatterConflict
   );
 
   let results = (outs);
@@ -3355,17 +3358,13 @@ def TCIOp : PTO_TOp<"tci", [
 
   let arguments = (ins
     AnyInteger:$S,
+    Optional<PTODpsType>:$tmp,
     PTODpsType:$dst,
     DefaultValuedAttr<BoolAttr, "false">:$descending
   );
   let results = (outs);
 
-  let assemblyFormat = [{
-    `ins` `(` $S 
-    attr-dict
-    `:` type($S) `)`
-    `outs` `(` $dst `:` qualified(type($dst) ) `)`
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let hasVerifier = 1;
 
@@ -4426,7 +4425,8 @@ def TFillPadOp : PTO_TOp<"tfillpad", [
 
   let arguments = (ins
     PTODpsType:$src,
-    PTODpsType:$dst
+    PTODpsType:$dst,
+    OptionalAttr<PTO_PadValueAttr>:$padValue
   );
 
   let results = (outs);
@@ -5620,22 +5620,21 @@ def TRowExpandAddOp: PTO_TOp<"trowexpandadd", [
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
   let summary = "TROWEXPANDADD: Row-wise broadcast add: add a per-row scalar vector src1 to each row of src0.";
+  let description = [{
+    pto-isa has overloads with/without tmp; optional tmp for scratch.
+  }];
 
   let arguments = (ins
     PTODpsType:$src0,
     PTODpsType:$src1,
+    Optional<PTODpsType>:$tmp,
     PTODpsType:$dst
   );
 
   let results = (outs);
 
   let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    `ins` `(` $src0 `,` $src1 `:` qualified(type($src0)) `,` qualified(type($src1)) `)`
-    `outs` `(` $dst `:` qualified(type($dst) ) `)`
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
@@ -6507,7 +6506,8 @@ def TPrintOp: PTO_TOp<"tprint", [
   let summary = "TPRINT: Print the contents of a Tile or GlobalTensor for debugging purposes directly from device code..";
 
   let arguments = (ins
-    PTODpsType:$src
+    PTODpsType:$src,
+    DefaultValuedOptionalAttr<I32Attr, "0">:$printFormat
   );
 
   let results = (outs);

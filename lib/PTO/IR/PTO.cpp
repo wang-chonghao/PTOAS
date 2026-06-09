@@ -3601,9 +3601,9 @@ static bool isKnownUnitExtent(int64_t value);
 static bool isKnownZeroOrUnitExtent(int64_t value);
 static bool hasCompatibleKnownExtentOrZero(int64_t lhs, int64_t rhs);
 
-static LogicalResult verifyMGatherMScatterTileShape(Operation *op, Type dataTy,
-                                                    Type idxTy,
-                                                    StringRef dataName) {
+static LogicalResult verifyMGatherMScatterTileShape(
+    Operation *op, Type dataTy, Type idxTy, StringRef dataName,
+    std::optional<pto::Coalesce> explicitCoalesce = std::nullopt) {
   auto dataValid = getValidShapeVec(dataTy);
   auto idxValid = getValidShapeVec(idxTy);
   if (dataValid.size() != 2 || idxValid.size() != 2)
@@ -3630,6 +3630,25 @@ static LogicalResult verifyMGatherMScatterTileShape(Operation *op, Type dataTy,
   const bool elemCoalesce =
       hasCompatibleKnownExtent(idxValid[0], dataValid[0]) &&
       hasCompatibleKnownExtent(idxValid[1], dataValid[1]);
+
+  if (explicitCoalesce) {
+    switch (*explicitCoalesce) {
+    case pto::Coalesce::Row:
+      if (!(rowCoalesce1xR || rowCoalesceRx1))
+        return op->emitOpError()
+               << "expects idx valid_shape to be [0|1, " << dataName
+               << ".valid_row] or [" << dataName
+               << ".valid_row, 0|1] when coalesce=row";
+      return success();
+    case pto::Coalesce::Elem:
+      if (!elemCoalesce)
+        return op->emitOpError()
+               << "expects idx valid_shape to match " << dataName
+               << " valid_shape when coalesce=elem";
+      return success();
+    }
+    llvm_unreachable("unknown Coalesce");
+  }
 
   if (!(rowCoalesce1xR || rowCoalesceRx1 || elemCoalesce))
     return op->emitOpError()
@@ -4902,11 +4921,68 @@ LogicalResult pto::TAndSOp::verify() {
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
+static ParseResult parseTCILikeOp(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand s, tmp, dst;
+  Type sTy, tmpTy, dstTy;
+
+  if (parser.parseKeyword("ins") || parser.parseLParen() || parser.parseOperand(s))
+    return failure();
+
+  bool hasTmp = succeeded(parser.parseOptionalComma());
+  if (hasTmp && parser.parseOperand(tmp))
+    return failure();
+
+  if (parser.parseColonType(sTy))
+    return failure();
+  if (hasTmp) {
+    if (parser.parseComma() || parser.parseType(tmpTy))
+      return failure();
+  }
+  if (parser.parseRParen() || parser.parseKeyword("outs") || parser.parseLParen() ||
+      parser.parseOperand(dst) || parser.parseColonType(dstTy) || parser.parseRParen() ||
+      parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  if (parser.resolveOperand(s, sTy, result.operands))
+    return failure();
+  if (hasTmp && parser.resolveOperand(tmp, tmpTy, result.operands))
+    return failure();
+  if (parser.resolveOperand(dst, dstTy, result.operands))
+    return failure();
+
+  result.addAttribute(
+      "operandSegmentSizes",
+      parser.getBuilder().getDenseI32ArrayAttr({1, hasTmp ? 1 : 0, 1}));
+  return success();
+}
+
+static void printTCILikeOp(OpAsmPrinter &p, Operation *op, Value s, Value tmp,
+                           Value dst) {
+  p << " ins(" << s;
+  if (tmp)
+    p << ", " << tmp;
+  p << " : " << s.getType();
+  if (tmp)
+    p << ", " << tmp.getType();
+  p << ") outs(" << dst << " : " << dst.getType() << ")";
+  p.printOptionalAttrDict(op->getAttrs(), /*elidedAttrs=*/{"operandSegmentSizes"});
+}
+
+ParseResult mlir::pto::TCIOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseTCILikeOp(parser, result);
+}
+
+void mlir::pto::TCIOp::print(OpAsmPrinter &p) {
+  printTCILikeOp(p, getOperation(), getS(), getTmp(), getDst());
+}
+
 LogicalResult pto::TCIOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
   Type dstTy = getDst().getType();
   if (failed(verifyTileBufCommon(*this, dstTy, "dst")))
+    return failure();
+  if (getTmp() && failed(verifyTileBufCommon(*this, getTmp().getType(), "tmp")))
     return failure();
 
   auto elemTy = mlir::dyn_cast<IntegerType>(getElemTy(dstTy));
@@ -6239,8 +6315,23 @@ static mlir::LogicalResult verifyTFillPadLike(Operation *op, Type srcTy, Type ds
 }
 
 mlir::LogicalResult mlir::pto::TFillPadOp::verify() {
-  return verifyTFillPadLike(getOperation(), getSrc().getType(), getDst().getType(),
-                            /*allowDstExpand=*/false, "tfillpad");
+  if (failed(verifyTFillPadLike(getOperation(), getSrc().getType(), getDst().getType(),
+                                /*allowDstExpand=*/false, "tfillpad")))
+    return failure();
+
+  if (auto padValueAttr = getPadValueAttr()) {
+    auto dstSpace = getPTOMemorySpaceEnum(getDst().getType());
+    if (!dstSpace || *dstSpace != pto::AddressSpace::MAT)
+      return emitOpError("expects padValue attribute only for loc=mat tfillpad");
+    if (auto dstTileTy = dyn_cast<pto::TileBufType>(getDst().getType())) {
+      if (dstTileTy.getPadValueI32() != static_cast<int32_t>(padValueAttr.getValue()))
+        return emitOpError("expects padValue attribute to match dst tile pad configuration");
+    } else if (!isa<MemRefType>(getDst().getType())) {
+      return emitOpError("expects dst to be tile_buf or memref when padValue is specified");
+    }
+  }
+
+  return success();
 }
 
 mlir::LogicalResult mlir::pto::TFillPadExpandOp::verify() {
@@ -7516,9 +7607,6 @@ LogicalResult MScatterOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
 
-  if (!isTargetArchA5(getOperation()))
-    return emitOpError("pto.mscatter is only supported on A5 targets");
-
   Type srcTy = getSrc().getType();
   Type idxTy = getIdx().getType();
   Type memTy = getMem().getType();
@@ -7548,19 +7636,20 @@ LogicalResult MScatterOp::verify() {
                                              "src")))
     return failure();
 
-  if (getScatterAtomicOp() != pto::ScatterAtomicOp::None ||
-      getScatterOob() != pto::ScatterOOB::Undefined) {
-    if (!isTargetArchA5(getOperation()))
-      return emitOpError(
-          "expects non-default scatterAtomicOp/scatterOob only on A5 targets");
-  }
+  if (getScatterConflictAttr() && !isTargetArchA5(getOperation()))
+    return emitOpError("expects scatterConflict only on A5 targets");
 
   if (!isSupportedMScatterAtomicPayloadElemType(srcElem, getScatterAtomicOp()))
     return emitOpError(
         "expects scatterAtomicOp-compatible src element type: add supports "
         "i32/ui32/f16/f32, max/min support signless i32/f32");
 
-  if (failed(verifyMGatherMScatterTileShape(getOperation(), srcTy, idxTy, "src")))
+  std::optional<pto::Coalesce> explicitCoalesce;
+  if (auto coalesceAttr = getCoalesceAttr())
+    explicitCoalesce = coalesceAttr.getValue();
+
+  if (failed(verifyMGatherMScatterTileShape(getOperation(), srcTy, idxTy, "src",
+                                            explicitCoalesce)))
     return failure();
 
   return success();
@@ -7570,9 +7659,6 @@ LogicalResult MScatterOp::verify() {
 LogicalResult MGatherOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
-
-  if (!isTargetArchA5(getOperation()))
-    return emitOpError("pto.mgather is only supported on A5 targets");
 
   Type memTy = getMem().getType();
   Type idxTy = getIdx().getType();
@@ -7603,12 +7689,12 @@ LogicalResult MGatherOp::verify() {
                                              "dst")))
     return failure();
 
-  if (getGatherOob() != pto::GatherOOB::Undefined &&
-      !isTargetArchA5(getOperation()))
-    return emitOpError(
-        "expects non-default gatherOob only on A5 targets");
+  std::optional<pto::Coalesce> explicitCoalesce;
+  if (auto coalesceAttr = getCoalesceAttr())
+    explicitCoalesce = coalesceAttr.getValue();
 
-  if (failed(verifyMGatherMScatterTileShape(getOperation(), dstTy, idxTy, "dst")))
+  if (failed(verifyMGatherMScatterTileShape(getOperation(), dstTy, idxTy, "dst",
+                                            explicitCoalesce)))
     return failure();
 
   return success();
@@ -9459,6 +9545,16 @@ void mlir::pto::TRowExpandSubOp::print(OpAsmPrinter &p) {
                               getDst());
 }
 
+ParseResult mlir::pto::TRowExpandAddOp::parse(OpAsmParser &parser,
+                                              OperationState &result) {
+  return parseTRowExpandBinaryLikeOp(parser, result);
+}
+
+void mlir::pto::TRowExpandAddOp::print(OpAsmPrinter &p) {
+  printTRowExpandBinaryLikeOp(p, getOperation(), getSrc0(), getSrc1(), getTmp(),
+                              getDst());
+}
+
 ParseResult mlir::pto::TRowExpandExpdifOp::parse(OpAsmParser &parser,
                                                  OperationState &result) {
   return parseTRowExpandBinaryLikeOp(parser, result);
@@ -9604,21 +9700,16 @@ mlir::LogicalResult mlir::pto::TRowExpandAddOp::verify() {
     Type src0Ty = getSrc0().getType();
     Type src1Ty = getSrc1().getType();
     Type dstTy = getDst().getType();
-    if (failed(verifyTileBufCommon(*this, src0Ty, "src0")) ||
-        failed(verifyTileBufCommon(*this, src1Ty, "src1")) ||
-        failed(verifyTileBufCommon(*this, dstTy, "dst")))
-      return failure();
-    if (failed(verifyTileBufSameElemType(*this, src0Ty, dstTy, "src0", "dst")))
+    FailureOr<Type> elemOr = verifyTRowExpandBinaryCore(
+        *this, src0Ty, src1Ty, dstTy, getTmp() ? getTmp().getType() : Type{},
+        static_cast<bool>(getTmp()));
+    if (failed(elemOr))
       return failure();
     if (failed(verifyTileBufSameValidShape(*this, src0Ty, dstTy, "src0", "dst")))
       return failure();
-    if (getElemTy(src0Ty) != getElemTy(src1Ty))
-      return emitOpError("expects src0 and src1 to have the same element type");
     if (!isRowMajorTileBuf(src0Ty))
       return emitOpError("expects src0 to use row-major layout");
-    if (!isRowMajorTileBuf(dstTy))
-      return emitOpError("expects dst to use row-major layout");
-    Type elem = getElemTy(src0Ty);
+    Type elem = *elemOr;
     bool supported = elem.isF16() || elem.isF32() || elem.isInteger(16) ||
                      elem.isInteger(32) ||
                      (targetArch == PTOArch::A5 && elem.isInteger(8));
@@ -10587,6 +10678,10 @@ mlir::LogicalResult mlir::pto::TPrintOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
   auto srcType = getSrc().getType();
+  auto printFormatAttr = getPrintFormatAttr();
+  int64_t printFormat = printFormatAttr ? printFormatAttr.getInt() : 0;
+  if (printFormat < 0 || printFormat > 2)
+    return emitOpError() << "expects printFormat to be in range [0, 2]";
   if (auto tb = mlir::dyn_cast<mlir::pto::TileBufType>(srcType)) {
     auto elem = tb.getElementType();
     if (!(elem.isF16() || elem.isF32() ||

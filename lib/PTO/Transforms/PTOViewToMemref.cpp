@@ -2423,12 +2423,14 @@ struct PTOViewToMemrefPass
         rewriter.setInsertionPoint(op);
 
         Value s = op->getOperand(0);
+        Value tmp = op.getTmp();
         Value dst = op.getDst();
         bool descending = op.getDescending();
 
         auto sTy = dyn_cast<IntegerType>(s.getType());
         auto dstTy = dyn_cast<MemRefType>(dst.getType());
-        if (!sTy || !dstTy) {
+        auto tmpTy = tmp ? dyn_cast<MemRefType>(tmp.getType()) : MemRefType{};
+        if (!sTy || !dstTy || (tmp && !tmpTy)) {
           op.emitError("ins/outs are not memref yet");
           signalPassFailure();
           return;
@@ -2438,6 +2440,7 @@ struct PTOViewToMemrefPass
             op,
             TypeRange{},
             s,
+            tmp,
             dst,
             descending);
       }
@@ -2930,7 +2933,8 @@ struct PTOViewToMemrefPass
             op,
             TypeRange{},
             src,
-            dst);
+            dst,
+            op.getPadValueAttr());
       }
 
       DefaultInlineVector<mlir::pto::TFillPadInplaceOp> fillpadInplaceOps;
@@ -3627,6 +3631,7 @@ struct PTOViewToMemrefPass
             mem,
             idx,
             dst,
+            op.getCoalesceAttr(),
             op.getGatherOobAttr());
       }
 
@@ -3656,8 +3661,10 @@ struct PTOViewToMemrefPass
             src,
             idx,
             mem,
+            op.getCoalesceAttr(),
             op.getScatterAtomicOpAttr(),
-            op.getScatterOobAttr());
+            op.getScatterOobAttr(),
+            op.getScatterConflictAttr());
       }
       DefaultInlineVector<mlir::pto::TPrintOp> printops;
       func.walk([&](mlir::pto::TPrintOp op) { printops.push_back(op); });
@@ -3667,6 +3674,7 @@ struct PTOViewToMemrefPass
         rewriter.setInsertionPoint(op);
 
         Value src = op.getSrc();
+        auto printFormatAttr = op.getPrintFormatAttr();
 
         auto srcTy = dyn_cast<MemRefType>(src.getType());
         if (!srcTy) {
@@ -3678,7 +3686,8 @@ struct PTOViewToMemrefPass
         rewriter.replaceOpWithNewOp<pto::TPrintOp>(
             op,
             TypeRange{},
-            src);
+            src,
+            printFormatAttr);
       }
 
       // ------------------------------------------------------------------

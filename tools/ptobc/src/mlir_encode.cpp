@@ -65,6 +65,18 @@ using FunctionVector = llvm::SmallVector<mlir::func::FuncOp,
 
 } // namespace
 
+static bool shouldEncodeViaGenericV0CompatibilityShim(mlir::Operation &op) {
+  // PTOBC v0 already shipped fixed-width known-op payloads for legacy
+  // pto.tci / pto.trowexpandadd forms without tmp. Newer tmp-operand forms
+  // must not reuse those schemas or older .ptobc files would become
+  // undecodable, so serialize the new forms through the generic v0 opcode.
+  if (auto tci = llvm::dyn_cast<mlir::pto::TCIOp>(&op))
+    return static_cast<bool>(tci.getTmp());
+  if (auto trowexpandadd = llvm::dyn_cast<mlir::pto::TRowExpandAddOp>(&op))
+    return static_cast<bool>(trowexpandadd.getTmp());
+  return false;
+}
+
 static uint64_t internType(PTOBCFile& f, mlir::Type t) {
   std::string s = printType(t);
   f.strings.intern(s);
@@ -617,6 +629,11 @@ void Encoder::encodeOp(mlir::Operation& op, Buffer& out) {
       throw std::runtime_error("missing v0 opcode schema for op: " +
                                fullName.str());
     encodeKnownOp(op, out, *info, variantInfo);
+    return;
+  }
+
+  if (shouldEncodeViaGenericV0CompatibilityShim(op)) {
+    encodeGenericOp(op, out);
     return;
   }
 
