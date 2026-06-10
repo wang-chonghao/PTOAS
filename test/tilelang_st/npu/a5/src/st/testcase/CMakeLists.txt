@@ -194,6 +194,9 @@ set(ALL_TESTCASES
     tfmods
     tcmps
     tmatmul
+    textract
+    textract_fp
+    textract_v2v
 )
 
 if((TEST_CASE IN_LIST ALL_TESTCASES) OR (TEST_CASE STREQUAL "all"))

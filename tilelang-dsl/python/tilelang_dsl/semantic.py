@@ -7207,8 +7207,8 @@ class _SemanticAnalyzer:
         if isinstance(expr.type, SemanticIndexType):
             return
         scalar = self._require_scalar_expr(expr, context)
-        if scalar.dtype != i64:
-            raise TypeError(f"{context} must be an i64 or index value in TileLang DSL")
+        if scalar.dtype not in (i64, i32):
+            raise TypeError(f"{context} must be an i64, i32, or index value in TileLang DSL")
 
     def _require_tail_remaining_expr(self, expr: SemanticExpr, context: str) -> None:
         if isinstance(expr.type, SemanticIndexType):
