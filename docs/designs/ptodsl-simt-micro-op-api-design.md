@@ -124,27 +124,32 @@ Expose direct wrappers for:
 the existing `scalar.sqrt/exp/log` helpers, which currently emit generic
 `math.*` operations.
 
-## 5. Batch 1 Detailed Design
+## 5. Implemented Launch and Helper Design
 
 ### 5.1 Goals
 
-Batch 1 should make SIMT launch dimensions and all nullary SIMT runtime queries
-authorable from PTO-DSL.
+The implemented SIMT launch layer makes launch dimensions, SIMT helper
+materialization, and SIMT runtime queries authorable from PTO-DSL. Later
+micro-op batches build on the same helper-lowering path.
 
-The implementation should:
+The implementation:
 
 - keep micro-op names aligned with VPTO op names;
 - preserve the low-level `store_vfsimt_info(dim_z, dim_y, dim_x)` order;
 - add an ergonomic launch wrapper that uses the launch-site `x, y, z` order;
-- preserve current `@pto.simt` helper behavior for existing code;
+- preserve direct `@pto.simt` calls with default launch dimensions;
+- specialize reusable SIMT helper functions by argument types and static
+  keyword arguments;
 - avoid backend changes.
 
 ### 5.2 Non-goals
 
-Batch 1 should not implement lane collectives, atomics, GM scalar cache policy,
-scalar math, conversion, keep/resume, or runtime/ST coverage.
+The launch/helper layer should not implement operation-specific SIMT semantics
+itself. Lane collectives, atomics, GM scalar cache policy, scalar math,
+conversion, keep/resume, and validation rules are exposed as direct VPTO
+wrappers in Batches 2-4.
 
-Batch 1 should not change the semantics of `scalar.load/store`.
+The launch/helper layer should not change the semantics of `scalar.load/store`.
 
 ### 5.3 Operation Mapping
 
@@ -231,10 +236,49 @@ pto.simt_launch @write_tid<<<%dim_x, %dim_y, %dim_z>>>(%dst)
   : (!pto.ptr<i32, ub>) -> ()
 ```
 
-Batch 1 emits VPTO `pto.simt_launch` directly. The existing backend
+PTO-DSL emits VPTO `pto.simt_launch` directly. The existing backend
 `vpto-expand-wrapper-ops` pass expands it to `pto.store_vfsimt_info + func.call`.
 
-### 5.5 `@pto.simt` Decorator Attributes
+### 5.5 Helper Specialization and Symbol Naming
+
+Each `@pto.simt` body is lowered through a generated `func.func` marked with
+`pto.simt_entry`. The generated helper symbol is an implementation detail, not
+the public subkernel name. PTO-DSL currently uses symbols of the form:
+
+```text
+<subkernel-symbol>__simt_<N>
+```
+
+The helper specialization key includes:
+
+- the authored subkernel symbol name;
+- positional argument MLIR types;
+- static keyword argument values.
+
+This prevents two invalid reuse cases:
+
+- the same SIMT body launched with different pointer or scalar argument types;
+- the same SIMT body launched with different static keyword arguments that
+  change the traced body.
+
+`pto.simt_launch(...)` must reference the actual generated helper symbol, not
+the authored subkernel symbol. Direct `@pto.simt` calls also reuse the same
+specialized helper path, with default launch dimensions `(1, 1, 1)`.
+
+Keyword arguments passed to `pto.simt_launch` are treated as static values and
+must be hashable or structurally representable for the specialization key.
+Runtime SSA values must be passed positionally so they become helper function
+arguments. This avoids capturing values from the enclosing entry function into
+the generated SIMT helper body.
+
+Because generated SIMT helper symbols are internal specialization names, other
+APIs that require stable `func.func` symbols must not reference authored
+`@pto.simt` helper names. In particular, `pto.import_reserved_buffer(peer_func=...)`
+must refer to a real peer `func.func` containing the matching
+`pto.reserve_buffer`, not to an authored SIMT helper whose generated symbol may
+be specialized.
+
+### 5.6 `@pto.simt` Decorator Attributes
 
 SIMT entry functions may carry optional VPTO attributes:
 
@@ -270,10 +314,9 @@ Validation:
   `pto.simt_entry`.
 
 This extension is useful for launch-envelope documentation and resource
-control, but it is not required to expose query ops. It can be implemented in
-the same batch or as a small follow-up.
+control, but it is not currently part of the implemented surface.
 
-### 5.6 Query API Behavior
+### 5.7 Query API Behavior
 
 All query APIs are nullary wrappers and return a wrapped MLIR SSA value.
 
@@ -289,7 +332,7 @@ already knows which operations are legal in `pto.simt_entry` when applicable.
 Adding a frontend context check can be considered later if it improves error
 messages without hiding backend semantics.
 
-### 5.7 Type Handling for Launch Dimensions
+### 5.8 Type Handling for Launch Dimensions
 
 Launch dimensions are VPTO `i32` operands. PTO-DSL should accept:
 
@@ -308,7 +351,7 @@ Proposed normalization rule:
 The implementation should not silently accept `i64` or arbitrary integers by
 truncation.
 
-### 5.8 Interaction With Existing `@pto.simt` Calls
+### 5.9 Interaction With Existing `@pto.simt` Calls
 
 Current code can call a SIMT subkernel directly:
 
@@ -332,40 +375,39 @@ This method is not required for Batch 1. If added, it should call the same
 lowering path as `pto.simt_launch(...)` and should not create a second semantic
 route.
 
-### 5.9 Implementation Sketch
+### 5.10 Implementation Notes
 
-Frontend files likely touched:
+Frontend files touched by the implemented surface:
 
 - `ptodsl/ptodsl/_ops.py`
-  - add nullary query wrappers;
-  - add `_coerce_i32_dim(...)` helper if existing helpers are not sufficient;
-  - add `simt_launch(...)` wrapper or delegate to tracing runtime.
+  - SIMT query, launch, collective, memory, atomic, math, convert, sync, and
+    state wrappers;
+  - enum/cache/rounding/saturation normalization for SIMT attrs.
 - `ptodsl/ptodsl/pto.py`
-  - export new wrappers.
-- `ptodsl/ptodsl/_subkernels.py`
-  - optionally extend `simt(..., max_threads=None, max_regs=None)`.
+  - exported SIMT wrappers.
 - `ptodsl/ptodsl/_tracing/session.py`
-  - add a reusable lowering method for explicit SIMT launches;
-  - optionally attach `pto.simt_max_threads` and `pto.simt_max_regs` attrs when
-    creating helper functions.
+  - reusable helper lowering for direct SIMT calls and explicit
+    `pto.simt_launch`;
+  - SIMT helper specialization by argument types and static kwargs;
+  - actual helper-symbol targeting for `pto.simt_launch`.
 - `ptodsl/docs/user_guide/03-kernel-entry-and-subkernels.md`
-  - document explicit `pto.simt_launch(...)` and optional decorator attrs.
-- `ptodsl/docs/user_guide/06-scalar-and-pointer-ops.md` or a new SIMT section
-  - document query ops if we want user-guide coverage in the same PR.
+  - documented the SIMT API surface.
 - `ptodsl/tests/support/docs_fragment_fixtures.py`
-  - update only if new docs snippets are executable docs-as-tests.
+  - declares stable peer functions for docs snippets that use
+    `pto.import_reserved_buffer(peer_func=...)`, instead of relying on
+    generated SIMT helper symbols.
 - `ptodsl/tests/test_jit_compile.py`
-  - add compile smoke tests for query wrappers and explicit launch dims.
+  - compile smoke tests for launch/query wrappers, full SIMT micro-op surface,
+    invalid frontend argument combinations, and SIMT helper specialization.
 
-Backend files should not be touched for Batch 1 unless frontend-generated IR is
-valid but rejected by existing VPTO code.
+Backend files are not touched by this PTO-DSL frontend surface.
 
-### 5.10 Test Plan
+### 5.11 Test Plan
 
 Minimum Python/frontend tests:
 
 1. Existing direct `@pto.simt` call still emits `pto.store_vfsimt_info` and a
-   single reusable `pto.simt_entry` function.
+   reusable `pto.simt_entry` helper specialization.
 2. `pto.simt_launch(body, dst, dims=(32, 1, 1))` emits either:
    - `pto.simt_launch @body<<<...>>>`, or
    - an equivalent `pto.store_vfsimt_info` with dimensions reordered to
@@ -375,6 +417,12 @@ Minimum Python/frontend tests:
    return `i32`.
 5. Invalid launch dimensions raise Python errors before backend verification
    when the type is clearly unsupported.
+6. The same `@pto.simt` body launched with different argument types produces
+   distinct helper functions.
+7. The same `@pto.simt` body launched with different static keyword arguments
+   produces distinct helper functions and distinct traced bodies.
+8. `pto.simt_launch` callee attributes reference the actual generated helper
+   symbols.
 
 Suggested lit/frontend assertions:
 
@@ -393,12 +441,12 @@ Suggested lit/frontend assertions:
 Runtime/ST validation is not required for the first frontend API PR unless a
 later implementation changes runtime behavior.
 
-### 5.11 Open Questions
+### 5.12 Open Questions
 
 1. Should `pto.simt_launch(...)` directly emit VPTO `SimtLaunchOp`, or should
    it lower immediately to `store_vfsimt_info + func.call` in PTO-DSL tracing?
 
-   Batch 1 uses direct `SimtLaunchOp` emission. This matches the ISA and keeps
+   PTO-DSL uses direct `SimtLaunchOp` emission. This matches the ISA and keeps
    the frontend surface one-to-one with VPTO. Expansion remains owned by the
    existing backend wrapper-expansion pass.
 
@@ -406,20 +454,20 @@ later implementation changes runtime behavior.
    should they accept launch dims later through a method such as
    `body.launch(..., dims=(...))`?
 
-   Batch 1 preserves current direct-call behavior. A method can be added later
+   PTO-DSL preserves current direct-call behavior. A method can be added later
    as pure sugar over `pto.simt_launch(...)`.
 
 3. Should PTO-DSL enforce "query ops only inside `pto.simt_entry`" at Python
    tracing time?
 
-   Batch 1 relies on backend verification. A frontend context check may improve
+   PTO-DSL relies on backend verification. A frontend context check may improve
    diagnostics later, but it should not invent semantics different from VPTO.
 
 4. Should `@pto.simt(max_threads=..., max_regs=...)` be included in Batch 1?
 
    These attributes are part of the SIMT entry contract and are cheap to expose,
-   but they are not necessary for query wrappers. Batch 1 leaves them for a
-   follow-up.
+   but they are not necessary for the current SIMT micro-op API surface. They
+   remain a follow-up.
 
 ## 6. Backend Change Guardrail
 
