@@ -22,7 +22,7 @@ from .._types import _strip_integer_signedness
 
 from mlir.dialects import arith, func
 from mlir.dialects import pto as _pto
-from mlir.ir import FlatSymbolRefAttr, IndexType, InsertionPoint, IntegerType, Operation, UnitAttr
+from mlir.ir import FlatSymbolRefAttr, IndexType, InsertionPoint, IntegerAttr, IntegerType, Operation, UnitAttr
 
 
 @dataclass(frozen=True)
@@ -207,10 +207,26 @@ class TraceSession:
             return helper_fn, arg_templates
 
         helper_symbol = self._next_simt_helper_symbol(subkernel.spec.symbol_name)
+        helper_attributes = [("pto.simt_entry", UnitAttr.get())]
+        i32_attr_type = IntegerType.get_signless(32)
+        if subkernel.spec.simt_max_threads is not None:
+            helper_attributes.append(
+                (
+                    "pto.simt_max_threads",
+                    IntegerAttr.get(i32_attr_type, subkernel.spec.simt_max_threads),
+                )
+            )
+        if subkernel.spec.simt_max_regs is not None:
+            helper_attributes.append(
+                (
+                    "pto.simt_max_regs",
+                    IntegerAttr.get(i32_attr_type, subkernel.spec.simt_max_regs),
+                )
+            )
         helper_spec = HelperFunctionSpec(
             symbol_name=helper_symbol,
             arg_types=arg_types,
-            attributes=(("pto.simt_entry", UnitAttr.get()),),
+            attributes=tuple(helper_attributes),
         )
         helper_fn, created = self.get_or_create_helper_function(helper_spec)
         self._simt_helper_specializations[specialization_key] = helper_fn

@@ -10,12 +10,11 @@ The design is intentionally frontend-first:
 - expose Python PTO-DSL wrappers for existing VPTO SIMT operations;
 - keep wrapper names and parameters close to VPTO IR;
 - avoid backend changes unless the frontend generates valid IR that the
-  backend incorrectly rejects;
-- document open questions before changing lowering, verifiers, or backend
-  passes.
+  backend incorrectly rejects.
 
-The first implementation batch focuses on SIMT launch and query operations.
-Later batches are listed for context so the API direction stays consistent.
+The implementation was staged in batches so the API direction stays consistent
+across launch helpers, query ops, lane collectives, scalar memory, atomics,
+math, conversion, sync, and state preservation.
 
 ## 2. References
 
@@ -35,6 +34,8 @@ Later batches are listed for context so the API direction stays consistent.
 Current PTO-DSL already has a narrow SIMT surface:
 
 - `@pto.simt` decorator and `with pto.simt():` inline scope.
+- `@pto.simt(max_threads=..., max_regs=...)` optional entry resource
+  attributes.
 - `pto.store_vfsimt_info(dim_z, dim_y, dim_x)`.
 - `pto.get_tid_x()`, `pto.get_tid_y()`, `pto.get_tid_z()`.
 - `scalar.load(...)` and `scalar.store(...)` for plain scalar element access.
@@ -140,6 +141,7 @@ The implementation:
 - preserve direct `@pto.simt` calls with default launch dimensions;
 - specialize reusable SIMT helper functions by argument types and static
   keyword arguments;
+- expose optional SIMT entry resource attributes on generated helper functions;
 - avoid backend changes.
 
 ### 5.2 Non-goals
@@ -285,7 +287,7 @@ SIMT entry functions may carry optional VPTO attributes:
 - `pto.simt_max_threads`
 - `pto.simt_max_regs`
 
-Proposed PTO-DSL decorator extension:
+PTO-DSL exposes them through `@pto.simt`:
 
 ```python
 @pto.simt(max_threads=256, max_regs=48)
@@ -303,8 +305,9 @@ func.func @body(...) attributes {
 }
 ```
 
-Both decorator arguments should be optional. When omitted, PTO-DSL should emit
-no explicit attributes and let backend defaults apply.
+Lowering attaches these attributes to the generated specialized helper function,
+not to the authored Python symbol. Omitting either argument emits no explicit
+attribute and lets backend defaults apply.
 
 Validation:
 
@@ -312,9 +315,12 @@ Validation:
 - values must be positive;
 - these attributes must only be attached to functions that are already marked
   `pto.simt_entry`.
+- inline `with pto.simt():` scopes do not generate `pto.simt_entry` helper
+  functions, so they do not accept these attributes.
 
-This extension is useful for launch-envelope documentation and resource
-control, but it is not currently part of the implemented surface.
+These attributes are part of the implemented SIMT entry surface. They only
+describe the resource envelope; the actual workitem count still comes from
+`pto.store_vfsimt_info` or `pto.simt_launch`.
 
 ### 5.7 Query API Behavior
 
@@ -389,6 +395,7 @@ Frontend files touched by the implemented surface:
   - reusable helper lowering for direct SIMT calls and explicit
     `pto.simt_launch`;
   - SIMT helper specialization by argument types and static kwargs;
+  - SIMT entry resource attribute emission;
   - actual helper-symbol targeting for `pto.simt_launch`.
 - `ptodsl/docs/user_guide/03-kernel-entry-and-subkernels.md`
   - documented the SIMT API surface.
@@ -423,6 +430,8 @@ Minimum Python/frontend tests:
    produces distinct helper functions and distinct traced bodies.
 8. `pto.simt_launch` callee attributes reference the actual generated helper
    symbols.
+9. `@pto.simt(max_threads=..., max_regs=...)` emits `pto.simt_max_threads` and
+   `pto.simt_max_regs` on the generated helper function.
 
 Suggested lit/frontend assertions:
 
@@ -440,45 +449,3 @@ Suggested lit/frontend assertions:
 
 Runtime/ST validation is not required for the first frontend API PR unless a
 later implementation changes runtime behavior.
-
-### 5.12 Open Questions
-
-1. Should `pto.simt_launch(...)` directly emit VPTO `SimtLaunchOp`, or should
-   it lower immediately to `store_vfsimt_info + func.call` in PTO-DSL tracing?
-
-   PTO-DSL uses direct `SimtLaunchOp` emission. This matches the ISA and keeps
-   the frontend surface one-to-one with VPTO. Expansion remains owned by the
-   existing backend wrapper-expansion pass.
-
-2. Should direct `@pto.simt` calls remain fixed at `(1, 1, 1)` forever, or
-   should they accept launch dims later through a method such as
-   `body.launch(..., dims=(...))`?
-
-   PTO-DSL preserves current direct-call behavior. A method can be added later
-   as pure sugar over `pto.simt_launch(...)`.
-
-3. Should PTO-DSL enforce "query ops only inside `pto.simt_entry`" at Python
-   tracing time?
-
-   PTO-DSL relies on backend verification. A frontend context check may improve
-   diagnostics later, but it should not invent semantics different from VPTO.
-
-4. Should `@pto.simt(max_threads=..., max_regs=...)` be included in Batch 1?
-
-   These attributes are part of the SIMT entry contract and are cheap to expose,
-   but they are not necessary for the current SIMT micro-op API surface. They
-   remain a follow-up.
-
-## 6. Backend Change Guardrail
-
-Before changing `include/PTO/IR/*`, `lib/PTO/IR/*`, or
-`lib/PTO/Transforms/*` for this work, answer:
-
-- Is PTO-DSL generating IR that matches `docs/isa/micro-isa/17-simt.md` and
-  `include/PTO/IR/VPTOOps.td`?
-- Does the existing backend reject that valid IR?
-- Did existing VPTO lit tests already cover the intended backend behavior?
-- Can the issue be fixed by wrapper normalization, tracing, docs, or tests?
-- If a backend change is still needed, can it be covered by a narrow lit test?
-
-The default answer for Batch 1 should be no backend changes.

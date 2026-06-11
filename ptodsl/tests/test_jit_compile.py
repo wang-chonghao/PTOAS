@@ -425,6 +425,11 @@ def simt_query_probe():
     pto.get_lanemask_gt()
 
 
+@pto.simt(max_threads=256, max_regs=48)
+def simt_resource_attr_probe():
+    pto.get_tid_x()
+
+
 @pto.simt
 def simt_collective_math_probe():
     lane = pto.get_laneid()
@@ -545,6 +550,11 @@ def simt_helper_lowering_probe(*, TRACE_TOKEN: pto.const_expr = 0):
 @pto.jit(target="a5")
 def simt_explicit_launch_probe(*, TRACE_TOKEN: pto.constexpr = 0):
     pto.simt_launch(simt_query_probe, dims=(32, 2, 1))
+
+
+@pto.jit(target="a5")
+def simt_resource_attr_launch_probe(*, TRACE_TOKEN: pto.constexpr = 0):
+    pto.simt_launch(simt_resource_attr_probe, dims=(128, 1, 1))
 
 
 @pto.jit(target="a5")
@@ -2664,6 +2674,35 @@ def main() -> None:
     expect(
         re.search(r"func\.func @simt_query_probe__simt_\d+\(\) attributes \{pto\.simt_entry\}", simt_launch_text) is not None,
         "explicit pto.simt_launch should materialize a reusable pto.simt_entry helper",
+    )
+    simt_resource_attr_text = simt_resource_attr_launch_probe.compile(TRACE_TOKEN=1).mlir_text()
+    expect_parse_roundtrip_and_verify(simt_resource_attr_text, "simt resource attr launch specialization")
+    expect(
+        re.search(
+            r"func\.func @simt_resource_attr_probe__simt_\d+\(\) attributes \{pto\.simt_entry, pto\.simt_max_regs = 48 : i32, pto\.simt_max_threads = 256 : i32\}",
+            simt_resource_attr_text,
+        ) is not None,
+        "@pto.simt(max_threads=..., max_regs=...) should attach resource attrs to the helper function",
+    )
+    expect_raises(
+        ValueError,
+        lambda: pto.simt(max_threads=0)(lambda: None),
+        "max_threads",
+    )
+    expect_raises(
+        TypeError,
+        lambda: pto.simt(max_regs=True)(lambda: None),
+        "max_regs",
+    )
+
+    def _enter_inline_simt_with_resource_attr():
+        with pto.simt(max_threads=256):
+            pass
+
+    expect_raises(
+        TypeError,
+        _enter_inline_simt_with_resource_attr,
+        "function decorator",
     )
     for op_name in (
         "pto.get_tid_x",

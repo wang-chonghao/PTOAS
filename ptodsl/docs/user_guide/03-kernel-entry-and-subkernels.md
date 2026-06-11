@@ -539,7 +539,7 @@ instruction appears to operate on a single element (`lds`, `sts`, `a + b`),
 but the same instruction is issued across a large number of work-items
 simultaneously.
 
-**Signature**: `@pto.simt(fn=None, *, name=None, target="a5")`
+**Signature**: `@pto.simt(fn=None, *, name=None, target="a5", max_threads=None, max_regs=None)`
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"kernel_entry.simt_signature","symbol":"kernel_entry_simt_signature_probe","compile":{"BLOCK":8}} -->
 ```python
@@ -573,9 +573,40 @@ def blend_output_rows(
             scalar.store(o_next, o_next_tile[row, col])
 ```
 
-SIMT kernels read and write individual scalar elements from tiles. The unit
-executes the same scalar instruction across many work-items in parallel, making
-it efficient for per-element operations.
+SIMT kernels read and write individual scalar elements from tiles or typed
+pointers. The unit executes the same scalar instruction across many work-items
+in parallel, making it efficient for per-element operations.
+
+#### SIMT resource attributes
+
+Optional `max_threads` and `max_regs` arguments attach VPTO resource attributes
+to the generated `pto.simt_entry` helper.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `max_threads` | positive Python `int` | backend default `1024` | Compile-time launch envelope for this SIMT helper |
+| `max_regs` | positive Python `int` | backend default `32` | Scalar register budget per work-item |
+
+`max_threads` is not the launch size. The actual work-item count comes from
+`pto.simt_launch(..., dims=(dim_x, dim_y, dim_z))`; `max_threads` should cover
+the largest `dim_x * dim_y * dim_z` used for that helper. Both arguments must
+be Python integers known at trace time, must be greater than zero, and must fit
+in signless `i32`. `bool` values are rejected. These arguments are only valid
+on decorated SIMT helper functions, not inline `with pto.simt():` scopes.
+
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel_entry_simt_resource_probe","compile":{}} -->
+```python
+@pto.simt(max_threads=256, max_regs=48)
+def write_tid(dst: pto.ptr(pto.i32, "gm")):
+    tid = pto.get_tid_x()
+    idx = scalar.index_cast(tid)
+    pto.stg(tid, dst, idx)
+
+
+@pto.jit(target="a5")
+def kernel_entry_simt_resource_probe(dst: pto.ptr(pto.i32, "gm")):
+    pto.simt_launch(write_tid, dst, dims=(128, 1, 1))
+```
 
 **Invocation modes**: can be called from `@pto.jit` in either mode, or used
 inline with `with pto.simt():` (Section 3.4).
@@ -601,6 +632,16 @@ level `pto.store_vfsimt_info(dim_z, dim_y, dim_x)` wrapper is also available
 for direct VPTO authoring, but its operand order follows the backend launch
 descriptor order.
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel_entry_simt_store_info_probe","compile":{}} -->
+```python
+@pto.jit(target="a5")
+def kernel_entry_simt_store_info_probe():
+    dim_z = pto.const(1, dtype=pto.i32)
+    dim_y = pto.const(1, dtype=pto.i32)
+    dim_x = pto.const(32, dtype=pto.i32)
+    pto.store_vfsimt_info(dim_z, dim_y, dim_x)
+```
+
 #### SIMT query ops
 
 SIMT query ops are nullary micro-op wrappers. They return PTO scalar values
@@ -617,6 +658,39 @@ visible to the current SIMT work-item.
 | `pto.get_clock64()` | `i64` | 64-bit clock sample |
 | `pto.get_laneid()` | `i32` | Physical SIMT lane id |
 | `pto.get_lanemask_eq()` / `pto.get_lanemask_le()` / `pto.get_lanemask_lt()` / `pto.get_lanemask_ge()` / `pto.get_lanemask_gt()` | `i32` | Lane masks derived from the current lane id |
+
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel_entry_simt_query_probe","compile":{}} -->
+```python
+@pto.simt
+def capture_query_state(dst: pto.ptr(pto.i32, "gm")):
+    tid_x = pto.get_tid_x()
+    pto.get_tid_y()
+    pto.get_tid_z()
+    pto.get_block_dim_x()
+    pto.get_block_dim_y()
+    pto.get_block_dim_z()
+    pto.get_grid_dim_x()
+    pto.get_grid_dim_y()
+    pto.get_grid_dim_z()
+    pto.get_block_idx_x()
+    pto.get_block_idx_y()
+    pto.get_block_idx_z()
+    pto.get_veccoreid()
+    pto.get_clock32()
+    pto.get_clock64()
+    lane = pto.get_laneid()
+    pto.get_lanemask_eq()
+    pto.get_lanemask_le()
+    pto.get_lanemask_lt()
+    pto.get_lanemask_ge()
+    pto.get_lanemask_gt()
+    pto.stg(tid_x, dst, scalar.index_cast(lane))
+
+
+@pto.jit(target="a5")
+def kernel_entry_simt_query_probe(dst: pto.ptr(pto.i32, "gm")):
+    pto.simt_launch(capture_query_state, dst, dims=(32, 1, 1))
+```
 
 #### SIMT lane collective ops
 
@@ -643,6 +717,30 @@ pto.redux_min(value, *, signedness=None)
 require `signedness="signed"` or `signedness="unsigned"`; floating-point redux
 does not accept signedness.
 
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel_entry_simt_collective_probe","compile":{}} -->
+```python
+@pto.simt
+def reduce_lane_value(dst: pto.ptr(pto.i32, "gm")):
+    pred = pto.const(1, dtype=pto.i1)
+    lane = pto.get_laneid()
+
+    pto.vote_all(pred)
+    pto.vote_any(pred)
+    pto.vote_uni(pred)
+    pto.vote_ballot(pred)
+
+    value = pto.shuffle_bfly(lane, 1, width=32)
+    total = pto.redux_add(value, signedness="signed")
+    maximum = pto.redux_max(total, signedness="signed")
+    minimum = pto.redux_min(maximum, signedness="signed")
+    pto.stg(minimum, dst, scalar.index_cast(lane))
+
+
+@pto.jit(target="a5")
+def kernel_entry_simt_collective_probe(dst: pto.ptr(pto.i32, "gm")):
+    pto.simt_launch(reduce_lane_value, dst, dims=(32, 1, 1))
+```
+
 #### SIMT scalar GM memory and atomic ops
 
 ```python
@@ -664,11 +762,31 @@ pto.atomic_cas(ptr, compare, value, *, l2cache="nmfv", signedness=None)
 clauses. Plain scalar memory remains available through `scalar.load(...)` and
 `scalar.store(...)`.
 
-`l1cache` accepts `"cache"` or `"uncache"`. Load `l2cache` accepts the VPTO
-load L2 cache tokens; store and atomic `l2cache` accept the VPTO store/atomic
-L2 cache tokens. Atomic pointers must point to GM or UB scalar storage accepted
-by the VPTO verifier. Integer atomics may pass `signedness`; floating-point and
+`l1cache` accepts `"cache"` or `"uncache"`. Load `l2cache` accepts `"nmfv"`,
+`"nmlv"`, `"nmprs"`, `"nmpref"`, `"nakeep"`, `"naclean"`, `"nadrop"`,
+`"idsfv"`, `"idslv"`, `"idsprs"`, `"idspref"`, `"exfv"`, `"exlv"`, `"exprs"`,
+or `"expref"`. Store and atomic `l2cache` accepts `"nmfv"`, `"nmlv"`,
+`"nmprs"`, `"nmred"`, `"naci"`, `"napw"`, `"napi"`, `"nared"`, `"wbhfv"`,
+`"wbhlv"`, `"wbhprs"`, `"wbhred"`, `"wtsfv"`, `"wtslv"`, `"wtsprs"`, or
+`"wtsred"`. Atomic pointers must point to GM or UB scalar storage accepted by
+the VPTO verifier. Integer atomics may pass `signedness`; floating-point and
 packed atomics must omit it.
+
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel_entry_simt_memory_atomic_probe","compile":{}} -->
+```python
+@pto.simt
+def update_counter(counter: pto.ptr(pto.i32, "gm")):
+    tid = pto.get_tid_x()
+    idx = scalar.index_cast(tid)
+    value = pto.ldg(counter, idx, l1cache="cache", l2cache="nmfv")
+    old = pto.atomic_add(counter, value, l2cache="nmfv", signedness="signed")
+    pto.stg(old, counter, idx, l1cache="uncache", l2cache="wtsred")
+
+
+@pto.jit(target="a5")
+def kernel_entry_simt_memory_atomic_probe(counter: pto.ptr(pto.i32, "gm")):
+    pto.simt_launch(update_counter, counter, dims=(32, 1, 1))
+```
 
 #### SIMT scalar math, conversion, sync, and state ops
 
@@ -712,6 +830,47 @@ conversion is not supported by `pto.convert`.
 
 `pto.keep` and `pto.resume` use explicit non-negative Python integer slots.
 Keep/resume placement constraints are enforced by the VPTO verifier.
+
+<!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel_entry_simt_math_state_probe","compile":{}} -->
+```python
+@pto.simt
+def save_lane_state():
+    pto.keep(pto.get_tid_x(), slot=0)
+
+
+@pto.simt
+def transform_lane_state(dst: pto.ptr(pto.f32, "gm")):
+    lane = pto.resume(pto.i32, slot=0)
+    permuted = pto.prmt(lane, lane, lane)
+    high = pto.mulhi(permuted, lane, signedness="unsigned")
+    product = pto.mul_i32toi64(lane, lane, signedness="unsigned")
+    _ = high
+    _ = product
+
+    value = pto.convert(
+        lane,
+        pto.f32,
+        rounding="r",
+        saturation="nosat",
+        signedness="unsigned",
+    )
+    root = pto.sqrt(pto.absf(value))
+    powered = pto.pow(root, root)
+    rounded = pto.round(pto.rint(pto.floor(pto.ceil(powered))))
+    bounded = pto.fmin(pto.fmax(value, root), rounded)
+    accum = pto.fma(bounded, pto.exp(value), pto.log(pto.fmax(value, root)))
+
+    pto.syncthreads()
+    pto.threadfence()
+    pto.threadfence_block()
+    pto.stg(accum, dst, scalar.index_cast(lane))
+
+
+@pto.jit(target="a5")
+def kernel_entry_simt_math_state_probe(dst: pto.ptr(pto.f32, "gm")):
+    pto.simt_launch(save_lane_state, dims=(32, 1, 1))
+    pto.simt_launch(transform_lane_state, dst, dims=(32, 1, 1))
+```
 
 ## 3.4 Inline context manager syntax
 
