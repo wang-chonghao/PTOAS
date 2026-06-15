@@ -12,6 +12,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
 
@@ -283,6 +284,69 @@ FailureOr<VfProgram> buildFusedElementwiseVfProgram(const VfCostInput &input) {
 
   program.loops.push_back(std::move(loop));
   return program;
+}
+
+StringRef getVfOpcodeName(VfOpcode opcode) {
+  switch (opcode) {
+  case VfOpcode::VLDS:
+    return "vlds";
+  case VfOpcode::VSTS:
+    return "vsts";
+  case VfOpcode::VADD:
+    return "vadd";
+  case VfOpcode::VSUB:
+    return "vsub";
+  case VfOpcode::VMUL:
+    return "vmul";
+  case VfOpcode::VEXP:
+    return "vexp";
+  }
+  llvm_unreachable("unknown VF opcode");
+}
+
+StringRef getVfOperandKindName(VfOperandKind kind) {
+  switch (kind) {
+  case VfOperandKind::VirtualReg:
+    return "reg";
+  case VfOperandKind::TileValue:
+    return "tile";
+  case VfOperandKind::ScalarValue:
+    return "scalar";
+  }
+  llvm_unreachable("unknown VF operand kind");
+}
+
+static void printVfOperand(const VfOperand &operand, raw_ostream &os) {
+  os << getVfOperandKindName(operand.kind) << operand.id;
+}
+
+void printVfProgram(const VfProgram &program, raw_ostream &os) {
+  for (auto [loopIndex, loop] : llvm::enumerate(program.loops)) {
+    os << "loop " << loopIndex << " trip_count=" << loop.tripCount
+       << " unroll=" << loop.unroll << "\n";
+    for (const VfInstruction &instruction : loop.instructions) {
+      os << "  ";
+      if (instruction.result) {
+        printVfOperand(*instruction.result, os);
+        os << " = ";
+      }
+      os << getVfOpcodeName(instruction.opcode);
+      if (!instruction.operands.empty())
+        os << " ";
+      llvm::interleaveComma(instruction.operands, os,
+                            [&](const VfOperand &operand) {
+                              printVfOperand(operand, os);
+                            });
+      os << "\n";
+    }
+  }
+}
+
+std::string formatVfProgram(const VfProgram &program) {
+  std::string text;
+  llvm::raw_string_ostream os(text);
+  printVfProgram(program, os);
+  return os.str();
 }
 
 } // namespace pto

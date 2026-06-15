@@ -14,9 +14,11 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace mlir {
 namespace pto {
@@ -84,6 +86,10 @@ struct VfCostInput {
 std::optional<TileOpPatternSpec> lookupTileOpPatternSpec(StringRef opName);
 bool isSupportedVfCostTileOp(const FusionComputeNode &node);
 FailureOr<VfProgram> buildFusedElementwiseVfProgram(const VfCostInput &input);
+StringRef getVfOpcodeName(VfOpcode opcode);
+StringRef getVfOperandKindName(VfOperandKind kind);
+void printVfProgram(const VfProgram &program, raw_ostream &os);
+std::string formatVfProgram(const VfProgram &program);
 
 } // namespace pto
 } // namespace mlir
