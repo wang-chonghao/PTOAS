@@ -37,6 +37,7 @@ add_mlir_dialect_library(PTOTransforms
   PTOValidateVPTOIR.cpp
   PTOInferVPTOVecScope.cpp
 
+  TileFusion/VfCostModel.cpp
   InsertSync/PTOInsertSync.cpp
   PTOInjectBarrierAllSync.cpp
   InsertSync/InsertSyncDebug.cpp
