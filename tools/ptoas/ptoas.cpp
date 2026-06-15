@@ -8,12 +8,16 @@
 
 #include "ptoas.h"
 #include "PTO/IR/PTO.h"
-#include "PTO/Transforms/VPTOLLVMEmitter.h"
 #include "PTO/Transforms/Passes.h"
 #include "PTO/Transforms/BufferizableOpInterfaceImpl.h"
 #include "VPTOHostStubEmission.h"
 #include "TilelangDaemon.h"
 #include "PTO/Transforms/CppPostprocess.h"
+
+#if PTO_ENABLE_VPTO_LLVM_EMITTER
+#include "PTO/Transforms/VPTOLLVMEmitter.h"
+#include "VPTOFatobjEmission.h"
+#endif
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -426,6 +430,11 @@ static llvm::cl::opt<bool> enableOpFusion(
     "enable-op-fusion",
     llvm::cl::desc("Enable A5 tile fusion on level2/level3. EmitC uses "
                    "last-use annotation; VPTO uses fusion-region lifecycle."),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> dumpVfProgram(
+    "dump-vf-program",
+    llvm::cl::desc("Print VF costmodel programs built by frontend tile fusion"),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> disableInferLayout(
@@ -1518,6 +1527,7 @@ static void inlineTilelangHelpersOnVPTOInput(PassManager &pm) {
   kernelModulePM.addPass(mlir::createCanonicalizerPass());
 }
 
+#if PTO_ENABLE_VPTO_LLVM_EMITTER
 static pto::VPTOEmissionOptions
 buildVPTOEmissionOptions(const pto::CANNVersion &cannVersion) {
   pto::VPTOEmissionOptions options;
@@ -1526,6 +1536,7 @@ buildVPTOEmissionOptions(const pto::CANNVersion &cannVersion) {
   options.cannVersion = cannVersion;
   return options;
 }
+#endif
 
 static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
                                  bool emitHostStub,
@@ -1539,6 +1550,12 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
     return 0;
   }
 
+#if !PTO_ENABLE_VPTO_LLVM_EMITTER
+  llvm::errs() << "Error: VPTO LLVM/fatobj emission is disabled in this "
+                  "PTOAS build. Reconfigure with "
+                  "-DPTO_ENABLE_VPTO_LLVM_EMITTER=ON to enable it.\n";
+  return 1;
+#else
   pto::VPTOEmissionOptions options = buildVPTOEmissionOptions(cannVersion);
   std::string stubSource;
   if (emitHostStub) {
@@ -1560,6 +1577,7 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   result.vptoStubSource = std::move(stubSource);
   result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
+#endif
 }
 
 static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,

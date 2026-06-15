@@ -85,6 +85,14 @@ if(PTOAS_ENABLE_WERROR)
   endif()
 endif()
 
+option(PTO_ENABLE_VPTO_LLVM_EMITTER
+       "Build VPTO LLVM/fatobj emission support" ON)
+if(PTO_ENABLE_VPTO_LLVM_EMITTER)
+  add_compile_definitions(PTO_ENABLE_VPTO_LLVM_EMITTER=1)
+else()
+  add_compile_definitions(PTO_ENABLE_VPTO_LLVM_EMITTER=0)
+endif()
+
 # macOS: 移除已废弃的 -undefined suppress，避免 ld 警告（保留 -undefined dynamic_lookup 即可）
 if(APPLE)
   foreach(_var CMAKE_SHARED_MODULE_CREATE_CXX_FLAGS CMAKE_MODULE_LINKER_FLAGS)

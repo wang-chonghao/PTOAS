@@ -236,6 +236,10 @@ static void dumpVfProgramsForGroups(
 struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
   using pto::impl::FusionPlanBase<FusionPlanPass>::FusionPlanBase;
 
+  explicit FusionPlanPass(bool dumpVfProgram) {
+    this->dumpVfProgram = dumpVfProgram;
+  }
+
   void runOnOperation() override {
     func::FuncOp func = getOperation();
     if (func.isExternal())
@@ -270,4 +274,8 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
 
 std::unique_ptr<Pass> mlir::pto::createFusionPlanPass() {
   return std::make_unique<FusionPlanPass>();
+}
+
+std::unique_ptr<Pass> mlir::pto::createFusionPlanPass(bool dumpVfProgram) {
+  return std::make_unique<FusionPlanPass>(dumpVfProgram);
 }
