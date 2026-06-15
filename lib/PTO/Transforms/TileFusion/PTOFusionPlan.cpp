@@ -244,6 +244,7 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
   FusionPlanPass() = default;
   FusionPlanPass(const pto::FusionPlanOptions &options) {
     enableShapeInference = options.enableShapeInference;
+    dumpVfProgram = options.dumpVfProgram;
   }
 
   void runOnOperation() override {

@@ -16,9 +16,17 @@ set(LLVM_LINK_COMPONENTS
   Core
 )
 
+set(PTO_OPT_VPTO_LLVM_SOURCES)
+if(PTO_ENABLE_VPTO_LLVM_EMITTER)
+  list(APPEND PTO_OPT_VPTO_LLVM_SOURCES
+    VPTOFatobjEmission.cpp
+  )
+endif()
+
 # [修改 1] 重命名目标: ptoas -> pto-opt
 # 原因：LLVM 构建目录里已经有一个 ptoas 了，重名会导致 CMake 报错。
 add_llvm_executable(pto-opt
+  PARTIAL_SOURCES_INTENDED
   ptoas.cpp
   driver.cpp
   VPTOHostStubEmission.cpp

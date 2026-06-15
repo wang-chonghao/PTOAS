@@ -11,7 +11,19 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
+set(PTO_VPTO_LLVM_EMITTER_SOURCES)
+if(PTO_ENABLE_VPTO_LLVM_EMITTER)
+  list(APPEND PTO_VPTO_LLVM_EMITTER_SOURCES
+    VPTOLLVMEmitter.cpp
+    VPTOCANN900LLVMEmitter.cpp
+    VPTOLLVMEmitterDispatcher.cpp
+    VPTOLLVMEmitterHelper.cpp
+  )
+endif()
+
 add_mlir_dialect_library(PTOTransforms
+  PARTIAL_SOURCES_INTENDED
+  ${PTO_VPTO_LLVM_EMITTER_SOURCES}
   TileFusion/FusionAnalysis.cpp
   TileFusion/FusionCostModel.cpp
   TileFusion/FusionOpSemantics.cpp
@@ -25,10 +37,6 @@ add_mlir_dialect_library(PTOTransforms
   TileFusion/PTOFusionPredicateElision.cpp
   TileFusion/PTOFusionLoadStoreElision.cpp
   TileFusion/PTOFlattenFusionRegion.cpp
-  VPTOLLVMEmitter.cpp
-  VPTOCANN900LLVMEmitter.cpp
-  VPTOLLVMEmitterDispatcher.cpp
-  VPTOLLVMEmitterHelper.cpp
   VPTOPtrNormalize.cpp
   VPTOPtrCastCleanup.cpp
   VPTOExpandWrapperOps.cpp

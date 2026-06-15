@@ -229,10 +229,7 @@ def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
   let constructor = "mlir::pto::createFusionPlanPass()";
   let options = [
     Option<"dumpVfProgram", "dump-vf-program", "bool", "false",
-           "Print the VF costmodel program built for accepted fusion groups">
-  ];
-  let dependentDialects = ["mlir::pto::PTODialect"];
-  let options = [
+           "Print the VF costmodel program built for accepted fusion groups">,
     Option<"enableShapeInference", "enable-shape-inference",
            "bool", /*default=*/"false",
            "Enable shape inference (ShapeConstraintSolver) for tile fusion. "
@@ -242,6 +239,7 @@ def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
            "(cached by the analysis manager) and never consults iteration-domain "
            "classes, so it does not need the option.">
   ];
+  let dependentDialects = ["mlir::pto::PTODialect"];
 }
 
 def OpScheduling : Pass<"pto-op-scheduling", "func::FuncOp"> {
