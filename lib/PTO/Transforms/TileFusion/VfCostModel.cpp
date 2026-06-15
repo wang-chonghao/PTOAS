@@ -8,6 +8,9 @@
 
 #include "PTO/Transforms/TileFusion/VfCostModel.h"
 
+#include "PTO/IR/PTO.h"
+#include "PTO/IR/PTOTypeUtils.h"
+
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -19,6 +22,8 @@ using namespace mlir;
 namespace mlir {
 namespace pto {
 namespace {
+
+constexpr int64_t kA5VectorBytes = 256;
 
 struct VfProgramBuilder {
   unsigned nextOperandId = 0;
@@ -162,7 +167,39 @@ computeFlattenTripCount(const FusionBlockAnalysis &blockAnalysis,
       info.vRow == ShapedType::kDynamic || info.vCol == ShapedType::kDynamic)
     return failure();
 
-  return info.vRow * info.vCol;
+  Type elementType;
+  for (const FusionComputeNode *node : group) {
+    for (Value output : node->semantics.tileOutputs) {
+      if (auto tileType = dyn_cast<pto::TileBufType>(output.getType())) {
+        elementType = tileType.getElementType();
+        break;
+      }
+    }
+    if (elementType)
+      break;
+    for (Value input : node->semantics.tileInputs) {
+      if (auto tileType = dyn_cast<pto::TileBufType>(input.getType())) {
+        elementType = tileType.getElementType();
+        break;
+      }
+    }
+    if (elementType)
+      break;
+  }
+
+  if (!elementType)
+    return failure();
+
+  unsigned elemBytes = pto::getPTOStorageElemByteSize(elementType);
+  if (elemBytes == 0 || elemBytes > kA5VectorBytes)
+    return failure();
+
+  int64_t elemsPerVector = kA5VectorBytes / elemBytes;
+  if (elemsPerVector <= 0)
+    return failure();
+
+  int64_t elementCount = info.vRow * info.vCol;
+  return (elementCount + elemsPerVector - 1) / elemsPerVector;
 }
 
 static void appendLoadIfNeeded(VfProgramBuilder &builder, VfLoopProgram &loop,
