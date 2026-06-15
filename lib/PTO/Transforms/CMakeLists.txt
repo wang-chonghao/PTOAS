@@ -13,6 +13,7 @@
 
 add_mlir_dialect_library(PTOTransforms
   TileFusion/FusionAnalysis.cpp
+  TileFusion/FusionCostModel.cpp
   TileFusion/FusionOpSemantics.cpp
   TileFusion/PTOPreFusionAnalysis.cpp
   TileFusion/PTOPrintPreFusionAnalysis.cpp
