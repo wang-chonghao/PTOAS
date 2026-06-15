@@ -84,9 +84,54 @@ static bool hasConsumerOutsideGroup(const FusionValueLiveness &live,
   return false;
 }
 
+static const FusionWriteInstanceLiveness *
+findWriteInstanceForOutput(const FusionBlockAnalysis &blockAnalysis,
+                           unsigned producerNode, Value value) {
+  for (const FusionWriteInstanceLiveness &write : blockAnalysis.writeInstances) {
+    if (!write.producerNode || *write.producerNode != producerNode)
+      continue;
+    if (write.value == value)
+      return &write;
+  }
+  return nullptr;
+}
+
+static bool hasConsumerInGroup(const FusionWriteInstanceLiveness &live,
+                               const DenseSet<unsigned> &groupNodeIds) {
+  for (unsigned consumerId : live.consumerNodes)
+    if (groupNodeIds.contains(consumerId))
+      return true;
+  return false;
+}
+
+static bool hasConsumerOutsideGroup(const FusionWriteInstanceLiveness &live,
+                                    const DenseSet<unsigned> &groupNodeIds) {
+  for (unsigned consumerId : live.consumerNodes)
+    if (!groupNodeIds.contains(consumerId))
+      return true;
+  return false;
+}
+
+static bool mustStoreWriteInstance(const FusionWriteInstanceLiveness &live,
+                                   const DenseSet<unsigned> &groupNodeIds) {
+  if (live.hasExternalUsers || live.escapesBlock ||
+      live.hasLocalBoundaryUsers || live.hasLocalHardBoundaryUsers)
+    return true;
+
+  if (hasConsumerOutsideGroup(live, groupNodeIds))
+    return true;
+
+  return !hasConsumerInGroup(live, groupNodeIds);
+}
+
 static bool mustStoreTileOutput(const FusionBlockAnalysis &blockAnalysis,
                                 const DenseSet<unsigned> &groupNodeIds,
+                                const FusionComputeNode &producer,
                                 Value value) {
+  if (const FusionWriteInstanceLiveness *write =
+          findWriteInstanceForOutput(blockAnalysis, producer.id, value))
+    return mustStoreWriteInstance(*write, groupNodeIds);
+
   const FusionValueLiveness *live = findLivenessForValue(blockAnalysis, value);
   if (!live)
     return true;
@@ -268,7 +313,8 @@ FailureOr<VfProgram> buildFusedElementwiseVfProgram(const VfCostInput &input) {
 
   for (const FusionComputeNode *node : proposedGroup) {
     for (Value output : node->semantics.tileOutputs) {
-      if (!mustStoreTileOutput(*input.blockAnalysis, groupNodeIds, output))
+      if (!mustStoreTileOutput(*input.blockAnalysis, groupNodeIds, *node,
+                               output))
         continue;
 
       auto regIt = valueToReg.find(output);
