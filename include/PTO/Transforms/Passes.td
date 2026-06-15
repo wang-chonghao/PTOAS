@@ -227,6 +227,10 @@ def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
       - pto.fusion.order
   }];
   let constructor = "mlir::pto::createFusionPlanPass()";
+  let options = [
+    Option<"dumpVfProgram", "dump-vf-program", "bool", "false",
+           "Print the VF costmodel program built for accepted fusion groups">
+  ];
   let dependentDialects = ["mlir::pto::PTODialect"];
 }
 

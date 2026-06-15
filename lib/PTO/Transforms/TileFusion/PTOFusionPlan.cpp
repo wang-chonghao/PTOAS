@@ -9,6 +9,7 @@
 #include "PTO/Transforms/TileFusion/FusionCostModel.h"
 #include "PTO/Transforms/TileFusion/FusionAnalysis.h"
 #include "PTO/Transforms/TileFusion/FusionOpSemantics.h"
+#include "PTO/Transforms/TileFusion/VfCostModel.h"
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
@@ -20,6 +21,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/raw_ostream.h"
 
 
 namespace mlir {
@@ -209,6 +211,28 @@ static void clearPlanningAttrs(func::FuncOp func) {
   });
 }
 
+static void dumpVfProgramsForGroups(
+    ArrayRef<PlannedFusionGroup> groups,
+    const pto::FusionBlockAnalysis &blockAnalysis) {
+  for (const PlannedFusionGroup &group : groups) {
+    if (group.members.size() < 2)
+      continue;
+
+    ArrayRef<const pto::FusionComputeNode *> prefix(group.members.data(),
+                                                    group.members.size() - 1);
+    pto::VfCostInput input{&blockAnalysis, prefix, group.members.back()};
+    FailureOr<pto::VfProgram> program =
+        pto::buildFusedElementwiseVfProgram(input);
+    if (failed(program)) {
+      llvm::errs() << "[pto-fusion-plan] failed to build VF program for group\n";
+      continue;
+    }
+
+    llvm::errs() << "[pto-fusion-plan] VF program for fusion group:\n";
+    pto::printVfProgram(*program, llvm::errs());
+  }
+}
+
 struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
   using pto::impl::FusionPlanBase<FusionPlanPass>::FusionPlanBase;
 
@@ -235,6 +259,8 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
       PlanningContext planningCtx{blockAnalysis};
       SmallVector<PlannedFusionGroup, 8> groups =
           strategyEngine.planBlock(planningCtx, costModel);
+      if (dumpVfProgram)
+        dumpVfProgramsForGroups(groups, blockAnalysis);
       assignStableGroupMetadata(groups, ctx, nextGroupId);
     }
   }
