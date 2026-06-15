@@ -36,6 +36,12 @@ enum class TilePatternKind {
   ScaleElementwise,
 };
 
+enum class VfOperandKind {
+  VirtualReg,
+  TileValue,
+  ScalarValue,
+};
+
 struct TileOpPatternSpec {
   StringRef tileOpName;
   TilePatternKind pattern;
@@ -49,6 +55,8 @@ struct TileOpPatternSpec {
 
 struct VfOperand {
   unsigned id = 0;
+  VfOperandKind kind = VfOperandKind::VirtualReg;
+  Value value;
 };
 
 struct VfInstruction {
