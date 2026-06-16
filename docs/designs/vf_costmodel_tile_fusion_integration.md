@@ -776,18 +776,10 @@ JSON 文件传递数据；JSON 仅保留为 debug / 对比格式。
 
 #### 阶段 2.1：定义源码级接口 IR
 
-PTOAS 与 C++ VfSimulator 之间使用内存中的递归结构化 IR，建议命名为
-`VfSimProgram`。它与阶段 1 的 `VfProgram` 分层：
-
-```text
-VfProgram:
-  PTOAS TileFusion builder 的局部 IR，可携带 MLIR Value，服务于从 tileop group
-  构造 fused 微指令流。
-
-VfSimProgram:
-  C++ VfSimulator 的稳定输入接口，不依赖 MLIR Value，不关心 tileop 来源，只表达
-  微指令、operand、loop 结构和 dtype。
-```
+PTOAS 与 C++ VfSimulator 之间使用内存中的递归结构化 IR，命名为 `VfSimProgram`。
+阶段 2 开始不再维护一套独立的 `VfProgram -> VfSimProgram` lowering 链路，而是让
+TileFusion builder 直接生成 `VfSimProgram`。builder 内部仍可使用 MLIR `Value`
+做 tile/scalar/register 映射和 liveness 判断，但对外产物不能携带 MLIR `Value`。
 
 建议 C++ 结构：
 
@@ -841,27 +833,31 @@ struct VfSimOperand {
 工作：
 
 ```text
-1. 新增接口文件：
-   include/PTO/Transforms/TileFusion/VfSimProgram.h
-   lib/PTO/Transforms/TileFusion/VfSimProgram.cpp
+1. 用 VfSimProgram 替换当前阶段 1 的 VfProgram：
+   buildFusedElementwiseVfProgram()
+   -> buildFusedElementwiseVfSimProgram()
 
-2. 实现 lowering：
-   lowerToVfSimProgram(const VfProgram &program)
+2. builder 直接生成递归 VfSimProgram：
+   top-level body 可包含 inst/loop
+   当前 elementwise group 生成一个 flattened VfSimLoop
+   loop body 内包含 VLDS / compute / VSTS
 
-   当前阶段只需要覆盖已有单层 loop：
-   VfProgram.loops[i] -> VfSimLoop
-   VLDS result reg / source tile
-   VSTS destination tile / source reg
-   compute result reg / source reg/scalar
+3. builder 内部状态仍可使用 MLIR Value：
+   Value -> UB operand
+   Value -> scalar operand
+   Value -> current virtual register
+   这些 map 不进入 VfSimProgram 对外结构。
 
-3. dtype 推导：
+4. dtype 推导：
    tile operand 从 TileBufType element type 推导
    scalar operand 从 scalar MLIR type 推导
-   virtual reg 优先继承其绑定 Value 的 element type
+   virtual reg 在创建时使用绑定 tile output/input Value 的 element type
    当前无法推导时返回 failure，不能默认 fp32
 
-4. JSON dump 后续改为从 VfSimProgram 导出，或保持当前 VFProgram JSON 作为 debug。
-   源码级接入不以 JSON 文件为接口。
+5. JSON dump 从 VfSimProgram 导出：
+   operand JSON 包含 kind / id / dtype
+   body JSON 支持 inst / loop 递归结构
+   JSON 只作为 debug / Python VfSimulator 对比路径，源码级接入不以 JSON 文件为接口。
 ```
 
 #### 阶段 2.3：VfLatencyModel 接口骨架
@@ -900,8 +896,7 @@ public:
 
 2. 在 PTOAS costmodel 内部接入 C++ VfLatencyModel：
    proposedGroup
-   -> fused VfProgram
-   -> lowerToVfSimProgram()
+   -> fused VfSimProgram
    -> predict cycles
    -> VfLatencyResult
 
@@ -923,6 +918,33 @@ JSON / 外挂 VfSimulator 结果可作为对照。
 unsupported micro-op 在源码接口中返回明确 rejectReason。
 现有 hard gate 仍有效。
 lit 测试覆盖简单链、unsupported、domain mismatch、hard boundary。
+```
+
+当前阶段 2.1 / 2.2 的落地状态：
+
+```text
+1. PTOAS 已不再额外维护阶段 1 的 VfProgram 结构。
+   TileFusion builder 直接生成 VfSimProgram。
+
+2. VfSimProgram 使用递归 body：
+   VfSimProgram.body: inst 或 loop
+   VfSimLoop.body: inst 或 loop
+   当前 elementwise group 先生成一个 flattened loop，后续复杂 tileop 可以扩展为嵌套 loop。
+
+3. operand 已携带 dtype：
+   UB tile operand 从 TileBufType element type 推导
+   scalar operand 从 scalar MLIR type 推导
+   virtual register operand 从绑定的 tile input/output element type 推导
+   无法推导时 buildFusedElementwiseVfSimProgram() 返回 failure
+
+4. JSON dump 已由 VfSimProgram 导出。
+   JSON 仍只用于 debug / 外挂 Python VfSimulator 对比，不作为最终源码级接口。
+
+5. 现阶段已验证：
+   tadd + tmul fused case
+   GeLU_poly 简化 case
+   texp + tdiv supported case
+   tdivs -> VDIVS unsupported reject case
 ```
 
 ### 阶段 3：扩展 TileOp Pattern 覆盖

@@ -25,33 +25,90 @@ namespace {
 
 constexpr int64_t kA5VectorBytes = 256;
 
-struct VfProgramBuilder {
+struct VfSimProgramBuilder {
   unsigned nextOperandId = 0;
-  DenseMap<Value, VfOperand> tileValueOperands;
-  DenseMap<Value, VfOperand> scalarValueOperands;
+  DenseMap<Value, VfSimOperand> tileValueOperands;
+  DenseMap<Value, VfSimOperand> scalarValueOperands;
 
-  VfOperand makeOperand(VfOperandKind kind, Value value = {}) {
-    return VfOperand{nextOperandId++, kind, value};
+  FailureOr<VfDType> inferDType(Type type) {
+    if (auto tileType = dyn_cast<pto::TileBufType>(type))
+      type = tileType.getElementType();
+    if (type.isF32())
+      return VfDType::F32;
+    if (type.isF16())
+      return VfDType::F16;
+    if (type.isBF16())
+      return VfDType::BF16;
+    if (type.isUnsignedInteger(64))
+      return VfDType::UI64;
+    if (type.isUnsignedInteger(32))
+      return VfDType::UI32;
+    if (type.isUnsignedInteger(16))
+      return VfDType::UI16;
+    if (type.isUnsignedInteger(8))
+      return VfDType::UI8;
+    if (type.isInteger(64))
+      return VfDType::I64;
+    if (type.isInteger(32) || type.isIndex())
+      return VfDType::I32;
+    if (type.isInteger(16))
+      return VfDType::I16;
+    if (type.isInteger(8))
+      return VfDType::I8;
+    return failure();
   }
 
-  VfOperand getTileValueOperand(Value value) {
+  FailureOr<VfSimOperand> makeOperand(VfOperandKind kind, Value value) {
+    FailureOr<VfDType> dtype = inferDType(value.getType());
+    if (failed(dtype))
+      return failure();
+    return VfSimOperand{nextOperandId++, kind, *dtype};
+  }
+
+  FailureOr<VfSimOperand> getTileValueOperand(Value value) {
     auto [it, inserted] = tileValueOperands.try_emplace(value);
-    if (inserted)
-      it->second = makeOperand(VfOperandKind::TileValue, value);
+    if (inserted) {
+      FailureOr<VfSimOperand> operand = makeOperand(VfOperandKind::UB, value);
+      if (failed(operand))
+        return failure();
+      it->second = *operand;
+    }
     return it->second;
   }
 
-  VfOperand getScalarValueOperand(Value value) {
+  FailureOr<VfSimOperand> getScalarValueOperand(Value value) {
     auto [it, inserted] = scalarValueOperands.try_emplace(value);
-    if (inserted)
-      it->second = makeOperand(VfOperandKind::ScalarValue, value);
+    if (inserted) {
+      FailureOr<VfSimOperand> operand =
+          makeOperand(VfOperandKind::Scalar, value);
+      if (failed(operand))
+        return failure();
+      it->second = *operand;
+    }
     return it->second;
   }
 
-  VfOperand makeVirtualReg(Value value = {}) {
-    return makeOperand(VfOperandKind::VirtualReg, value);
+  FailureOr<VfSimOperand> makeVirtualReg(Value value) {
+    return makeOperand(VfOperandKind::VReg, value);
   }
 };
+
+static VfSimNode makeInstNode(VfSimInst inst) {
+  VfSimNode node;
+  node.kind = VfSimNode::Kind::Inst;
+  node.inst = std::move(inst);
+  return node;
+}
+
+static VfSimNode makeLoopNode(int64_t tripCount, unsigned unroll,
+                              std::vector<VfSimNode> body) {
+  VfSimNode node;
+  node.kind = VfSimNode::Kind::Loop;
+  node.tripCount = tripCount;
+  node.unroll = unroll;
+  node.body = std::move(body);
+  return node;
+}
 
 static SmallVector<const FusionComputeNode *, 8>
 buildStableNodeOrder(ArrayRef<const FusionComputeNode *> nodes) {
@@ -202,53 +259,66 @@ computeFlattenTripCount(const FusionBlockAnalysis &blockAnalysis,
   return (elementCount + elemsPerVector - 1) / elemsPerVector;
 }
 
-static void appendLoadIfNeeded(VfProgramBuilder &builder, VfLoopProgram &loop,
-                               DenseMap<Value, VfOperand> &valueToReg,
-                               Value input) {
+static LogicalResult appendLoadIfNeeded(VfSimProgramBuilder &builder,
+                                        std::vector<VfSimNode> &body,
+                                        DenseMap<Value, VfSimOperand> &valueToReg,
+                                        Value input) {
   if (valueToReg.contains(input))
-    return;
+    return success();
 
-  VfOperand source = builder.getTileValueOperand(input);
-  VfOperand reg = builder.makeVirtualReg(input);
-  loop.instructions.push_back(VfInstruction{VfOpcode::VLDS, {source}, reg});
-  valueToReg.try_emplace(input, reg);
+  FailureOr<VfSimOperand> source = builder.getTileValueOperand(input);
+  FailureOr<VfSimOperand> reg = builder.makeVirtualReg(input);
+  if (failed(source) || failed(reg))
+    return failure();
+  body.push_back(
+      makeInstNode(VfSimInst{VfOpcode::VLDS, {*reg}, {*source}}));
+  valueToReg.try_emplace(input, *reg);
+  return success();
 }
 
-static FailureOr<VfOperand>
-getTileInputReg(VfProgramBuilder &builder, VfLoopProgram &loop,
-                DenseMap<Value, VfOperand> &valueToReg, Value input) {
-  appendLoadIfNeeded(builder, loop, valueToReg, input);
+static FailureOr<VfSimOperand>
+getTileInputReg(VfSimProgramBuilder &builder, std::vector<VfSimNode> &body,
+                DenseMap<Value, VfSimOperand> &valueToReg, Value input) {
+  if (failed(appendLoadIfNeeded(builder, body, valueToReg, input)))
+    return failure();
   auto it = valueToReg.find(input);
   if (it == valueToReg.end())
     return failure();
   return it->second;
 }
 
-static FailureOr<VfOperand>
-emitComputeNode(VfProgramBuilder &builder, VfLoopProgram &loop,
-                DenseMap<Value, VfOperand> &valueToReg,
+static FailureOr<VfSimOperand>
+emitComputeNode(VfSimProgramBuilder &builder, std::vector<VfSimNode> &body,
+                DenseMap<Value, VfSimOperand> &valueToReg,
                 const FusionComputeNode &node) {
   std::optional<TileOpPatternSpec> spec =
       lookupTileOpPatternSpec(node.semantics.opName);
   if (!spec)
     return failure();
 
-  SmallVector<VfOperand, 4> operands;
+  SmallVector<VfSimOperand, 4> src;
   for (Value input : node.semantics.tileInputs) {
-    FailureOr<VfOperand> reg =
-        getTileInputReg(builder, loop, valueToReg, input);
+    FailureOr<VfSimOperand> reg =
+        getTileInputReg(builder, body, valueToReg, input);
     if (failed(reg))
       return failure();
-    operands.push_back(*reg);
+    src.push_back(*reg);
   }
-  for (Value scalar : node.semantics.scalarInputs)
-    operands.push_back(builder.getScalarValueOperand(scalar));
+  for (Value scalar : node.semantics.scalarInputs) {
+    FailureOr<VfSimOperand> operand = builder.getScalarValueOperand(scalar);
+    if (failed(operand))
+      return failure();
+    src.push_back(*operand);
+  }
 
-  VfOperand result = builder.makeVirtualReg(node.semantics.tileOutputs.front());
-  loop.instructions.push_back(
-      VfInstruction{spec->vectorOpcode, std::move(operands), result});
-  valueToReg[node.semantics.tileOutputs.front()] = result;
-  return result;
+  FailureOr<VfSimOperand> result =
+      builder.makeVirtualReg(node.semantics.tileOutputs.front());
+  if (failed(result))
+    return failure();
+  body.push_back(makeInstNode(
+      VfSimInst{spec->vectorOpcode, {*result}, std::move(src)}));
+  valueToReg[node.semantics.tileOutputs.front()] = *result;
+  return *result;
 }
 
 } // namespace
@@ -311,7 +381,8 @@ bool isSupportedVfCostTileOp(const FusionComputeNode &node) {
          node.semantics.tileOutputs.size() == spec->tileOutputCount;
 }
 
-FailureOr<VfProgram> buildFusedElementwiseVfProgram(const VfCostInput &input) {
+FailureOr<VfSimProgram>
+buildFusedElementwiseVfSimProgram(const VfCostInput &input) {
   if (!input.blockAnalysis || !input.candidate)
     return failure();
 
@@ -341,14 +412,13 @@ FailureOr<VfProgram> buildFusedElementwiseVfProgram(const VfCostInput &input) {
   if (failed(tripCount))
     return failure();
 
-  VfProgramBuilder builder;
-  VfProgram program;
-  VfLoopProgram loop;
-  loop.tripCount = *tripCount;
+  VfSimProgramBuilder builder;
+  VfSimProgram program;
+  std::vector<VfSimNode> loopBody;
 
-  DenseMap<Value, VfOperand> valueToReg;
+  DenseMap<Value, VfSimOperand> valueToReg;
   for (const FusionComputeNode *node : proposedGroup) {
-    if (failed(emitComputeNode(builder, loop, valueToReg, *node)))
+    if (failed(emitComputeNode(builder, loopBody, valueToReg, *node)))
       return failure();
   }
 
@@ -362,14 +432,15 @@ FailureOr<VfProgram> buildFusedElementwiseVfProgram(const VfCostInput &input) {
       if (regIt == valueToReg.end())
         return failure();
 
-      VfOperand destination = builder.getTileValueOperand(output);
-      loop.instructions.push_back(
-          VfInstruction{VfOpcode::VSTS, {destination, regIt->second},
-                        std::nullopt});
+      FailureOr<VfSimOperand> destination = builder.getTileValueOperand(output);
+      if (failed(destination))
+        return failure();
+      loopBody.push_back(makeInstNode(
+          VfSimInst{VfOpcode::VSTS, {*destination}, {regIt->second}}));
     }
   }
 
-  program.loops.push_back(std::move(loop));
+  program.body.push_back(makeLoopNode(*tripCount, 1, std::move(loopBody)));
   return program;
 }
 
@@ -403,17 +474,47 @@ StringRef getVfOpcodeName(VfOpcode opcode) {
 
 StringRef getVfOperandKindName(VfOperandKind kind) {
   switch (kind) {
-  case VfOperandKind::VirtualReg:
+  case VfOperandKind::VReg:
     return "reg";
-  case VfOperandKind::TileValue:
+  case VfOperandKind::UB:
     return "tile";
-  case VfOperandKind::ScalarValue:
+  case VfOperandKind::Scalar:
     return "scalar";
   }
   llvm_unreachable("unknown VF operand kind");
 }
 
-static void printVfOperand(const VfOperand &operand, raw_ostream &os) {
+StringRef getVfDTypeName(VfDType dtype) {
+  switch (dtype) {
+  case VfDType::Unknown:
+    return "unknown";
+  case VfDType::F32:
+    return "fp32";
+  case VfDType::F16:
+    return "fp16";
+  case VfDType::BF16:
+    return "bf16";
+  case VfDType::I64:
+    return "i64";
+  case VfDType::I32:
+    return "i32";
+  case VfDType::I16:
+    return "i16";
+  case VfDType::I8:
+    return "i8";
+  case VfDType::UI64:
+    return "ui64";
+  case VfDType::UI32:
+    return "ui32";
+  case VfDType::UI16:
+    return "ui16";
+  case VfDType::UI8:
+    return "ui8";
+  }
+  llvm_unreachable("unknown VF dtype");
+}
+
+static void printVfOperand(const VfSimOperand &operand, raw_ostream &os) {
   os << getVfOperandKindName(operand.kind) << operand.id;
 }
 
@@ -449,100 +550,117 @@ static void printJsonString(StringRef value, raw_ostream &os) {
   os << '"';
 }
 
-static void printVfOperandJson(const VfOperand &operand, raw_ostream &os) {
-  std::string text;
-  llvm::raw_string_ostream ss(text);
-  printVfOperand(operand, ss);
-  printJsonString(ss.str(), os);
+static void printVfOperandJson(const VfSimOperand &operand, raw_ostream &os) {
+  os << "{";
+  os << "\"kind\": ";
+  printJsonString(getVfOperandKindName(operand.kind), os);
+  os << ", \"id\": " << operand.id;
+  os << ", \"dtype\": ";
+  printJsonString(getVfDTypeName(operand.dtype), os);
+  os << "}";
 }
 
-static void printVfOperandArrayJson(ArrayRef<VfOperand> operands,
+static void printVfOperandArrayJson(ArrayRef<VfSimOperand> operands,
                                     raw_ostream &os) {
   os << "[";
-  llvm::interleaveComma(operands, os, [&](const VfOperand &operand) {
+  llvm::interleaveComma(operands, os, [&](const VfSimOperand &operand) {
     printVfOperandJson(operand, os);
   });
   os << "]";
 }
 
-void printVfProgram(const VfProgram &program, raw_ostream &os) {
-  for (auto [loopIndex, loop] : llvm::enumerate(program.loops)) {
-    os << "loop " << loopIndex << " trip_count=" << loop.tripCount
-       << " unroll=" << loop.unroll << "\n";
-    for (const VfInstruction &instruction : loop.instructions) {
-      os << "  ";
-      if (instruction.result) {
-        printVfOperand(*instruction.result, os);
-        os << " = ";
-      }
-      os << getVfOpcodeName(instruction.opcode);
-      if (!instruction.operands.empty())
-        os << " ";
-      llvm::interleaveComma(instruction.operands, os,
-                            [&](const VfOperand &operand) {
-                              printVfOperand(operand, os);
-                            });
-      os << "\n";
-    }
+static void printVfSimNode(const VfSimNode &node, raw_ostream &os,
+                           unsigned indent, unsigned &loopIndex) {
+  if (node.kind == VfSimNode::Kind::Loop) {
+    printIndent(os, indent);
+    os << "loop " << loopIndex++ << " trip_count=" << node.tripCount
+       << " unroll=" << node.unroll << "\n";
+    for (const VfSimNode &child : node.body)
+      printVfSimNode(child, os, indent + 2, loopIndex);
+    return;
   }
+
+  printIndent(os, indent);
+  const VfSimInst &inst = node.inst;
+  if (!inst.dst.empty() && inst.opcode != VfOpcode::VSTS) {
+    printVfOperand(inst.dst.front(), os);
+    os << " = ";
+  }
+  os << getVfOpcodeName(inst.opcode);
+  SmallVector<VfSimOperand, 4> operands;
+  if (inst.opcode == VfOpcode::VSTS) {
+    operands.append(inst.dst.begin(), inst.dst.end());
+    operands.append(inst.src.begin(), inst.src.end());
+  } else {
+    operands.append(inst.src.begin(), inst.src.end());
+  }
+  if (!operands.empty())
+    os << " ";
+  llvm::interleaveComma(operands, os, [&](const VfSimOperand &operand) {
+    printVfOperand(operand, os);
+  });
+  os << "\n";
 }
 
-std::string formatVfProgram(const VfProgram &program) {
+void printVfSimProgram(const VfSimProgram &program, raw_ostream &os) {
+  unsigned loopIndex = 0;
+  for (const VfSimNode &node : program.body)
+    printVfSimNode(node, os, 0, loopIndex);
+}
+
+std::string formatVfSimProgram(const VfSimProgram &program) {
   std::string text;
   llvm::raw_string_ostream os(text);
-  printVfProgram(program, os);
+  printVfSimProgram(program, os);
   return os.str();
 }
 
-void printVfProgramJson(const VfProgram &program, raw_ostream &os,
-                        unsigned indent) {
+static void printVfSimNodeJson(const VfSimNode &node, raw_ostream &os,
+                               unsigned indent) {
   printIndent(os, indent);
-  os << "{\n";
-  printIndent(os, indent + 2);
-  os << "\"loops\": [\n";
-  for (auto [loopIndex, loop] : llvm::enumerate(program.loops)) {
-    printIndent(os, indent + 4);
+  if (node.kind == VfSimNode::Kind::Loop) {
     os << "{\n";
-    printIndent(os, indent + 6);
-    os << "\"trip_count\": " << loop.tripCount << ",\n";
-    printIndent(os, indent + 6);
-    os << "\"unroll\": " << loop.unroll << ",\n";
-    printIndent(os, indent + 6);
-    os << "\"instructions\": [\n";
-    for (auto [instIndex, instruction] : llvm::enumerate(loop.instructions)) {
-      printIndent(os, indent + 8);
-      os << "{";
-      os << "\"op\": ";
-      printJsonString(getVfOpcodeName(instruction.opcode).upper(), os);
-      os << ", \"dst\": ";
-      if (instruction.opcode == VfOpcode::VSTS &&
-          !instruction.operands.empty()) {
-        SmallVector<VfOperand, 1> dst{instruction.operands.front()};
-        printVfOperandArrayJson(dst, os);
-      } else if (instruction.result) {
-        SmallVector<VfOperand, 1> dst{*instruction.result};
-        printVfOperandArrayJson(dst, os);
-      } else {
-        os << "[]";
-      }
-      os << ", \"src\": ";
-      if (instruction.opcode == VfOpcode::VSTS &&
-          !instruction.operands.empty()) {
-        ArrayRef<VfOperand> src(instruction.operands);
-        printVfOperandArrayJson(src.drop_front(), os);
-      } else {
-        printVfOperandArrayJson(instruction.operands, os);
-      }
-      os << "}";
-      if (instIndex + 1 != loop.instructions.size())
+    printIndent(os, indent + 2);
+    os << "\"type\": \"loop\",\n";
+    printIndent(os, indent + 2);
+    os << "\"trip_count\": " << node.tripCount << ",\n";
+    printIndent(os, indent + 2);
+    os << "\"unroll\": " << node.unroll << ",\n";
+    printIndent(os, indent + 2);
+    os << "\"body\": [\n";
+    for (auto [index, child] : llvm::enumerate(node.body)) {
+      printVfSimNodeJson(child, os, indent + 4);
+      if (index + 1 != node.body.size())
         os << ",";
       os << "\n";
     }
-    printIndent(os, indent + 6);
+    printIndent(os, indent + 2);
     os << "]\n";
-    printIndent(os, indent + 4);
+    printIndent(os, indent);
     os << "}";
-    if (loopIndex + 1 != program.loops.size())
+    return;
+  }
+
+  const VfSimInst &inst = node.inst;
+  os << "{";
+  os << "\"type\": \"inst\", \"op\": ";
+  printJsonString(getVfOpcodeName(inst.opcode).upper(), os);
+  os << ", \"dst\": ";
+  printVfOperandArrayJson(inst.dst, os);
+  os << ", \"src\": ";
+  printVfOperandArrayJson(inst.src, os);
+  os << "}";
+}
+
+void printVfSimProgramJson(const VfSimProgram &program, raw_ostream &os,
+                           unsigned indent) {
+  printIndent(os, indent);
+  os << "{\n";
+  printIndent(os, indent + 2);
+  os << "\"body\": [\n";
+  for (auto [index, node] : llvm::enumerate(program.body)) {
+    printVfSimNodeJson(node, os, indent + 4);
+    if (index + 1 != program.body.size())
       os << ",";
     os << "\n";
   }
@@ -552,10 +670,10 @@ void printVfProgramJson(const VfProgram &program, raw_ostream &os,
   os << "}";
 }
 
-std::string formatVfProgramJson(const VfProgram &program) {
+std::string formatVfSimProgramJson(const VfSimProgram &program) {
   std::string text;
   llvm::raw_string_ostream os(text);
-  printVfProgramJson(program, os);
+  printVfSimProgramJson(program, os);
   return os.str();
 }
 

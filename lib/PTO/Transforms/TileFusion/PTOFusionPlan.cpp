@@ -50,9 +50,9 @@ struct PlannedFusionGroup {
   SmallVector<const pto::FusionComputeNode *, 8> members;
 };
 
-struct PlannedVfProgram {
+struct PlannedVfSimProgram {
   int64_t groupId = -1;
-  pto::VfProgram program;
+  pto::VfSimProgram program;
 };
 
 static SmallVector<const pto::FusionComputeNode *, 8>
@@ -228,22 +228,22 @@ static void dumpVfProgramsForGroupsText(
     ArrayRef<const pto::FusionComputeNode *> prefix(group.members.data(),
                                                     group.members.size() - 1);
     pto::VfCostInput input{&blockAnalysis, prefix, group.members.back()};
-    FailureOr<pto::VfProgram> program =
-        pto::buildFusedElementwiseVfProgram(input);
+    FailureOr<pto::VfSimProgram> program =
+        pto::buildFusedElementwiseVfSimProgram(input);
     if (failed(program)) {
       llvm::errs() << "[pto-fusion-plan] failed to build VF program for group\n";
       continue;
     }
 
     llvm::errs() << "[pto-fusion-plan] VF program for fusion group:\n";
-    pto::printVfProgram(*program, llvm::errs());
+    pto::printVfSimProgram(*program, llvm::errs());
   }
 }
 
 static void collectVfProgramsForGroups(
     ArrayRef<PlannedFusionGroup> groups,
     const pto::FusionBlockAnalysis &blockAnalysis,
-    SmallVectorImpl<PlannedVfProgram> &programs) {
+    SmallVectorImpl<PlannedVfSimProgram> &programs) {
   for (auto [groupIndex, group] : llvm::enumerate(groups)) {
     if (group.members.size() < 2)
       continue;
@@ -251,17 +251,17 @@ static void collectVfProgramsForGroups(
     ArrayRef<const pto::FusionComputeNode *> prefix(group.members.data(),
                                                     group.members.size() - 1);
     pto::VfCostInput input{&blockAnalysis, prefix, group.members.back()};
-    FailureOr<pto::VfProgram> program =
-        pto::buildFusedElementwiseVfProgram(input);
+    FailureOr<pto::VfSimProgram> program =
+        pto::buildFusedElementwiseVfSimProgram(input);
     if (failed(program))
       continue;
 
-    programs.push_back(PlannedVfProgram{
+    programs.push_back(PlannedVfSimProgram{
         static_cast<int64_t>(groupIndex), std::move(*program)});
   }
 }
 
-static LogicalResult writeVfProgramsJson(ArrayRef<PlannedVfProgram> programs,
+static LogicalResult writeVfProgramsJson(ArrayRef<PlannedVfSimProgram> programs,
                                          StringRef path) {
   if (path.empty())
     return success();
@@ -280,7 +280,7 @@ static LogicalResult writeVfProgramsJson(ArrayRef<PlannedVfProgram> programs,
     os << "    {\n";
     os << "      \"group_id\": " << planned.groupId << ",\n";
     os << "      \"vf_program\":\n";
-    pto::printVfProgramJson(planned.program, os, 6);
+    pto::printVfSimProgramJson(planned.program, os, 6);
     os << "\n";
     os << "    }";
     if (index + 1 != programs.size())
@@ -321,7 +321,7 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
     int64_t nextGroupId = 0;
     ConservativeDAGGreedyCostModel costModel;
     ConservativeDAGGreedyStrategyEngine strategyEngine;
-    SmallVector<PlannedVfProgram, 8> plannedVfPrograms;
+    SmallVector<PlannedVfSimProgram, 8> plannedVfSimPrograms;
 
     for (const pto::FusionBlockAnalysis &blockAnalysis :
          analysis.getResult().blocks) {
@@ -331,11 +331,11 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
       if (dumpVfProgram)
         dumpVfProgramsForGroupsText(groups, blockAnalysis);
       if (!dumpVfProgramJson.empty())
-        collectVfProgramsForGroups(groups, blockAnalysis, plannedVfPrograms);
+        collectVfProgramsForGroups(groups, blockAnalysis, plannedVfSimPrograms);
       assignStableGroupMetadata(groups, ctx, nextGroupId);
     }
 
-    if (failed(writeVfProgramsJson(plannedVfPrograms, dumpVfProgramJson))) {
+    if (failed(writeVfProgramsJson(plannedVfSimPrograms, dumpVfProgramJson))) {
       signalPassFailure();
       return;
     }
