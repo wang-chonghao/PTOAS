@@ -652,7 +652,7 @@ vector op
 目标：修改 PTOAS costmodel 接口，实现从 tileop group 直接构造融合后的
 vector/VfSim 输入。VfSimulator 暂时作为外挂验证工具，不要求 PTOAS 端到端跑通。
 
-工作：
+已完成：
 
 ```text
 1. 梳理并固化当前链路：
@@ -672,7 +672,7 @@ vector/VfSim 输入。VfSimulator 暂时作为外挂验证工具，不要求 PTO
    supported
    rejectReason
 
-3. 抽离/重构 CostModel 接口：
+3. 抽离/重构 PTOAS 当前 CostModel 接口：
    FusionCostModel.h/.cpp
    保留当前 ConservativeDAGGreedyCostModel 默认行为不变
 
@@ -707,19 +707,39 @@ vector/VfSim 输入。VfSimulator 暂时作为外挂验证工具，不要求 PTO
    pto.get_lanes(dtype) 语义保持一致；后续抽出 C++ 公共 helper，避免多个
    C++ pass 各自维护 256B 常量。
 
-8. 实现 unfused builder：
-   每个 tileop 单独生成一个 VF program
+8. 导出 fused VFProgram：
+   --dump-vf-program 文本
+   --dump-vf-program-json=<path> 结构化 JSON
 
-9. 导出 fused/unfused VfSimProgram，例如 JSON/trace，供外挂 VfSimulator 验证。
+9. 外挂验证：
+   scripts/vfprogram_latency.py
+   读取 VFProgram JSON / 文本 dump
+   转换为当前 Python VfSimulator payload
+   调用 CoreVfCostModel.run_payload()
+   输出 vf_cycles
 ```
 
 验收：
 
 ```text
-TADD -> TMUL -> TEXP -> TSUB 能导出 fused/unfused VfSimProgram。
+TADD -> TMUL、GeLU_poly 风格链路、TEXP -> TDIV 能导出 fused VFProgram。
 fused 版本中间 tmp 不生成 VSTS/VLDS。
 外挂 VfSimulator 能对局部 case 给出 cycles。
+unsupported micro-op 直接报错，不静默替换 opcode。
 PTOAS 默认行为可暂时保持不变，不要求端到端跑通。
+```
+
+阶段 1 未做且后续按需补充：
+
+```text
+1. unfused baseline builder：
+   每个 tileop 单独生成一个 VF program。
+   由于当前阶段策略是 legal + supportedPattern 就尽量融合，unfused baseline
+   不作为阶段 1 阻塞项。
+
+2. latency 参与 group_id 决策：
+   当前 fusion decision 仍由现有 legality / conservative greedy 策略决定。
+   latency 只作为验证和后续优化信息。
 ```
 
 阶段 1 外挂验证脚本：
@@ -750,24 +770,140 @@ python3 scripts/vfprogram_latency.py /tmp/case.vfprogram.json \
 
 ### 阶段 2：源码级融合与 C++ VfSimulator 接入
 
-目标：基于阶段 1 的接口进行源码级接入，将 VfSimulator 的必要子集 C++ 化并接入
-PTOAS，能够端到端跑通 binary/unary/scale 等简单 op。
+目标：基于阶段 1 的 fused VFProgram 构造能力，定义 PTOAS 到 C++ 化 VfSimulator
+的源码级接口，并逐步将 VfSimulator 的必要子集接入 PTOAS。源码级接入不应通过
+JSON 文件传递数据；JSON 仅保留为 debug / 对比格式。
+
+#### 阶段 2.1：定义源码级接口 IR
+
+PTOAS 与 C++ VfSimulator 之间使用内存中的递归结构化 IR，建议命名为
+`VfSimProgram`。它与阶段 1 的 `VfProgram` 分层：
+
+```text
+VfProgram:
+  PTOAS TileFusion builder 的局部 IR，可携带 MLIR Value，服务于从 tileop group
+  构造 fused 微指令流。
+
+VfSimProgram:
+  C++ VfSimulator 的稳定输入接口，不依赖 MLIR Value，不关心 tileop 来源，只表达
+  微指令、operand、loop 结构和 dtype。
+```
+
+建议 C++ 结构：
+
+```cpp
+struct VfSimProgram {
+  SmallVector<VfSimNode, 8> body;
+};
+
+using VfSimNode = std::variant<VfSimInst, VfSimLoop>;
+
+struct VfSimLoop {
+  int64_t tripCount;
+  unsigned unroll;
+  SmallVector<VfSimNode, 8> body;
+};
+
+struct VfSimInst {
+  VfSimOpcode opcode;
+  SmallVector<VfSimOperand, 4> dst;
+  SmallVector<VfSimOperand, 4> src;
+};
+
+struct VfSimOperand {
+  VfSimOperandKind kind;  // VReg / UB / Scalar
+  unsigned id;
+  VfSimDType dtype;      // fp32 / fp16 / bf16 / i32 / ...
+};
+```
+
+接口约束：
+
+```text
+1. dtype 放在 operand 上，不放在 VfSimProgram 上。
+   原因是 tcvt/cast/compare/mixed precision op 可能出现 src/dst dtype 不同。
+
+2. VfSimProgram.body 支持 VfSimInst 和 VfSimLoop。
+   顶层允许非 loop 指令。
+
+3. VfSimLoop.body 同样支持 VfSimInst 和 VfSimLoop。
+   这样可以表达嵌套 loop 和复杂 loop pattern。
+
+4. opcode 必须是微指令 opcode，不是 tileop opcode。
+   例如 tadd -> VADD，texp -> VEXP，tmuls -> VMULS。
+
+5. unsupported micro-op 不能 silent fallback。
+   C++ 接口应返回 supported=false 和明确 rejectReason。
+```
+
+#### 阶段 2.2：PTOAS adapter
 
 工作：
 
 ```text
+1. 新增接口文件：
+   include/PTO/Transforms/TileFusion/VfSimProgram.h
+   lib/PTO/Transforms/TileFusion/VfSimProgram.cpp
+
+2. 实现 lowering：
+   lowerToVfSimProgram(const VfProgram &program)
+
+   当前阶段只需要覆盖已有单层 loop：
+   VfProgram.loops[i] -> VfSimLoop
+   VLDS result reg / source tile
+   VSTS destination tile / source reg
+   compute result reg / source reg/scalar
+
+3. dtype 推导：
+   tile operand 从 TileBufType element type 推导
+   scalar operand 从 scalar MLIR type 推导
+   virtual reg 优先继承其绑定 Value 的 element type
+   当前无法推导时返回 failure，不能默认 fp32
+
+4. JSON dump 后续改为从 VfSimProgram 导出，或保持当前 VFProgram JSON 作为 debug。
+   源码级接入不以 JSON 文件为接口。
+```
+
+#### 阶段 2.3：VfLatencyModel 接口骨架
+
+```cpp
+struct VfLatencyResult {
+  bool supported;
+  int64_t cycles;
+  std::string rejectReason;
+};
+
+class VfLatencyModel {
+public:
+  VfLatencyResult predict(const VfSimProgram &program) const;
+};
+```
+
+第一版 `predict()` 先做接口打通：
+
+```text
+1. 递归遍历 VfSimProgram。
+2. 检查 opcode + dtype 是否在当前支持集内。
+3. unsupported 时返回 supported=false。
+4. cycles 可以先返回占位值，直到 C++ sim core 接入。
+```
+
+#### 阶段 2.4：C++ 化 VfSimulator 子集
+
+```text
 1. C++ 化 VfSimulator 子集：
    VLDS / VSTS
-   VADD / VSUB / VMUL / VEXP
+   VADD / VSUB / VMUL / VDIV / VEXP
    scale op 所需 vector/scalar 指令
    简单 flattened loop
    基础 dependency / latency / II / forwarding 子集
 
-2. 在 PTOFusionPlanPass 内部接入 C++ VfCostModel：
+2. 在 PTOAS costmodel 内部接入 C++ VfLatencyModel：
    proposedGroup
-   -> fused/unfused VfSimProgram
+   -> fused VfProgram
+   -> lowerToVfSimProgram()
    -> predict cycles
-   -> VfCostResult
+   -> VfLatencyResult
 
 3. 早期 group 决策仍采用合法性/支持范围驱动：
    legal + supportedPattern 就尽量融合
@@ -782,6 +918,9 @@ PTOAS，能够端到端跑通 binary/unary/scale 等简单 op。
 
 ```text
 binary / unary / scale 简单 case 能端到端跑通。
+PTOAS 内部可以构造 VfSimProgram 并调用 VfLatencyModel。
+JSON / 外挂 VfSimulator 结果可作为对照。
+unsupported micro-op 在源码接口中返回明确 rejectReason。
 现有 hard gate 仍有效。
 lit 测试覆盖简单链、unsupported、domain mismatch、hard boundary。
 ```
