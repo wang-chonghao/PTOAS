@@ -884,6 +884,11 @@ public:
 4. cycles 可以先返回占位值，直到 C++ sim core 接入。
 ```
 
+当前状态：`include/PTO/VFcostmodel/VfLatencyModel.h` 已新增抽象接口定义，
+后续 TileFusion / VPTO 两侧都将复用这一层入口。
+当前 PTOAS 侧已经通过 `PTOFusionPlan` 调用该接口；`VfLatencyModel`
+实现仍为占位版本，后续将替换为 C++ 化 VfSimulator 核心。
+
 #### 阶段 2.4：C++ 化 VfSimulator 子集
 
 ```text

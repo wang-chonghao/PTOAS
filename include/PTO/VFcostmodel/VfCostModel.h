@@ -6,63 +6,23 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-#ifndef PTO_TRANSFORMS_TILEFUSION_VFCOSTMODEL_H
-#define PTO_TRANSFORMS_TILEFUSION_VFCOSTMODEL_H
+#ifndef PTO_VFCOSTMODEL_VFCOSTMODEL_H
+#define PTO_VFCOSTMODEL_VFCOSTMODEL_H
 
 #include "PTO/Transforms/TileFusion/FusionAnalysis.h"
+#include "PTO/VFcostmodel/VfSimProgram.h"
 
-#include "mlir/Support/LLVM.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/raw_ostream.h"
 
-#include <cstdint>
 #include <optional>
-#include <string>
-#include <vector>
 
 namespace mlir {
 namespace pto {
-
-enum class VfOpcode {
-  VLDS,
-  VSTS,
-  VADD,
-  VADDS,
-  VSUB,
-  VSUBS,
-  VMUL,
-  VMULS,
-  VDIV,
-  VDIVS,
-  VEXP,
-};
 
 enum class TilePatternKind {
   BinaryElementwise,
   UnaryElementwise,
   ScaleElementwise,
-};
-
-enum class VfOperandKind {
-  VReg,
-  UB,
-  Scalar,
-};
-
-enum class VfDType {
-  Unknown,
-  F32,
-  F16,
-  BF16,
-  I64,
-  I32,
-  I16,
-  I8,
-  UI64,
-  UI32,
-  UI16,
-  UI8,
 };
 
 struct TileOpPatternSpec {
@@ -76,35 +36,6 @@ struct TileOpPatternSpec {
   bool allowLoopFusion = true;
 };
 
-struct VfSimOperand {
-  unsigned id = 0;
-  VfOperandKind kind = VfOperandKind::VReg;
-  VfDType dtype = VfDType::Unknown;
-};
-
-struct VfSimInst {
-  VfOpcode opcode;
-  SmallVector<VfSimOperand, 4> dst;
-  SmallVector<VfSimOperand, 4> src;
-};
-
-struct VfSimNode {
-  enum class Kind {
-    Inst,
-    Loop,
-  };
-
-  Kind kind = Kind::Inst;
-  VfSimInst inst;
-  int64_t tripCount = ShapedType::kDynamic;
-  unsigned unroll = 1;
-  std::vector<VfSimNode> body;
-};
-
-struct VfSimProgram {
-  std::vector<VfSimNode> body;
-};
-
 struct VfCostInput {
   const FusionBlockAnalysis *blockAnalysis = nullptr;
   ArrayRef<const FusionComputeNode *> currentGroup;
@@ -115,16 +46,8 @@ std::optional<TileOpPatternSpec> lookupTileOpPatternSpec(StringRef opName);
 bool isSupportedVfCostTileOp(const FusionComputeNode &node);
 FailureOr<VfSimProgram> buildFusedElementwiseVfSimProgram(
     const VfCostInput &input);
-StringRef getVfOpcodeName(VfOpcode opcode);
-StringRef getVfOperandKindName(VfOperandKind kind);
-StringRef getVfDTypeName(VfDType dtype);
-void printVfSimProgram(const VfSimProgram &program, raw_ostream &os);
-std::string formatVfSimProgram(const VfSimProgram &program);
-void printVfSimProgramJson(const VfSimProgram &program, raw_ostream &os,
-                           unsigned indent = 0);
-std::string formatVfSimProgramJson(const VfSimProgram &program);
 
 } // namespace pto
 } // namespace mlir
 
-#endif // PTO_TRANSFORMS_TILEFUSION_VFCOSTMODEL_H
+#endif // PTO_VFCOSTMODEL_VFCOSTMODEL_H

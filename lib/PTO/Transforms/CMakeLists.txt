@@ -46,7 +46,9 @@ add_mlir_dialect_library(PTOTransforms
   PTOUnrollSIMTForPass.cpp
   PTOInferVPTOVecScope.cpp
 
-  TileFusion/VfCostModel.cpp
+  ../VFcostmodel/VfCostModel.cpp
+  ../VFcostmodel/VfSimProgram.cpp
+  ../VFcostmodel/VfLatencyModel.cpp
   InsertSync/PTOInsertSync.cpp
   PTOInjectBarrierAllSync.cpp
   InsertSync/InsertSyncDebug.cpp
