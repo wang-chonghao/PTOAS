@@ -30,6 +30,18 @@ def _operand_name(operand: str) -> str:
     raise ValueError(f"unsupported VFProgram operand: {operand}")
 
 
+def _operand_obj_name(operand: dict[str, Any]) -> str:
+    kind = str(operand.get("kind", "")).lower()
+    operand_id = int(operand.get("id"))
+    if kind == "reg":
+        return f"V{operand_id}"
+    if kind == "tile":
+        return f"mem{operand_id}"
+    if kind == "scalar":
+        return ""
+    raise ValueError(f"unsupported VFProgram operand kind: {kind}")
+
+
 def _operand_names(operands: list[str], *, drop_scalars: bool = False) -> list[str]:
     names = [_operand_name(operand) for operand in operands]
     if drop_scalars:
@@ -116,6 +128,13 @@ def parse_vfprogram_text(text: str) -> dict[str, Any]:
 
 
 def _convert_vfprogram_json_program(vf_program: dict[str, Any]) -> dict[str, Any]:
+    if "body" in vf_program:
+        return {
+            "dtype": "fp32",
+            "params": {},
+            "program": [_convert_vfsim_json_node(node) for node in vf_program["body"]],
+        }
+
     loops = []
     for loop in vf_program.get("loops", []):
         body = []
@@ -145,6 +164,44 @@ def _convert_vfprogram_json_program(vf_program: dict[str, Any]) -> dict[str, Any
         "params": {},
         "program": loops,
     }
+
+
+def _convert_vfsim_json_operands(operands: list[Any], *, drop_scalars: bool) -> list[str]:
+    names = []
+    for operand in operands:
+        if isinstance(operand, dict):
+            names.append(_operand_obj_name(operand))
+        else:
+            names.append(_operand_name(str(operand)))
+    if drop_scalars:
+        names = [name for name in names if name]
+    return names
+
+
+def _convert_vfsim_json_node(node: dict[str, Any]) -> dict[str, Any]:
+    node_type = str(node.get("type"))
+    if node_type == "loop":
+        return {
+            "type": "loop",
+            "iters": int(node.get("trip_count", 1)),
+            "unroll": int(node.get("unroll", 1)),
+            "body": [_convert_vfsim_json_node(child) for child in node.get("body", [])],
+        }
+    if node_type == "inst":
+        op = str(node.get("op", "")).upper()
+        return {
+            "type": "inst",
+            "op": op,
+            "dst": _convert_vfsim_json_operands(
+                node.get("dst", []),
+                drop_scalars=False,
+            ),
+            "src": _convert_vfsim_json_operands(
+                node.get("src", []),
+                drop_scalars=op.endswith("S"),
+            ),
+        }
+    raise ValueError(f"unsupported VFProgram JSON node type: {node_type}")
 
 
 def load_vfprogram_payload(path: Path) -> dict[str, Any]:

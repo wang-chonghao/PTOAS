@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace mlir {
 namespace pto {
@@ -44,9 +45,24 @@ enum class TilePatternKind {
 };
 
 enum class VfOperandKind {
-  VirtualReg,
-  TileValue,
-  ScalarValue,
+  VReg,
+  UB,
+  Scalar,
+};
+
+enum class VfDType {
+  Unknown,
+  F32,
+  F16,
+  BF16,
+  I64,
+  I32,
+  I16,
+  I8,
+  UI64,
+  UI32,
+  UI16,
+  UI8,
 };
 
 struct TileOpPatternSpec {
@@ -60,26 +76,33 @@ struct TileOpPatternSpec {
   bool allowLoopFusion = true;
 };
 
-struct VfOperand {
+struct VfSimOperand {
   unsigned id = 0;
-  VfOperandKind kind = VfOperandKind::VirtualReg;
-  Value value;
+  VfOperandKind kind = VfOperandKind::VReg;
+  VfDType dtype = VfDType::Unknown;
 };
 
-struct VfInstruction {
+struct VfSimInst {
   VfOpcode opcode;
-  SmallVector<VfOperand, 4> operands;
-  std::optional<VfOperand> result;
+  SmallVector<VfSimOperand, 4> dst;
+  SmallVector<VfSimOperand, 4> src;
 };
 
-struct VfLoopProgram {
+struct VfSimNode {
+  enum class Kind {
+    Inst,
+    Loop,
+  };
+
+  Kind kind = Kind::Inst;
+  VfSimInst inst;
   int64_t tripCount = ShapedType::kDynamic;
   unsigned unroll = 1;
-  SmallVector<VfInstruction, 16> instructions;
+  std::vector<VfSimNode> body;
 };
 
-struct VfProgram {
-  SmallVector<VfLoopProgram, 2> loops;
+struct VfSimProgram {
+  std::vector<VfSimNode> body;
 };
 
 struct VfCostInput {
@@ -90,14 +113,16 @@ struct VfCostInput {
 
 std::optional<TileOpPatternSpec> lookupTileOpPatternSpec(StringRef opName);
 bool isSupportedVfCostTileOp(const FusionComputeNode &node);
-FailureOr<VfProgram> buildFusedElementwiseVfProgram(const VfCostInput &input);
+FailureOr<VfSimProgram> buildFusedElementwiseVfSimProgram(
+    const VfCostInput &input);
 StringRef getVfOpcodeName(VfOpcode opcode);
 StringRef getVfOperandKindName(VfOperandKind kind);
-void printVfProgram(const VfProgram &program, raw_ostream &os);
-std::string formatVfProgram(const VfProgram &program);
-void printVfProgramJson(const VfProgram &program, raw_ostream &os,
-                        unsigned indent = 0);
-std::string formatVfProgramJson(const VfProgram &program);
+StringRef getVfDTypeName(VfDType dtype);
+void printVfSimProgram(const VfSimProgram &program, raw_ostream &os);
+std::string formatVfSimProgram(const VfSimProgram &program);
+void printVfSimProgramJson(const VfSimProgram &program, raw_ostream &os,
+                           unsigned indent = 0);
+std::string formatVfSimProgramJson(const VfSimProgram &program);
 
 } // namespace pto
 } // namespace mlir
