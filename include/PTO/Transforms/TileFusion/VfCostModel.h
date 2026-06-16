@@ -27,8 +27,13 @@ enum class VfOpcode {
   VLDS,
   VSTS,
   VADD,
+  VADDS,
   VSUB,
+  VSUBS,
   VMUL,
+  VMULS,
+  VDIV,
+  VDIVS,
   VEXP,
 };
 

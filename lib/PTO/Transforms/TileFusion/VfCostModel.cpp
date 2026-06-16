@@ -269,14 +269,18 @@ std::optional<TileOpPatternSpec> lookupTileOpPatternSpec(StringRef opName) {
                                     VfOpcode::VSUB, 2, 0})
           .Case("tmul", PatternKey{TilePatternKind::BinaryElementwise,
                                     VfOpcode::VMUL, 2, 0})
+          .Case("tdiv", PatternKey{TilePatternKind::BinaryElementwise,
+                                    VfOpcode::VDIV, 2, 0})
           .Case("texp", PatternKey{TilePatternKind::UnaryElementwise,
                                     VfOpcode::VEXP, 1, 0})
           .Case("tadds", PatternKey{TilePatternKind::ScaleElementwise,
-                                     VfOpcode::VADD, 1, 1})
+                                     VfOpcode::VADDS, 1, 1})
           .Case("tsubs", PatternKey{TilePatternKind::ScaleElementwise,
-                                     VfOpcode::VSUB, 1, 1})
+                                     VfOpcode::VSUBS, 1, 1})
           .Case("tmuls", PatternKey{TilePatternKind::ScaleElementwise,
-                                     VfOpcode::VMUL, 1, 1})
+                                     VfOpcode::VMULS, 1, 1})
+          .Case("tdivs", PatternKey{TilePatternKind::ScaleElementwise,
+                                     VfOpcode::VDIVS, 1, 1})
           .Default(std::nullopt);
   if (!key)
     return std::nullopt;
@@ -377,10 +381,20 @@ StringRef getVfOpcodeName(VfOpcode opcode) {
     return "vsts";
   case VfOpcode::VADD:
     return "vadd";
+  case VfOpcode::VADDS:
+    return "vadds";
   case VfOpcode::VSUB:
     return "vsub";
+  case VfOpcode::VSUBS:
+    return "vsubs";
   case VfOpcode::VMUL:
     return "vmul";
+  case VfOpcode::VMULS:
+    return "vmuls";
+  case VfOpcode::VDIV:
+    return "vdiv";
+  case VfOpcode::VDIVS:
+    return "vdivs";
   case VfOpcode::VEXP:
     return "vexp";
   }
