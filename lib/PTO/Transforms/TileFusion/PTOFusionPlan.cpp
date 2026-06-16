@@ -9,7 +9,8 @@
 #include "PTO/Transforms/TileFusion/FusionCostModel.h"
 #include "PTO/Transforms/TileFusion/FusionAnalysis.h"
 #include "PTO/Transforms/TileFusion/FusionOpSemantics.h"
-#include "PTO/Transforms/TileFusion/VfCostModel.h"
+#include "PTO/VFcostmodel/VfCostModel.h"
+#include "PTO/VFcostmodel/VfLatencyModel.h"
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
@@ -53,7 +54,15 @@ struct PlannedFusionGroup {
 struct PlannedVfSimProgram {
   int64_t groupId = -1;
   pto::VfSimProgram program;
+  pto::VfLatencyResult latency;
 };
+
+static pto::VfLatencyResult
+predictVfLatency(const pto::VfSimProgram &program) {
+  static const std::unique_ptr<pto::VfLatencyModel> model =
+      pto::createVfLatencyModel();
+  return model->predict(program);
+}
 
 static SmallVector<const pto::FusionComputeNode *, 8>
 buildStableInGroupOrder(ArrayRef<const pto::FusionComputeNode *> members) {
@@ -237,6 +246,14 @@ static void dumpVfProgramsForGroupsText(
 
     llvm::errs() << "[pto-fusion-plan] VF program for fusion group:\n";
     pto::printVfSimProgram(*program, llvm::errs());
+    pto::VfLatencyResult latency = predictVfLatency(*program);
+    if (latency.supported) {
+      llvm::errs() << "[pto-fusion-plan] VF latency cycles="
+                   << latency.cycles << "\n";
+    } else {
+      llvm::errs() << "[pto-fusion-plan] VF latency rejected: "
+                   << latency.rejectReason << "\n";
+    }
   }
 }
 
@@ -256,8 +273,9 @@ static void collectVfProgramsForGroups(
     if (failed(program))
       continue;
 
+    pto::VfLatencyResult latency = predictVfLatency(*program);
     programs.push_back(PlannedVfSimProgram{
-        static_cast<int64_t>(groupIndex), std::move(*program)});
+        static_cast<int64_t>(groupIndex), std::move(*program), latency});
   }
 }
 
@@ -279,6 +297,17 @@ static LogicalResult writeVfProgramsJson(ArrayRef<PlannedVfSimProgram> programs,
   for (auto [index, planned] : llvm::enumerate(programs)) {
     os << "    {\n";
     os << "      \"group_id\": " << planned.groupId << ",\n";
+    os << "      \"vf_latency\": {\"supported\": "
+       << (planned.latency.supported ? "true" : "false")
+       << ", \"cycles\": " << planned.latency.cycles
+       << ", \"reject_reason\": ";
+    os << "\"";
+    for (char c : planned.latency.rejectReason) {
+      if (c == '\\' || c == '"')
+        os << '\\';
+      os << c;
+    }
+    os << "\"},\n";
     os << "      \"vf_program\":\n";
     pto::printVfSimProgramJson(planned.program, os, 6);
     os << "\n";
