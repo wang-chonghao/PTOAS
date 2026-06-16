@@ -21,8 +21,10 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <system_error>
 
 namespace mlir {
 namespace pto {
@@ -46,6 +48,11 @@ static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
 
 struct PlannedFusionGroup {
   SmallVector<const pto::FusionComputeNode *, 8> members;
+};
+
+struct PlannedVfProgram {
+  int64_t groupId = -1;
+  pto::VfProgram program;
 };
 
 static SmallVector<const pto::FusionComputeNode *, 8>
@@ -211,7 +218,7 @@ static void clearPlanningAttrs(func::FuncOp func) {
   });
 }
 
-static void dumpVfProgramsForGroups(
+static void dumpVfProgramsForGroupsText(
     ArrayRef<PlannedFusionGroup> groups,
     const pto::FusionBlockAnalysis &blockAnalysis) {
   for (const PlannedFusionGroup &group : groups) {
@@ -233,11 +240,68 @@ static void dumpVfProgramsForGroups(
   }
 }
 
+static void collectVfProgramsForGroups(
+    ArrayRef<PlannedFusionGroup> groups,
+    const pto::FusionBlockAnalysis &blockAnalysis,
+    SmallVectorImpl<PlannedVfProgram> &programs) {
+  for (auto [groupIndex, group] : llvm::enumerate(groups)) {
+    if (group.members.size() < 2)
+      continue;
+
+    ArrayRef<const pto::FusionComputeNode *> prefix(group.members.data(),
+                                                    group.members.size() - 1);
+    pto::VfCostInput input{&blockAnalysis, prefix, group.members.back()};
+    FailureOr<pto::VfProgram> program =
+        pto::buildFusedElementwiseVfProgram(input);
+    if (failed(program))
+      continue;
+
+    programs.push_back(PlannedVfProgram{
+        static_cast<int64_t>(groupIndex), std::move(*program)});
+  }
+}
+
+static LogicalResult writeVfProgramsJson(ArrayRef<PlannedVfProgram> programs,
+                                         StringRef path) {
+  if (path.empty())
+    return success();
+
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec, llvm::sys::fs::OF_Text);
+  if (ec) {
+    llvm::errs() << "[pto-fusion-plan] failed to open VF program JSON dump '"
+                 << path << "': " << ec.message() << "\n";
+    return failure();
+  }
+
+  os << "{\n";
+  os << "  \"programs\": [\n";
+  for (auto [index, planned] : llvm::enumerate(programs)) {
+    os << "    {\n";
+    os << "      \"group_id\": " << planned.groupId << ",\n";
+    os << "      \"vf_program\":\n";
+    pto::printVfProgramJson(planned.program, os, 6);
+    os << "\n";
+    os << "    }";
+    if (index + 1 != programs.size())
+      os << ",";
+    os << "\n";
+  }
+  os << "  ]\n";
+  os << "}\n";
+  return success();
+}
+
 struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
   using pto::impl::FusionPlanBase<FusionPlanPass>::FusionPlanBase;
 
   explicit FusionPlanPass(bool dumpVfProgram) {
     this->dumpVfProgram = dumpVfProgram;
+  }
+
+  FusionPlanPass(bool dumpVfProgram, StringRef dumpVfProgramJson) {
+    this->dumpVfProgram = dumpVfProgram;
+    this->dumpVfProgramJson = dumpVfProgramJson.str();
   }
 
   void runOnOperation() override {
@@ -257,6 +321,7 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
     int64_t nextGroupId = 0;
     ConservativeDAGGreedyCostModel costModel;
     ConservativeDAGGreedyStrategyEngine strategyEngine;
+    SmallVector<PlannedVfProgram, 8> plannedVfPrograms;
 
     for (const pto::FusionBlockAnalysis &blockAnalysis :
          analysis.getResult().blocks) {
@@ -264,8 +329,15 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
       SmallVector<PlannedFusionGroup, 8> groups =
           strategyEngine.planBlock(planningCtx, costModel);
       if (dumpVfProgram)
-        dumpVfProgramsForGroups(groups, blockAnalysis);
+        dumpVfProgramsForGroupsText(groups, blockAnalysis);
+      if (!dumpVfProgramJson.empty())
+        collectVfProgramsForGroups(groups, blockAnalysis, plannedVfPrograms);
       assignStableGroupMetadata(groups, ctx, nextGroupId);
+    }
+
+    if (failed(writeVfProgramsJson(plannedVfPrograms, dumpVfProgramJson))) {
+      signalPassFailure();
+      return;
     }
   }
 };
@@ -278,4 +350,10 @@ std::unique_ptr<Pass> mlir::pto::createFusionPlanPass() {
 
 std::unique_ptr<Pass> mlir::pto::createFusionPlanPass(bool dumpVfProgram) {
   return std::make_unique<FusionPlanPass>(dumpVfProgram);
+}
+
+std::unique_ptr<Pass>
+mlir::pto::createFusionPlanPass(bool dumpVfProgram,
+                                StringRef dumpVfProgramJson) {
+  return std::make_unique<FusionPlanPass>(dumpVfProgram, dumpVfProgramJson);
 }

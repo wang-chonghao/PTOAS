@@ -79,6 +79,8 @@ std::unique_ptr<Pass> createPreFusionAnalysisPass();
 std::unique_ptr<Pass> createPrintPreFusionAnalysisPass();
 std::unique_ptr<Pass> createFusionPlanPass();
 std::unique_ptr<Pass> createFusionPlanPass(bool dumpVfProgram);
+std::unique_ptr<Pass> createFusionPlanPass(bool dumpVfProgram,
+                                           StringRef dumpVfProgramJson);
 std::unique_ptr<Pass> createOpSchedulingPass();
 std::unique_ptr<Pass> createPTOMarkLastUsePass();
 std::unique_ptr<Pass> createPTOFusionRegionGenPass();

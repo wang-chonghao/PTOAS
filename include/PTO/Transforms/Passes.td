@@ -229,7 +229,9 @@ def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
   let constructor = "mlir::pto::createFusionPlanPass()";
   let options = [
     Option<"dumpVfProgram", "dump-vf-program", "bool", "false",
-           "Print the VF costmodel program built for accepted fusion groups">
+           "Print the VF costmodel program built for accepted fusion groups">,
+    Option<"dumpVfProgramJson", "dump-vf-program-json", "std::string", "\"\"",
+           "Write VF costmodel programs built for accepted fusion groups as JSON">
   ];
   let dependentDialects = ["mlir::pto::PTODialect"];
 }

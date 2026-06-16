@@ -437,6 +437,11 @@ static llvm::cl::opt<bool> dumpVfProgram(
     llvm::cl::desc("Print VF costmodel programs built by frontend tile fusion"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<std::string> dumpVfProgramJson(
+    "dump-vf-program-json",
+    llvm::cl::desc("Write VF costmodel programs built by frontend tile fusion as JSON"),
+    llvm::cl::init(""));
+
 static llvm::cl::opt<bool> disableInferLayout(
     "disable-infer-layout",
     llvm::cl::desc("Disable PTO layout inference pass (static-only)"),
@@ -1779,11 +1784,13 @@ int mlir::pto::compilePTOASModule(
   // Keep frontend fusion on tile-native PTO IR and annotate last_use directly
   // on scheduled block-local spans before the shared mainline lowers tiles.
   if (enableA5EmitCFusionPath) {
-    pm.addNestedPass<mlir::func::FuncOp>(pto::createFusionPlanPass());
+    pm.addNestedPass<mlir::func::FuncOp>(
+        pto::createFusionPlanPass(dumpVfProgram, dumpVfProgramJson));
     pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOMarkLastUsePass());
   } else if (enableA5VPTOFusionPath) {
-    pm.addNestedPass<mlir::func::FuncOp>(pto::createFusionPlanPass());
+    pm.addNestedPass<mlir::func::FuncOp>(
+        pto::createFusionPlanPass(dumpVfProgram, dumpVfProgramJson));
     pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOFusionRegionGenPass());
   }
