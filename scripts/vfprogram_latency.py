@@ -115,6 +115,55 @@ def parse_vfprogram_text(text: str) -> dict[str, Any]:
     }
 
 
+def _convert_vfprogram_json_program(vf_program: dict[str, Any]) -> dict[str, Any]:
+    loops = []
+    for loop in vf_program.get("loops", []):
+        body = []
+        for inst in loop.get("instructions", []):
+            op = str(inst.get("op", "")).upper()
+            dst = _operand_names([str(x) for x in inst.get("dst", [])])
+            src = _operand_names(
+                [str(x) for x in inst.get("src", [])],
+                drop_scalars=op.endswith("S"),
+            )
+            body.append({
+                "type": "inst",
+                "op": op,
+                "dst": dst,
+                "src": src,
+            })
+        loops.append({
+            "type": "loop",
+            "iters": int(loop.get("trip_count", 1)),
+            "unroll": int(loop.get("unroll", 1)),
+            "body": body,
+        })
+    if not loops:
+        raise ValueError("VFProgram JSON contains no loops")
+    return {
+        "dtype": "fp32",
+        "params": {},
+        "program": loops,
+    }
+
+
+def load_vfprogram_payload(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8")
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return parse_vfprogram_text(text)
+
+    root = json.loads(text)
+    if "program" in root:
+        return root
+    programs = root.get("programs")
+    if isinstance(programs, list) and programs:
+        return _convert_vfprogram_json_program(programs[0]["vf_program"])
+    if "loops" in root:
+        return _convert_vfprogram_json_program(root)
+    raise ValueError("unsupported VFProgram JSON format")
+
+
 def predict_latency(payload: dict[str, Any], vfsim_root: Path, out_dir: Path) -> int:
     sys.path.insert(0, str(vfsim_root))
     from api.simulator_costmodel import CoreVfCostModel
@@ -162,7 +211,7 @@ def main() -> None:
     parser.add_argument("--payload-out", type=Path, default=None)
     args = parser.parse_args()
 
-    payload = parse_vfprogram_text(args.dump.read_text(encoding="utf-8"))
+    payload = load_vfprogram_payload(args.dump)
     payload["dtype"] = args.dtype
 
     if args.payload_out:

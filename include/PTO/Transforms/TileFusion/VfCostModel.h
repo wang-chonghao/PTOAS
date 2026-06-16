@@ -95,6 +95,9 @@ StringRef getVfOpcodeName(VfOpcode opcode);
 StringRef getVfOperandKindName(VfOperandKind kind);
 void printVfProgram(const VfProgram &program, raw_ostream &os);
 std::string formatVfProgram(const VfProgram &program);
+void printVfProgramJson(const VfProgram &program, raw_ostream &os,
+                        unsigned indent = 0);
+std::string formatVfProgramJson(const VfProgram &program);
 
 } // namespace pto
 } // namespace mlir

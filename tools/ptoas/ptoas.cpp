@@ -445,6 +445,11 @@ static llvm::cl::opt<bool> dumpVfProgram(
     llvm::cl::desc("Print VF costmodel programs built by frontend tile fusion"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<std::string> dumpVfProgramJson(
+    "dump-vf-program-json",
+    llvm::cl::desc("Write VF costmodel programs built by frontend tile fusion as JSON"),
+    llvm::cl::init(""));
+
 static llvm::cl::opt<bool> disableInferLayout(
     "disable-infer-layout",
     llvm::cl::desc("Disable PTO layout inference pass (static-only)"),
@@ -1899,6 +1904,7 @@ int mlir::pto::compilePTOASModule(
   pto::FusionPlanOptions fusionPlanOpts;
   fusionPlanOpts.enableShapeInference = enableShapeInference;
   fusionPlanOpts.dumpVfProgram = dumpVfProgram;
+  fusionPlanOpts.dumpVfProgramJson = dumpVfProgramJson;
   if (enableA5EmitCFusionPath) {
     pm.addNestedPass<mlir::func::FuncOp>(
         pto::createFusionPlanPass(fusionPlanOpts));

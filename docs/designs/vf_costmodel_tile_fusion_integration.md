@@ -728,18 +728,20 @@ PTOAS 默认行为可暂时保持不变，不要求端到端跑通。
 scripts/vfprogram_latency.py
 ```
 
-当前用法是先让 PTOAS 输出 `--dump-vf-program` 文本，再由脚本解析该文本并转换成
-VfSimulator 现有 JSON trace payload，最后通过 `CoreVfCostModel.run_payload()` 得到
-`vf_cycles`。这是临时验证链路，后续应替换为结构化 JSON dump 或进程内对象接口。
+当前推荐用法是先让 PTOAS 输出 `--dump-vf-program-json=<path>` 结构化 VFProgram，
+再由脚本转换成 VfSimulator 现有 JSON trace payload，最后通过
+`CoreVfCostModel.run_payload()` 得到 `vf_cycles`。脚本仍兼容旧的
+`--dump-vf-program` 文本日志，用于调试和过渡。后续源码级接入时应替换为进程内对象
+接口。
 
 示例：
 
 ```bash
 ptoas case.pto --pto-arch=a5 --pto-level=level2 --enable-op-fusion \
-  --dump-vf-program --emit-pto-ir -o /tmp/case_out.pto \
-  2> /tmp/case.vfprogram.log
+  --dump-vf-program-json=/tmp/case.vfprogram.json \
+  --emit-pto-ir -o /tmp/case_out.pto
 
-python3 scripts/vfprogram_latency.py /tmp/case.vfprogram.log \
+python3 scripts/vfprogram_latency.py /tmp/case.vfprogram.json \
   --vfsim-root /mnt/e/vfsimulator_structure \
   --dtype fp32 \
   --out-dir /tmp/ptoas_vfsim_case \

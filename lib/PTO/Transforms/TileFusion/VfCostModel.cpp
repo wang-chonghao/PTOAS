@@ -417,6 +417,54 @@ static void printVfOperand(const VfOperand &operand, raw_ostream &os) {
   os << getVfOperandKindName(operand.kind) << operand.id;
 }
 
+static void printIndent(raw_ostream &os, unsigned indent) {
+  for (unsigned i = 0; i < indent; ++i)
+    os << ' ';
+}
+
+static void printJsonString(StringRef value, raw_ostream &os) {
+  os << '"';
+  for (char c : value) {
+    switch (c) {
+    case '\\':
+      os << "\\\\";
+      break;
+    case '"':
+      os << "\\\"";
+      break;
+    case '\n':
+      os << "\\n";
+      break;
+    case '\r':
+      os << "\\r";
+      break;
+    case '\t':
+      os << "\\t";
+      break;
+    default:
+      os << c;
+      break;
+    }
+  }
+  os << '"';
+}
+
+static void printVfOperandJson(const VfOperand &operand, raw_ostream &os) {
+  std::string text;
+  llvm::raw_string_ostream ss(text);
+  printVfOperand(operand, ss);
+  printJsonString(ss.str(), os);
+}
+
+static void printVfOperandArrayJson(ArrayRef<VfOperand> operands,
+                                    raw_ostream &os) {
+  os << "[";
+  llvm::interleaveComma(operands, os, [&](const VfOperand &operand) {
+    printVfOperandJson(operand, os);
+  });
+  os << "]";
+}
+
 void printVfProgram(const VfProgram &program, raw_ostream &os) {
   for (auto [loopIndex, loop] : llvm::enumerate(program.loops)) {
     os << "loop " << loopIndex << " trip_count=" << loop.tripCount
@@ -443,6 +491,71 @@ std::string formatVfProgram(const VfProgram &program) {
   std::string text;
   llvm::raw_string_ostream os(text);
   printVfProgram(program, os);
+  return os.str();
+}
+
+void printVfProgramJson(const VfProgram &program, raw_ostream &os,
+                        unsigned indent) {
+  printIndent(os, indent);
+  os << "{\n";
+  printIndent(os, indent + 2);
+  os << "\"loops\": [\n";
+  for (auto [loopIndex, loop] : llvm::enumerate(program.loops)) {
+    printIndent(os, indent + 4);
+    os << "{\n";
+    printIndent(os, indent + 6);
+    os << "\"trip_count\": " << loop.tripCount << ",\n";
+    printIndent(os, indent + 6);
+    os << "\"unroll\": " << loop.unroll << ",\n";
+    printIndent(os, indent + 6);
+    os << "\"instructions\": [\n";
+    for (auto [instIndex, instruction] : llvm::enumerate(loop.instructions)) {
+      printIndent(os, indent + 8);
+      os << "{";
+      os << "\"op\": ";
+      printJsonString(getVfOpcodeName(instruction.opcode).upper(), os);
+      os << ", \"dst\": ";
+      if (instruction.opcode == VfOpcode::VSTS &&
+          !instruction.operands.empty()) {
+        SmallVector<VfOperand, 1> dst{instruction.operands.front()};
+        printVfOperandArrayJson(dst, os);
+      } else if (instruction.result) {
+        SmallVector<VfOperand, 1> dst{*instruction.result};
+        printVfOperandArrayJson(dst, os);
+      } else {
+        os << "[]";
+      }
+      os << ", \"src\": ";
+      if (instruction.opcode == VfOpcode::VSTS &&
+          !instruction.operands.empty()) {
+        ArrayRef<VfOperand> src(instruction.operands);
+        printVfOperandArrayJson(src.drop_front(), os);
+      } else {
+        printVfOperandArrayJson(instruction.operands, os);
+      }
+      os << "}";
+      if (instIndex + 1 != loop.instructions.size())
+        os << ",";
+      os << "\n";
+    }
+    printIndent(os, indent + 6);
+    os << "]\n";
+    printIndent(os, indent + 4);
+    os << "}";
+    if (loopIndex + 1 != program.loops.size())
+      os << ",";
+    os << "\n";
+  }
+  printIndent(os, indent + 2);
+  os << "]\n";
+  printIndent(os, indent);
+  os << "}";
+}
+
+std::string formatVfProgramJson(const VfProgram &program) {
+  std::string text;
+  llvm::raw_string_ostream os(text);
+  printVfProgramJson(program, os);
   return os.str();
 }
 
