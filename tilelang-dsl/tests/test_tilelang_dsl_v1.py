@@ -8863,8 +8863,8 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
         self.assertNotIn("DINTLV_B32", text)
         self.assertNotIn("INTLV_B32", text)
 
-    def test_vldsx2_and_vstsx2_still_accept_legacy_string_tokens_for_compatibility(self) -> None:
-        @pto.vkernel(op="vldsx2_vstsx2_legacy_tokens", dtypes=[(pto.f32, pto.f32)])
+    def test_vldsx2_and_vstsx2_accept_explicit_string_tokens(self) -> None:
+        @pto.vkernel(op="vldsx2_vstsx2_explicit_tokens", dtypes=[(pto.f32, pto.f32)])
         def kernel(src: pto.Tile, dst: pto.Tile):
             mask = pto.make_mask(pto.f32, pto.PAT.ALL)
             low, high = pto.vldsx2(src[0, 0:], "DINTLV_B32")
@@ -8877,7 +8877,7 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
         )
 
         text = specialized.mlir_text()
-        self.assertIn('"DINTLV"', text)
+        self.assertIn('"DINTLV_B32"', text)
         self.assertIn('"INTLV"', text)
 
     def test_vscatter_lowers_from_advanced_pointer_surface(self) -> None:

@@ -7346,9 +7346,9 @@ class _SemanticAnalyzer:
             "BD": "BDINTLV",
         }
         normalized = legacy_map.get(dist, dist)
-        if normalized not in {"DINTLV_B8", "DINTLV_B16", "DINTLV_B32", "BDINTLV"}:
+        if normalized not in {"DINTLV", "DINTLV_B8", "DINTLV_B16", "DINTLV_B32", "BDINTLV"}:
             raise TypeError(
-                "pto.vldsx2 dist must be one of \"DINTLV_B8\", \"DINTLV_B16\", \"DINTLV_B32\", or \"BDINTLV\" in TileLang DSL v1"
+                "pto.vldsx2 dist must be one of \"DINTLV\", \"DINTLV_B8\", \"DINTLV_B16\", \"DINTLV_B32\", or \"BDINTLV\" in TileLang DSL v1"
             )
         return SemanticLiteralExpr(value=normalized, type=SemanticMetaType(kind="string"))
 
