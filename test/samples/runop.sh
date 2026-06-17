@@ -343,7 +343,7 @@ process_one_dir() {
       echo -e "${A}(${base}.py)\tSKIP\trequires --pto-arch=a5"
       continue
     fi
-    if [[ "$base" == "gemvmx" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
+    if [[ ( "$base" == "gemvmx" || "$base" == "matmul_mx_low_precision" ) && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
       echo -e "${A}(${base}.py)\tSKIP\trequires --pto-arch=a5"
       continue
     fi

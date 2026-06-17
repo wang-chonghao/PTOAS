@@ -13,4 +13,4 @@ module {
   }
 }
 
-// CHECK: error: 'pto.tgemv.mx' op lhs: dtype 'f8E4M3' is not supported by this op yet
+// CHECK: error: 'pto.tgemv.mx' op expects A5 mx lhs/rhs element types to be a supported fp8/fp8 or fp4/fp4 pair

@@ -153,11 +153,14 @@ static LogicalResult verifyAccTileCommonA2A3(Operation *op, Type ty,
 static LogicalResult verifyAccTileCommonA5(Operation *op, Type ty,
                                            StringRef name);
 static LogicalResult verifyMatTileOperands(Operation *op, Type lhsTy, Type rhsTy,
-                                           Type dstTy);
+                                           Type dstTy,
+                                           bool allowLowPrecision = false);
 static LogicalResult verifyMatTileOperandsA2A3(Operation *op, Type lhsTy,
-                                               Type rhsTy, Type dstTy);
+                                               Type rhsTy, Type dstTy,
+                                               bool allowLowPrecision = false);
 static LogicalResult verifyMatTileOperandsA5(Operation *op, Type lhsTy,
-                                             Type rhsTy, Type dstTy);
+                                             Type rhsTy, Type dstTy,
+                                             bool allowLowPrecision = false);
 static LogicalResult verifyGemvTileOperands(Operation *op, Type lhsTy, Type rhsTy,
                                             Type dstTy);
 static LogicalResult verifyAsyncFlatContiguous1DGMViewLike(Operation *op,
@@ -4444,9 +4447,10 @@ static LogicalResult verifyAccTileCommon(Operation *op, Type ty, StringRef name)
 }
 
 static LogicalResult verifyMatTileOperandsA2A3(Operation *op, Type lhsTy,
-                                               Type rhsTy, Type dstTy) {
-  if (failed(verifyTileBufCommon(op, lhsTy, "lhs")) ||
-      failed(verifyTileBufCommon(op, rhsTy, "rhs")) ||
+                                               Type rhsTy, Type dstTy,
+                                               bool allowLowPrecision) {
+  if (failed(verifyTileBufCommon(op, lhsTy, "lhs", allowLowPrecision)) ||
+      failed(verifyTileBufCommon(op, rhsTy, "rhs", allowLowPrecision)) ||
       failed(verifyAccTileCommon(op, dstTy, "dst")))
     return failure();
   auto lhsSpace = getPTOMemorySpaceEnum(lhsTy);
@@ -4479,8 +4483,10 @@ static LogicalResult verifyMatTileOperandsA2A3(Operation *op, Type lhsTy,
 }
 
 static LogicalResult verifyMatTileOperandsA5(Operation *op, Type lhsTy,
-                                             Type rhsTy, Type dstTy) {
-  if (failed(verifyMatTileOperandsA2A3(op, lhsTy, rhsTy, dstTy)))
+                                             Type rhsTy, Type dstTy,
+                                             bool allowLowPrecision) {
+  if (failed(verifyMatTileOperandsA2A3(op, lhsTy, rhsTy, dstTy,
+                                       allowLowPrecision)))
     return failure();
 
   auto lhsTb = mlir::dyn_cast<pto::TileBufType>(lhsTy);
@@ -4506,12 +4512,15 @@ static LogicalResult verifyMatTileOperandsA5(Operation *op, Type lhsTy,
 }
 
 static LogicalResult verifyMatTileOperands(Operation *op, Type lhsTy, Type rhsTy,
-                                           Type dstTy) {
+                                           Type dstTy,
+                                           bool allowLowPrecision) {
   switch (getVerifierTargetArch(op)) {
   case VerifierTargetArch::A2A3:
-    return verifyMatTileOperandsA2A3(op, lhsTy, rhsTy, dstTy);
+    return verifyMatTileOperandsA2A3(op, lhsTy, rhsTy, dstTy,
+                                     allowLowPrecision);
   case VerifierTargetArch::A5:
-    return verifyMatTileOperandsA5(op, lhsTy, rhsTy, dstTy);
+    return verifyMatTileOperandsA5(op, lhsTy, rhsTy, dstTy,
+                                   allowLowPrecision);
   }
   return failure();
 }
@@ -4568,6 +4577,81 @@ static LogicalResult verifyGemvTileOperands(Operation *op, Type lhsTy, Type rhsT
     return verifyGemvTileOperandsA5(op, lhsTy, rhsTy, dstTy);
   }
   return failure();
+}
+
+static LogicalResult verifyA5MxMatTileOperands(Operation *op, Type lhsTy,
+                                               Type rhsTy, Type dstTy) {
+  if (failed(verifyMatTileOperandsA5(op, lhsTy, rhsTy, dstTy,
+                                     /*allowLowPrecision=*/true)))
+    return failure();
+
+  auto lhsValid = getValidShapeVec(lhsTy);
+  auto rhsValid = getValidShapeVec(rhsTy);
+  if (lhsValid.size() == 2 && rhsValid.size() == 2) {
+    int64_t m = lhsValid[0];
+    int64_t k = lhsValid[1];
+    int64_t n = rhsValid[1];
+    if ((m != ShapedType::kDynamic && (m < 1 || m > 4095)) ||
+        (k != ShapedType::kDynamic && (k < 1 || k > 4095)) ||
+        (n != ShapedType::kDynamic && (n < 1 || n > 4095)))
+      return op->emitOpError("expects m, k, and n valid sizes to be in [1, 4095]");
+  }
+  return success();
+}
+
+static int64_t ceilDivKnown(int64_t value, int64_t divisor) {
+  if (value == ShapedType::kDynamic)
+    return ShapedType::kDynamic;
+  return (value + divisor - 1) / divisor;
+}
+
+static LogicalResult verifyA5MxMatScaleTile(Operation *op, Type scaleTy,
+                                            Type lhsTy, Type rhsTy,
+                                            StringRef scaleName,
+                                            bool isLeftScale) {
+  if (failed(verifyTileBufCommon(op, scaleTy, scaleName)))
+    return failure();
+  auto scaleSpace = getPTOMemorySpaceEnum(scaleTy);
+  if (!scaleSpace || *scaleSpace != pto::AddressSpace::SCALING)
+    return op->emitOpError() << "expects " << scaleName
+                             << " to be in the scaling address space";
+
+  auto checkDims = [&](ArrayRef<int64_t> scaleDims, ArrayRef<int64_t> lhsDims,
+                       ArrayRef<int64_t> rhsDims, StringRef dimsName) -> LogicalResult {
+    if (scaleDims.size() != 2 || lhsDims.size() != 2 || rhsDims.size() != 2)
+      return op->emitOpError() << "expects " << scaleName << ", lhs, and rhs to have rank-2 "
+                               << dimsName;
+
+    int64_t m = lhsDims[0];
+    int64_t k = lhsDims[1];
+    int64_t n = rhsDims[1];
+    int64_t scaleK = ceilDivKnown(k, 32);
+    int64_t expectedRows = isLeftScale ? m : scaleK;
+    int64_t expectedCols = isLeftScale ? scaleK : n;
+    if (!hasCompatibleKnownExtent(scaleDims[0], expectedRows) ||
+        !hasCompatibleKnownExtent(scaleDims[1], expectedCols)) {
+      return op->emitOpError()
+             << "expects " << scaleName << " " << dimsName << " to be "
+             << (isLeftScale ? "[M, ceil(K/32)]" : "[ceil(K/32), N]");
+    }
+    return success();
+  };
+
+  if (failed(checkDims(getShapeVec(scaleTy), getShapeVec(lhsTy), getShapeVec(rhsTy),
+                       "shape")))
+    return failure();
+  return checkDims(getValidShapeVec(scaleTy), getValidShapeVec(lhsTy),
+                   getValidShapeVec(rhsTy), "valid_shape");
+}
+
+static LogicalResult verifyA5MxMatScaleTiles(Operation *op, Type lhsScaleTy,
+                                             Type rhsScaleTy, Type lhsTy,
+                                             Type rhsTy) {
+  if (failed(verifyA5MxMatScaleTile(op, lhsScaleTy, lhsTy, rhsTy, "a_scale",
+                                    /*isLeftScale=*/true)))
+    return failure();
+  return verifyA5MxMatScaleTile(op, rhsScaleTy, lhsTy, rhsTy, "b_scale",
+                                /*isLeftScale=*/false);
 }
 
 static LogicalResult verifyA5MxGemvTileOperands(Operation *op, Type lhsTy,
@@ -4701,18 +4785,24 @@ static LogicalResult verifyMatmulTypeTriple(Operation *op, Type lhsElemTy,
   if (dstElemTy.isF32() && lhsElemTy == rhsElemTy && isSupportedFpInput(lhsElemTy))
     return success();
 
-  if (isA5 && dstElemTy.isF32() && lhsElemTy == rhsElemTy) {
-    if (auto ft = mlir::dyn_cast<FloatType>(lhsElemTy)) {
-      unsigned width = ft.getWidth();
-      if (width == 8 || width == 16 || width == 32)
-        return success();
-    }
+  auto isA5TMatmulFp8Type = [](Type ty) {
+    if (auto ft = mlir::dyn_cast<FloatType>(ty))
+      return ft.isFloat8E4M3() || ft.isFloat8E4M3FN() ||
+             ft.isFloat8E4M3FNUZ() || ft.isFloat8E4M3B11FNUZ() ||
+             ft.isFloat8E5M2() || ft.isFloat8E5M2FNUZ();
+    return false;
+  };
+  if (isA5 && dstElemTy.isF32()) {
+    if (isA5TMatmulFp8Type(lhsElemTy) && isA5TMatmulFp8Type(rhsElemTy))
+      return success();
+    if (isPTOHiFloat8Type(lhsElemTy) && lhsElemTy == rhsElemTy)
+      return success();
   }
 
   return op->emitOpError()
          << "expects (dst, lhs, rhs) element types to match one of "
             "(i32, i8, i8), (f32, f16, f16), (f32, bf16, bf16), (f32, f32, f32)"
-            << (isA5 ? ", or an A5-supported fp8 pair" : "");
+            << (isA5 ? ", (f32, fp8, fp8), or (f32, hif8, hif8)" : "");
 }
 
 LogicalResult pto::TAddOp::verify() {
@@ -6213,10 +6303,15 @@ static bool isA5Fp8LikeType(Type ty) {
   return false;
 }
 
-static bool isA5MxInputType(Type ty) {
+static bool isA5MxFp8InputType(Type ty) {
   if (auto ft = dyn_cast<FloatType>(ty))
     return ft.isFloat8E4M3FN() || ft.isFloat8E5M2();
   return false;
+}
+
+static bool isA5MxInputTypePair(Type lhsTy, Type rhsTy) {
+  return (isA5MxFp8InputType(lhsTy) && isA5MxFp8InputType(rhsTy)) ||
+         (isPTOFloat4PackedType(lhsTy) && isPTOFloat4PackedType(rhsTy));
 }
 
 static LogicalResult verifyA5MxTypeTriple(Operation *op, Type lhsTy, Type rhsTy,
@@ -6226,12 +6321,10 @@ static LogicalResult verifyA5MxTypeTriple(Operation *op, Type lhsTy, Type rhsTy,
   Type rhsElem = getElemTy(rhsTy);
   Type dstElem = getElemTy(dstTy);
 
-  if (!isA5MxInputType(lhsElem))
-    return op->emitOpError() << lhsName << ": dtype " << lhsElem
-                             << " is not supported by this op yet";
-  if (!isA5MxInputType(rhsElem))
-    return op->emitOpError() << rhsName << ": dtype " << rhsElem
-                             << " is not supported by this op yet";
+  if (!isA5MxInputTypePair(lhsElem, rhsElem))
+    return op->emitOpError()
+           << "expects A5 mx " << lhsName << "/" << rhsName
+           << " element types to be a supported fp8/fp8 or fp4/fp4 pair";
 
   if (!dstElem.isF32())
     return op->emitOpError()
@@ -7525,8 +7618,8 @@ LogicalResult TGemvMxBiasOp::verify() {
                                              getA().getType(), "a_scale", "a")) ||
         failed(verifyScaleTileMatchesOperand(*this, getBScale().getType(),
                                              getB().getType(), "b_scale", "b")) ||
-        failed(verifyGemvTileOperands(*this, getA().getType(), getB().getType(),
-                                      getDst().getType())) ||
+        failed(verifyA5MxGemvTileOperands(*this, getA().getType(), getB().getType(),
+                                          getDst().getType())) ||
         failed(verifyMatBiasTile(*this, getBias().getType(), getDst().getType(),
                                  /*requireFloatBias=*/true)))
       return failure();
@@ -7562,37 +7655,53 @@ LogicalResult TMatmulBiasOp::verify() {
     return verifyMatmulLike(*this, getA().getType(), getB().getType(),
                             getDst().getType());
   };
-  auto verifyA5 = [&]() -> LogicalResult { return verifyA2A3(); };
+  auto verifyA5 = [&]() -> LogicalResult {
+    if (failed(verifyMatmulTypeTriple(*this, getElemTy(getA().getType()),
+                                      getElemTy(getB().getType()),
+                                      getElemTy(getDst().getType()))))
+      return failure();
+    if (failed(verifyMatTileOperands(*this, getA().getType(), getB().getType(),
+                                     getDst().getType(),
+                                     /*allowLowPrecision=*/true)) ||
+        failed(verifyMatBiasTile(*this, getBias().getType(), getDst().getType())))
+      return failure();
+    return verifyMatmulLike(*this, getA().getType(), getB().getType(),
+                            getDst().getType());
+  };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
 LogicalResult TMatmulMxOp::verify() {
   auto verifyA2A3 = [&]() -> LogicalResult {
-    if (failed(verifyTileBufCommon(*this, getAScale().getType(), "a_scale")) ||
-        failed(verifyTileBufCommon(*this, getBScale().getType(), "b_scale")))
+    return emitOpError("tmatmul.mx is only supported on A5 targets");
+  };
+  auto verifyA5 = [&]() -> LogicalResult {
+    if (failed(verifyA5MxMatTileOperands(*this, getA().getType(), getB().getType(),
+                                         getDst().getType())) ||
+        failed(verifyA5MxMatScaleTiles(*this, getAScale().getType(),
+                                       getBScale().getType(), getA().getType(),
+                                       getB().getType())))
+      return failure();
+    if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
+                                    getDst().getType(), "lhs", "rhs", "dst")))
       return failure();
     return verifyMatmulLike(*this, getA().getType(), getB().getType(),
                             getDst().getType());
-  };
-  auto verifyA5 = [&]() -> LogicalResult {
-    if (failed(verifyA2A3()))
-      return failure();
-    return verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
-                                getDst().getType(), "lhs", "rhs", "dst");
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
 LogicalResult TMatmulMxAccOp::verify() {
   auto verifyA2A3 = [&]() -> LogicalResult {
-    if (failed(verifyAccTileCommon(*this, getCIn().getType(), "c_in")) ||
-        failed(verifyTileBufCommon(*this, getAScale().getType(), "a_scale")) ||
-        failed(verifyTileBufCommon(*this, getBScale().getType(), "b_scale")))
-      return failure();
-    return success();
+    return emitOpError("tmatmul.mx.acc is only supported on A5 targets");
   };
   auto verifyA5 = [&]() -> LogicalResult {
-    if (failed(verifyA2A3()))
+    if (failed(verifyAccTileCommon(*this, getCIn().getType(), "c_in")) ||
+        failed(verifyA5MxMatTileOperands(*this, getA().getType(), getB().getType(),
+                                         getDst().getType())) ||
+        failed(verifyA5MxMatScaleTiles(*this, getAScale().getType(),
+                                       getBScale().getType(), getA().getType(),
+                                       getB().getType())))
       return failure();
     if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
                                     getDst().getType(), "lhs", "rhs", "dst")))
@@ -7602,27 +7711,29 @@ LogicalResult TMatmulMxAccOp::verify() {
         failed(verifyTileBufSameValidShape(*this, getCIn().getType(),
                                            getDst().getType(), "c_in", "dst")))
       return failure();
-    return success();
+    return verifyMatmulLike(*this, getA().getType(), getB().getType(),
+                            getDst().getType());
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 LogicalResult TMatmulMxBiasOp::verify() {
   auto verifyA2A3 = [&]() -> LogicalResult {
-    if (failed(verifyTileBufCommon(*this, getAScale().getType(), "a_scale")) ||
-        failed(verifyTileBufCommon(*this, getBScale().getType(), "b_scale")) ||
-        failed(verifyMatTileOperands(*this, getA().getType(), getB().getType(),
+    return emitOpError("tmatmul.mx.bias is only supported on A5 targets");
+  };
+  auto verifyA5 = [&]() -> LogicalResult {
+    if (failed(verifyA5MxMatTileOperands(*this, getA().getType(), getB().getType(),
                                          getDst().getType())) ||
+        failed(verifyA5MxMatScaleTiles(*this, getAScale().getType(),
+                                       getBScale().getType(), getA().getType(),
+                                       getB().getType())) ||
         failed(verifyMatBiasTile(*this, getBias().getType(), getDst().getType(),
                               /*requireFloatBias=*/true)))
       return failure();
+    if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
+                                    getDst().getType(), "lhs", "rhs", "dst")))
+      return failure();
     return verifyMatmulLike(*this, getA().getType(), getB().getType(),
                             getDst().getType());
-  };
-  auto verifyA5 = [&]() -> LogicalResult {
-    if (failed(verifyA2A3()))
-      return failure();
-    return verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
-                                getDst().getType(), "lhs", "rhs", "dst");
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
@@ -11023,7 +11134,18 @@ LogicalResult mlir::pto::TMatmulOp::verify() {
     return verifyMatmulLike(*this, getLhs().getType(), getRhs().getType(),
                             getDst().getType());
   };
-  auto verifyA5 = [&]() -> LogicalResult { return verifyA2A3(); };
+  auto verifyA5 = [&]() -> LogicalResult {
+    if (failed(verifyMatmulTypeTriple(*this, getElemTy(getLhs().getType()),
+                                      getElemTy(getRhs().getType()),
+                                      getElemTy(getDst().getType()))))
+      return failure();
+    if (failed(verifyMatTileOperands(*this, getLhs().getType(), getRhs().getType(),
+                                     getDst().getType(),
+                                     /*allowLowPrecision=*/true)))
+      return failure();
+    return verifyMatmulLike(*this, getLhs().getType(), getRhs().getType(),
+                            getDst().getType());
+  };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
@@ -11046,11 +11168,26 @@ LogicalResult mlir::pto::TGemvOp::verify() {
 LogicalResult mlir::pto::TMatmulAccOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
-  if (failed(verifyAccTileCommon(*this, getAccIn().getType(), "acc_in")) ||
-      failed(verifyMatTileOperands(*this, getLhs().getType(), getRhs().getType(),
-                                   getDst().getType())))
-    return failure();
-  return success();
+  auto verifyA2A3 = [&]() -> LogicalResult {
+    if (failed(verifyAccTileCommon(*this, getAccIn().getType(), "acc_in")) ||
+        failed(verifyMatTileOperands(*this, getLhs().getType(), getRhs().getType(),
+                                     getDst().getType())))
+      return failure();
+    return success();
+  };
+  auto verifyA5 = [&]() -> LogicalResult {
+    if (failed(verifyMatmulTypeTriple(*this, getElemTy(getLhs().getType()),
+                                      getElemTy(getRhs().getType()),
+                                      getElemTy(getDst().getType()))))
+      return failure();
+    if (failed(verifyAccTileCommon(*this, getAccIn().getType(), "acc_in")) ||
+        failed(verifyMatTileOperands(*this, getLhs().getType(), getRhs().getType(),
+                                     getDst().getType(),
+                                     /*allowLowPrecision=*/true)))
+      return failure();
+    return success();
+  };
+  return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
 LogicalResult mlir::pto::TGemvAccOp::verify() {

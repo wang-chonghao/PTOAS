@@ -1415,7 +1415,10 @@ For each (i, j):
 - **Implementation checks (A5)**
   - The destination element type must be `i32` or `f32`.
     - If the destination element type is `i32`, the lhs and rhs element types must both be `i8`.
-    - If the destination element type is `f32`, the lhs/rhs element types support `f16`, `bf16`, `f32`, and selected fp8 pairs (target-defined).
+    - If the destination element type is `f32`, supported lhs/rhs element type pairs are:
+      - `(f16, f16)`, `(bf16, bf16)`, `(f32, f32)`
+      - any pair from the fp8 e4m3/e5m2 families, which lower to `float8_e4m3_t` or `float8_e5m2_t`
+      - `(!pto.hif8, !pto.hif8)`
   - Shape constraints: `lhs.rows == dst.rows`, `lhs.cols == rhs.rows`, and `rhs.cols == dst.cols`.
   - PTO-visible layout/fractal constraints:
     - `lhs.loc=left`, `lhs.blayout=col_major`, `lhs.slayout=row_major`
@@ -1555,7 +1558,17 @@ For each (i, j):
 **Constraints & Verification:**
 
 - **Implementation checks (A5)**
+  - Supported only on A5 targets.
+  - The destination element type must be `f32`.
+  - Supported lhs/rhs element type pairs are:
+    - any pair from the fp8 e4m3/e5m2 families, which lower to `float8_e4m3_t` or `float8_e5m2_t`
+    - any pair from `!pto.f4E1M2x2` and `!pto.f4E2M1x2`
+  - `lhs`/`rhs`/`dst` follow the same A5 tile location and layout constraints as `pto.tmatmul`.
+  - `lhs_scale` and `rhs_scale` must use `loc=scaling` and compact MX block-scale shapes:
+    - `lhs_scale` shape and valid shape are `[M, ceil(K/32)]`
+    - `rhs_scale` shape and valid shape are `[ceil(K/32), N]`
   - `m/k/n` are taken from `lhs valid row`, `lhs valid column`, and `rhs valid column`.
+  - Runtime: `m/k/n` must be in `[1, 4095]`.
 
 **Hardware Mapping:**
 
@@ -1597,7 +1610,11 @@ dst = acc_in + (lhs * rhs)   // scaling tiles configure target-defined behavior
 **Constraints & Verification:**
 
 - **Implementation checks (A5)**
+  - Supported only on A5 targets.
+  - The `lhs`/`rhs`/`dst` and scaling tile constraints are the same as `pto.tmatmul.mx`.
+  - `acc_in` must be an accumulator tile.
   - `m/k/n` are taken from `lhs valid row`, `lhs valid column`, and `rhs valid column`.
+  - Runtime: `m/k/n` must be in `[1, 4095]`.
 
 **Hardware Mapping:**
 
@@ -1639,9 +1656,12 @@ dst = (lhs * rhs) + bias   // scaling tiles configure target-defined behavior
 **Constraints & Verification:**
 
 - **Implementation checks (A5)**
+  - Supported only on A5 targets.
+  - The `lhs`/`rhs`/`dst` and scaling tile constraints are the same as `pto.tmatmul.mx`.
   - `m/k/n` are taken from `lhs valid row`, `lhs valid column`, and `rhs valid column`.
+  - Runtime: `m/k/n` must be in `[1, 4095]`.
 - **Bias form**:
-  - `bias` must use element type `f32`, `loc=bias`, and `rows=1` (the current implementation enforces this with compile-time checks).
+  - `bias` must use element type `f32`, `loc=bias`, `rows=1`, and `blayout=row_major`.
 
 **Hardware Mapping:**
 
@@ -1861,8 +1881,20 @@ dst = gemv(a, b)   // quantization/mixed-precision behavior is target-defined
 
 **Constraints & Verification:**
 
-- `a/b/dst` reuse the same GEMV shape/location checks as `pto.tgemv`.
-- `a_scale` and `b_scale` must be valid tile buffers.
+- **Implementation checks (A5)**
+  - Supported only on A5 targets.
+  - The destination element type must be `f32`.
+  - Supported `a`/`b` element type pairs are:
+    - `f8E4M3FN` / `f8E4M3FN`
+    - `f8E4M3FN` / `f8E5M2`
+    - `f8E5M2` / `f8E4M3FN`
+    - `f8E5M2` / `f8E5M2`
+    - any pair from `!pto.f4E1M2x2` and `!pto.f4E2M1x2`
+  - `a`/`b`/`dst` follow the same A5 tile location and layout constraints as `pto.tmatmul`.
+  - `a_scale` and `b_scale` must be tile buffers in `loc=scaling`.
+  - `a_scale` must have the same shape and valid shape as `a`.
+  - `b_scale` must have the same shape and valid shape as `b`.
+  - Runtime: `m/k/n` are taken from `a valid row`, `a valid column`, and `b valid column`, and must be in `[1, 4095]`.
 
 **Hardware Mapping:**
 
@@ -1890,6 +1922,14 @@ dst = c_in + gemv(a, b)
 
 **Arguments:** `c_in, a, a_scale, b, b_scale, dst`
 
+**Constraints & Verification:**
+
+- **Implementation checks (A5)**
+  - Supported only on A5 targets.
+  - The `a`/`b`/`dst` and scaling tile constraints are the same as `pto.tgemv.mx`.
+  - `c_in` must be an accumulator tile with the same element type and valid shape as `dst`.
+  - Runtime: `m/k/n` are taken from `a valid row`, `a valid column`, and `b valid column`, and must be in `[1, 4095]`.
+
 **Hardware Mapping:** Matrix pipeline (`PIPE_M`)
 
 **Basic Example:**
@@ -1913,6 +1953,15 @@ dst = gemv(a, b) + bias
 ```
 
 **Arguments:** `a, a_scale, b, b_scale, bias, dst`
+
+**Constraints & Verification:**
+
+- **Implementation checks (A5)**
+  - Supported only on A5 targets.
+  - The `a`/`b`/`dst` and scaling tile constraints are the same as `pto.tgemv.mx`.
+  - `bias` must use element type `f32`, `loc=bias`, `rows=1`, and `blayout=row_major`.
+  - `bias` and `dst` must have the same valid shape.
+  - Runtime: `m/k/n` are taken from `a valid row`, `a valid column`, and `b valid column`, and must be in `[1, 4095]`.
 
 **Hardware Mapping:** Matrix pipeline (`PIPE_M`)
 
