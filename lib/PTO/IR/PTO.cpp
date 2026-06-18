@@ -306,12 +306,27 @@ llvm::TypeSize mlir::pto::HiF8Type::getTypeSizeInBits(
   return getOneByteTypeSize();
 }
 
+llvm::TypeSize mlir::pto::F8E8M0Type::getTypeSizeInBits(
+    const DataLayout &, DataLayoutEntryListRef) const {
+  return getOneByteTypeSize();
+}
+
 uint64_t mlir::pto::HiF8Type::getABIAlignment(const DataLayout &,
                                               DataLayoutEntryListRef) const {
   return 1;
 }
 
+uint64_t mlir::pto::F8E8M0Type::getABIAlignment(const DataLayout &,
+                                                DataLayoutEntryListRef) const {
+  return 1;
+}
+
 uint64_t mlir::pto::HiF8Type::getPreferredAlignment(
+    const DataLayout &, DataLayoutEntryListRef) const {
+  return 1;
+}
+
+uint64_t mlir::pto::F8E8M0Type::getPreferredAlignment(
     const DataLayout &, DataLayoutEntryListRef) const {
   return 1;
 }
@@ -4032,7 +4047,8 @@ static LogicalResult verifyScaleTileMatchesOperand(Operation *op, Type scaleTy,
                                                    Type operandTy,
                                                    StringRef scaleName,
                                                    StringRef operandName) {
-  if (failed(verifyTileBufCommon(op, scaleTy, scaleName)))
+  if (failed(verifyTileBufCommon(op, scaleTy, scaleName,
+                                 /*allowLowPrecision=*/true)))
     return failure();
   auto scaleSpace = getPTOMemorySpaceEnum(scaleTy);
   if (!scaleSpace || *scaleSpace != pto::AddressSpace::SCALING)
@@ -4609,7 +4625,8 @@ static LogicalResult verifyA5MxMatScaleTile(Operation *op, Type scaleTy,
                                             Type lhsTy, Type rhsTy,
                                             StringRef scaleName,
                                             bool isLeftScale) {
-  if (failed(verifyTileBufCommon(op, scaleTy, scaleName)))
+  if (failed(verifyTileBufCommon(op, scaleTy, scaleName,
+                                 /*allowLowPrecision=*/true)))
     return failure();
   auto scaleSpace = getPTOMemorySpaceEnum(scaleTy);
   if (!scaleSpace || *scaleSpace != pto::AddressSpace::SCALING)
@@ -4726,6 +4743,55 @@ static LogicalResult verifyA5MxGemvTileOperands(Operation *op, Type lhsTy,
     return op->emitOpError("expects rhs to use the col_major slayout on A5");
   if (dstTb.getSLayoutValueI32() != static_cast<int32_t>(pto::SLayout::RowMajor))
     return op->emitOpError("expects dst to use the row_major slayout on A5");
+  return success();
+}
+
+static LogicalResult verifyA5MxGemvScaleTile(Operation *op, Type scaleTy,
+                                             Type lhsTy, Type rhsTy,
+                                             StringRef scaleName,
+                                             bool isLeftScale) {
+  if (failed(verifyTileBufCommon(op, scaleTy, scaleName,
+                                 /*allowLowPrecision=*/true)))
+    return failure();
+  auto scaleSpace = getPTOMemorySpaceEnum(scaleTy);
+  if (!scaleSpace || *scaleSpace != pto::AddressSpace::SCALING)
+    return op->emitOpError() << "expects " << scaleName
+                             << " to be in the scaling address space";
+
+  auto scaleShape = getShapeVec(scaleTy);
+  auto scaleValid = getValidShapeVec(scaleTy);
+  auto lhsShape = getShapeVec(lhsTy);
+  auto rhsShape = getShapeVec(rhsTy);
+  auto lhsValid = getValidShapeVec(lhsTy);
+  auto rhsValid = getValidShapeVec(rhsTy);
+  if (scaleShape.size() != 2 || scaleValid.size() != 2 ||
+      lhsShape.size() != 2 || rhsShape.size() != 2 || lhsValid.size() != 2 ||
+      rhsValid.size() != 2)
+    return op->emitOpError() << "expects " << scaleName
+                             << ", lhs, and rhs to have rank-2 shape/valid_shape";
+
+  int64_t logicalM = lhsValid[0];
+  int64_t logicalK = lhsValid[1];
+  int64_t logicalN = rhsValid[1];
+  int64_t scaleK = ceilDivKnown(logicalK, 32);
+
+  int64_t expectedShapeRows = isLeftScale ? logicalM : scaleK;
+  int64_t expectedShapeCols = isLeftScale ? scaleK : rhsShape[1];
+  int64_t expectedValidRows = isLeftScale ? logicalM : scaleK;
+  int64_t expectedValidCols = isLeftScale ? scaleK : logicalN;
+
+  if (!hasCompatibleKnownExtent(scaleShape[0], expectedShapeRows) ||
+      !hasCompatibleKnownExtent(scaleShape[1], expectedShapeCols) ||
+      !hasCompatibleKnownExtent(scaleValid[0], expectedValidRows) ||
+      !hasCompatibleKnownExtent(scaleValid[1], expectedValidCols)) {
+    if (isLeftScale)
+      return op->emitOpError()
+             << "expects " << scaleName
+             << " shape/valid_shape to be [M, ceil(K/32)]";
+    return op->emitOpError()
+           << "expects " << scaleName
+           << " shape/valid_shape to be [ceil(K/32), aligned_N]/[ceil(K/32), N]";
+  }
   return success();
 }
 
@@ -6053,8 +6119,8 @@ mlir::LogicalResult mlir::pto::TExtractOp::verify() {
     auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
     if (!srcTb || !dstTb)
       return emitOpError("expects src and dst to be !pto.tile_buf");
-    if (failed(verifyTileBufCommon(*this, srcTy, "src")) ||
-        failed(verifyTileBufCommon(*this, dstTy, "dst")) ||
+    if (failed(verifyTileBufCommon(*this, srcTy, "src", /*allowLowPrecision=*/true)) ||
+        failed(verifyTileBufCommon(*this, dstTy, "dst", /*allowLowPrecision=*/true)) ||
         failed(verifyNonNegativeIndexRowCol(
             *getOperation(), getIndexRow(), getIndexCol(),
             /*includeIndexAndIntOpsInConstFold=*/false)) ||
@@ -7000,10 +7066,11 @@ mlir::LogicalResult mlir::pto::TMovOp::verify() {
     const bool hasFp = static_cast<bool>(fp);
     const bool hasPreQuantScalar = static_cast<bool>(preQuantScalar);
 
-    if (failed(verifyTileBufCommon(*this, srcTy, "src")) ||
-        failed(verifyTileBufCommon(*this, dstTy, "dst")))
+    if (failed(verifyTileBufCommon(*this, srcTy, "src", /*allowLowPrecision=*/isA5)) ||
+        failed(verifyTileBufCommon(*this, dstTy, "dst", /*allowLowPrecision=*/isA5)))
       return failure();
-    if (hasFp && failed(verifyTileBufCommon(*this, fp.getType(), "fp")))
+    if (hasFp && failed(verifyTileBufCommon(*this, fp.getType(), "fp",
+                                            /*allowLowPrecision=*/isA5)))
       return failure();
     if (hasFp && hasPreQuantScalar)
       return emitOpError() << "expects fp and preQuantScalar forms to be mutually exclusive";
@@ -7566,12 +7633,14 @@ LogicalResult TGemvMxOp::verify() {
     return emitOpError("tgemv.mx is only supported on A5 targets");
   };
   auto verifyA5 = [&]() -> LogicalResult {
-    if (failed(verifyScaleTileMatchesOperand(*this, getAScale().getType(),
-                                             getA().getType(), "a_scale", "a")) ||
-        failed(verifyScaleTileMatchesOperand(*this, getBScale().getType(),
-                                             getB().getType(), "b_scale", "b")) ||
-        failed(verifyA5MxGemvTileOperands(*this, getA().getType(), getB().getType(),
-                                          getDst().getType())))
+    if (failed(verifyA5MxGemvTileOperands(*this, getA().getType(), getB().getType(),
+                                          getDst().getType())) ||
+        failed(verifyA5MxGemvScaleTile(*this, getAScale().getType(),
+                                       getA().getType(), getB().getType(),
+                                       "a_scale", /*isLeftScale=*/true)) ||
+        failed(verifyA5MxGemvScaleTile(*this, getBScale().getType(),
+                                       getA().getType(), getB().getType(),
+                                       "b_scale", /*isLeftScale=*/false)))
       return failure();
     if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
                                     getDst().getType(), "lhs", "rhs", "dst")))
@@ -7588,12 +7657,14 @@ LogicalResult TGemvMxAccOp::verify() {
   };
   auto verifyA5 = [&]() -> LogicalResult {
     if (failed(verifyAccTileCommon(*this, getCIn().getType(), "c_in")) ||
-        failed(verifyScaleTileMatchesOperand(*this, getAScale().getType(),
-                                             getA().getType(), "a_scale", "a")) ||
-        failed(verifyScaleTileMatchesOperand(*this, getBScale().getType(),
-                                             getB().getType(), "b_scale", "b")) ||
         failed(verifyA5MxGemvTileOperands(*this, getA().getType(), getB().getType(),
-                                          getDst().getType())))
+                                          getDst().getType())) ||
+        failed(verifyA5MxGemvScaleTile(*this, getAScale().getType(),
+                                       getA().getType(), getB().getType(),
+                                       "a_scale", /*isLeftScale=*/true)) ||
+        failed(verifyA5MxGemvScaleTile(*this, getBScale().getType(),
+                                       getA().getType(), getB().getType(),
+                                       "b_scale", /*isLeftScale=*/false)))
       return failure();
     if (failed(verifyA5MxTypeTriple(*this, getA().getType(), getB().getType(),
                                     getDst().getType(), "lhs", "rhs", "dst")))
@@ -7614,12 +7685,14 @@ LogicalResult TGemvMxBiasOp::verify() {
     return emitOpError("tgemv.mx.bias is only supported on A5 targets");
   };
   auto verifyA5 = [&]() -> LogicalResult {
-    if (failed(verifyScaleTileMatchesOperand(*this, getAScale().getType(),
-                                             getA().getType(), "a_scale", "a")) ||
-        failed(verifyScaleTileMatchesOperand(*this, getBScale().getType(),
-                                             getB().getType(), "b_scale", "b")) ||
-        failed(verifyA5MxGemvTileOperands(*this, getA().getType(), getB().getType(),
+    if (failed(verifyA5MxGemvTileOperands(*this, getA().getType(), getB().getType(),
                                           getDst().getType())) ||
+        failed(verifyA5MxGemvScaleTile(*this, getAScale().getType(),
+                                       getA().getType(), getB().getType(),
+                                       "a_scale", /*isLeftScale=*/true)) ||
+        failed(verifyA5MxGemvScaleTile(*this, getBScale().getType(),
+                                       getA().getType(), getB().getType(),
+                                       "b_scale", /*isLeftScale=*/false)) ||
         failed(verifyMatBiasTile(*this, getBias().getType(), getDst().getType(),
                                  /*requireFloatBias=*/true)))
       return failure();
@@ -7905,10 +7978,46 @@ LogicalResult TGetScaleAddrOp::verify() {
   auto verifyA5 = [&]() -> LogicalResult {
     Type srcTy = getSrc().getType();
     Type dstTy = getDst().getType();
-    if (failed(verifyTileBufCommon(*this, srcTy, "src")))
+    if (failed(verifyTileBufCommon(*this, srcTy, "src", /*allowLowPrecision=*/true)))
       return failure();
-    if (failed(verifyScaleTileMatchesOperand(*this, dstTy, srcTy, "dst", "src")))
+    if (failed(verifyTileBufCommon(*this, dstTy, "dst", /*allowLowPrecision=*/true)))
       return failure();
+    auto srcSpace = getPTOMemorySpaceEnum(srcTy);
+    if (!srcSpace ||
+        (*srcSpace != pto::AddressSpace::LEFT && *srcSpace != pto::AddressSpace::RIGHT))
+      return emitOpError("expects src to be in the left or right address space");
+    auto dstSpace = getPTOMemorySpaceEnum(dstTy);
+    if (!dstSpace || *dstSpace != pto::AddressSpace::SCALING)
+      return emitOpError("expects dst to be in the scaling address space");
+    auto dstShape = getShapeVec(dstTy);
+    auto srcShape = getShapeVec(srcTy);
+    auto dstValid = getValidShapeVec(dstTy);
+    auto srcValid = getValidShapeVec(srcTy);
+    if (dstShape.size() != 2 || srcShape.size() != 2 || dstValid.size() != 2 ||
+        srcValid.size() != 2)
+      return emitOpError(
+          "expects src/dst to have rank-2 shape and valid_shape");
+    if (*srcSpace == pto::AddressSpace::LEFT) {
+      int64_t mShape = srcShape[0];
+      int64_t mValid = srcValid[0];
+      int64_t vk = srcValid[1];
+      int64_t expectedScaleK = ceilDivKnown(vk, 32);
+      if (!hasCompatibleKnownExtent(dstShape[0], mShape) ||
+          !hasCompatibleKnownExtent(dstShape[1], expectedScaleK) ||
+          !hasCompatibleKnownExtent(dstValid[0], srcValid[0]) ||
+          !hasCompatibleKnownExtent(dstValid[1], expectedScaleK))
+        return emitOpError("expects dst shape/valid_shape to be [M, ceil(K/32)]");
+    } else {
+      int64_t k = srcValid[0];
+      int64_t n = srcShape[1];
+      int64_t vk = srcValid[0];
+      int64_t vn = srcValid[1];
+      if (!hasCompatibleKnownExtent(dstShape[0], ceilDivKnown(k, 32)) ||
+          !hasCompatibleKnownExtent(dstShape[1], n) ||
+          !hasCompatibleKnownExtent(dstValid[0], ceilDivKnown(vk, 32)) ||
+          !hasCompatibleKnownExtent(dstValid[1], vn))
+        return emitOpError("expects dst shape/valid_shape to be [ceil(K/32), N]");
+    }
     return success();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);

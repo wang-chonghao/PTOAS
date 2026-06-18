@@ -50,6 +50,54 @@ static bool isA5RiskyVecVecColMajorTMov(pto::TMovOp op) {
   return isColMajorNoneBox(srcTb) && isColMajorNoneBox(dstTb);
 }
 
+static std::optional<pto::AddressSpace> getAddressSpaceFromValueType(Type type) {
+  if (auto tb = dyn_cast<pto::TileBufType>(type)) {
+    if (auto as =
+            dyn_cast_or_null<pto::AddressSpaceAttr>(tb.getMemorySpace()))
+      return as.getAddressSpace();
+    return std::nullopt;
+  }
+  if (auto mr = dyn_cast<MemRefType>(type)) {
+    if (auto ms = mr.getMemorySpace()) {
+      if (auto as = dyn_cast<pto::AddressSpaceAttr>(ms))
+        return as.getAddressSpace();
+    }
+  }
+  return std::nullopt;
+}
+
+static bool isA5ScaleTileTMov(pto::TMovOp op) {
+  auto srcAS = getAddressSpaceFromValueType(op.getSrc().getType());
+  auto dstAS = getAddressSpaceFromValueType(op.getDst().getType());
+  return srcAS && dstAS && *srcAS == pto::AddressSpace::MAT &&
+         *dstAS == pto::AddressSpace::SCALING;
+}
+
+static bool hasInterveningUsesOfDst(Operation *start, Operation *end,
+                                    Value dst) {
+  for (Operation *cursor = start->getNextNode(); cursor && cursor != end;
+       cursor = cursor->getNextNode()) {
+    for (Value operand : cursor->getOperands()) {
+      if (operand == dst)
+        return true;
+    }
+  }
+  return false;
+}
+
+static pto::TMovOp findMatchingScaleTileTMov(pto::TGetScaleAddrOp op) {
+  Value dst = op.getDst();
+  for (Operation *cursor = op->getPrevNode(); cursor; cursor = cursor->getPrevNode()) {
+    auto mov = dyn_cast<pto::TMovOp>(cursor);
+    if (!mov || mov.getDst() != dst || !isA5ScaleTileTMov(mov))
+      continue;
+    if (hasInterveningUsesOfDst(mov, op, dst))
+      return {};
+    return mov;
+  }
+  return {};
+}
+
 template <typename CfgT>
 static auto buildRowMajorConfigImpl(int, MLIRContext *ctx,
                                     pto::BLayoutAttr rowMajor, CfgT cfg)
@@ -126,6 +174,15 @@ struct PTOA5NormalizeTMovPass
     func::FuncOp func = getOperation();
     if (!isTargetArchA5(func.getOperation()))
       return;
+
+    SmallVector<pto::TGetScaleAddrOp, kRiskyOpReserveSize> scaleAddrOps;
+    func.walk([&](pto::TGetScaleAddrOp op) { scaleAddrOps.push_back(op); });
+    for (pto::TGetScaleAddrOp op : scaleAddrOps) {
+      auto matchingTMov = findMatchingScaleTileTMov(op);
+      if (!matchingTMov)
+        continue;
+      op->moveBefore(matchingTMov);
+    }
 
     SmallVector<pto::TMovOp, kRiskyOpReserveSize> riskyOps;
     func.walk([&](pto::TMovOp op) {
