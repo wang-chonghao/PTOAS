@@ -4043,46 +4043,6 @@ static LogicalResult verifyTileBufSameLogicalExtent(Operation *op, Type lhs,
   return success();
 }
 
-static LogicalResult verifyScaleTileMatchesOperand(Operation *op, Type scaleTy,
-                                                   Type operandTy,
-                                                   StringRef scaleName,
-                                                   StringRef operandName) {
-  if (failed(verifyTileBufCommon(op, scaleTy, scaleName,
-                                 /*allowLowPrecision=*/true)))
-    return failure();
-  auto scaleSpace = getPTOMemorySpaceEnum(scaleTy);
-  if (!scaleSpace || *scaleSpace != pto::AddressSpace::SCALING)
-    return op->emitOpError() << "expects " << scaleName
-                             << " to be in the scaling address space";
-
-  auto scaleShape = getShapeVec(scaleTy);
-  auto operandShape = getShapeVec(operandTy);
-  if (scaleShape.size() != operandShape.size())
-    return op->emitOpError() << "expects " << scaleName << " and " << operandName
-                             << " to have the same rank";
-  for (size_t i = 0; i < scaleShape.size(); ++i) {
-    if (scaleShape[i] != ShapedType::kDynamic &&
-        operandShape[i] != ShapedType::kDynamic &&
-        scaleShape[i] != operandShape[i])
-      return op->emitOpError() << "expects " << scaleName << " and " << operandName
-                               << " to have the same shape";
-  }
-
-  auto scaleValid = getValidShapeVec(scaleTy);
-  auto operandValid = getValidShapeVec(operandTy);
-  if (scaleValid.size() != operandValid.size())
-    return op->emitOpError() << "expects " << scaleName << " and " << operandName
-                             << " to have the same valid_shape";
-  for (size_t i = 0; i < scaleValid.size(); ++i) {
-    if (scaleValid[i] != ShapedType::kDynamic &&
-        operandValid[i] != ShapedType::kDynamic &&
-        scaleValid[i] != operandValid[i])
-      return op->emitOpError() << "expects " << scaleName << " and " << operandName
-                               << " to have the same valid_shape";
-  }
-  return success();
-}
-
 static LogicalResult verifyPartialValidPattern(Operation *op, Type src0Ty,
                                                Type src1Ty, Type dstTy) {
   auto src0Valid = getValidShapeVec(src0Ty);
@@ -7999,7 +7959,6 @@ LogicalResult TGetScaleAddrOp::verify() {
           "expects src/dst to have rank-2 shape and valid_shape");
     if (*srcSpace == pto::AddressSpace::LEFT) {
       int64_t mShape = srcShape[0];
-      int64_t mValid = srcValid[0];
       int64_t vk = srcValid[1];
       int64_t expectedScaleK = ceilDivKnown(vk, 32);
       if (!hasCompatibleKnownExtent(dstShape[0], mShape) ||
