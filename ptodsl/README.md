@@ -237,166 +237,32 @@ implementation.
 
 ---
 
-## DSL-style API quick reference
+## Public API map
 
-```python
-from ptodsl import pto, scalar
-s = scalar       # arith shorthand alias
-```
+The user guide under `ptodsl/docs/user_guide/` is the canonical PTODSL API
+reference. This README keeps only a compact map of the public surface:
 
-`pto` is the main DSL namespace. `scalar` is a separate top-level helper
-namespace for runtime scalar load/store, arithmetic helpers, and scalar math;
-it is intentionally not exported as `pto.scalar`.
+- `@pto.jit`: the only host-visible kernel entry
+- `@pto.cube`, `@pto.simd`, `@pto.simt`: hardware-unit sub-kernels
+- `pto.ptr(...)` + runtime PTO scalar annotations: public entry ABI
+- `pto.make_tensor_view(...)`, `pto.partition_view(...)`, `pto.alloc_tile(...)`:
+  core data-model builders
+- `pto.tile.*`, `pto.mte_*`, `pto.v*`, `scalar.*`: operational namespaces
+- default AST rewrite for Python `for` / `if`, plus explicit `pto.for_` /
+  `pto.if_`: control-flow surface
 
-### Kernel decorator
+Start here for the full reference:
 
-```python
-@pto.jit(name="MyKernel", kernel_kind="vector", target="a5")
-def MyKernel():
-    ...
-
-@pto.jit(name="Softmax", kernel_kind="vector", target="a5")
-def Softmax(
-    X_ptr: pto.ptr(pto.f32, "gm"),
-    O_ptr: pto.ptr(pto.f32, "gm"),
-    rows: pto.i32,
-    cols: pto.i32,
-    *,
-    BLOCK: pto.const_expr = 128,
-):
-    x_view = pto.make_tensor_view(X_ptr, shape=[rows, cols], strides=[cols, 1])
-    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
-    ...
-
-print(MyKernel)               # prints MLIR text
-mod = MyKernel.mlir_module()  # returns mlir.ir.Module
-```
-
-`@pto.jit` now emits a flat aicore launch-entry module by default. The traced
-entry function carries the `pto.aicore` attribute and lives directly under the
-top-level module, which matches the runtime-launch path and merged-MLIR example
-flow.
-
-PTODSL v1 keeps the public `@pto.jit` entry ABI intentionally narrow:
-
-- positional device buffers are explicit GM pointers declared with
-  `pto.ptr(..., "gm")`
-- shape, stride, and other launch-varying metadata travel as positional runtime
-  scalars such as `pto.i32`, `pto.f32`, and `pto.i1`
-- kernel bodies reconstruct tensor descriptors explicitly with
-  `pto.make_tensor_view(ptr, shape=..., strides=...)`
-- positional runtime scalars use PTO scalar annotations such as `pto.i32`,
-  `pto.f32`, and `pto.i1`, while launch-time values remain ordinary Python
-  scalars
-- keyword-only parameters annotated with `pto.const_expr` are compile-time
-  specialization knobs
-
-The host wrapper is responsible for extracting or deriving whatever runtime
-metadata the kernel needs and passing it explicitly at launch time. PTODSL no
-longer uses `pto.tensor_spec(...)` as the public `@pto.jit` entry contract.
-
-Additional layered kernel entry modes and shared compute decorators are also
-exported on the public surface: `@pto.jit(mode="auto")`,
-`@pto.jit(mode="explicit")`, `@pto.cube`, `@pto.simd`, and `@pto.simt`.
-
-### Type descriptors (lazy – safe to use in annotations)
-
-| Expression | MLIR type |
-|---|---|
-| `pto.float32` | `f32` |
-| `pto.int32` | `i32` |
-| `pto.int64` | `i64` |
-| `pto.index` | `index` |
-| `pto.ptr(pto.float32, "gm")` | `!pto.ptr<f32, gm>` |
-| `pto.ptr(pto.float32, "ub")` | `!pto.ptr<f32, ub>` |
-
-### Type constructors (eager – require active context)
-
-```python
-vf32     = pto.vreg_type(64, pto.float32)                       # !pto.vreg<64xf32>
-tile_col = pto.alloc_tile(shape=[8, 1], dtype=pto.float32, blayout="ColMajor")
-tile_w   = pto.alloc_tile(shape=[8, 128], dtype=pto.float32)
-```
-
-### Constants
-
-```python
-c0     = pto.const(0)               # index
-c1_i32 = pto.const(1, dtype=pto.int32)
-c64_i64= pto.const(64, dtype=pto.int64)
-```
-
-### Control flow
-
-```python
-with pto.simd():                    # pto.simd { … }
-    ...
-
-with pto.for_(c0, c16, step=c1) as i:     # simple scf.for
-    ...                                    # scf.yield inserted automatically
-
-loop = pto.for_(c0, c128, step=c64).carry(lhs=a, rhs=b)
-with loop:
-    x = loop.lhs
-    y = loop.rhs
-    ...
-    loop.update(lhs=nx, rhs=ny)
-fx = loop.final("lhs")
-fy = loop.final("rhs")
-
-with pto.if_(has_rows) as br:      # simple scf.if
-    with br.then_:
-        ...
-
-with pto.if_(has_chunk) as br:
-    with br.then_:
-        br.assign(x=merged_max, y=merged_sum)
-    with br.else_:
-        br.assign(x=running_max, y=running_sum)
-x = br.x
-y = br.y
-```
-
-### Scalar arithmetic (`s = scalar`)
-
-```python
-s.muli(a, b)                 # arith.muli
-s.addi(a, b)                 # arith.addi
-s.subi(a, b)                 # arith.subi
-s.index_cast(val)            # arith.index_cast → index
-s.index_cast(pto.int32, val) # arith.index_cast → i32
-(a > b)                      # scalar compare → pto.i1
-(a <= b)                     # scalar compare → pto.i1
-s.select(cond, t, f)         # arith.select
-```
-
-### PTO operations
-
-```python
-pto.castptr(addr, ptr_type)              # pto.castptr
-pto.addptr(ptr, offset)                  # pto.addptr
-pto.vlds(ptr, offset)                    # pto.vlds, result vreg inferred from ptr element type
-pto.vbr(scalar)                          # pto.vbr, scalar broadcast -> vreg
-pto.vsts(v, ptr, offset, mask)           # pto.vsts
-pto.plt_b32(scalar)                      # → (mask, scalar_out)
-pto.pset_b32("PAT_ALL")                  # pto.pset_b32 → mask
-pto.vbitcast(v, dtype)                   # pto.vbitcast
-pto.pbitcast(mask, mask_type)            # pto.pbitcast
-pto.vadd(a, b, mask)   # infers result type from a.type
-pto.vmul / vmax / vdiv / vcmax / vcadd / vdup / vexpdif  # similarly
-pto.make_tensor_view(ptr, shape=…, strides=…)    # type inferred
-pto.partition_view(tv, offsets=…, sizes=…)        # type inferred
-pto.alloc_tile(shape=…, dtype=…, memory_space=…, valid_shape=…, addr=…)  # authored surface
-pto.tile.load(part, tile)
-pto.tile.store(tile, part)
-pto.tile.load(tv, tile)                           # partition + tile.load, zero offsets, sizes inferred from tile
-pto.tile.store(tile, tv)                          # partition + tile.store, zero offsets, sizes inferred from tile
-tile.as_ptr() / view.as_ptr()
-pto.get_block_idx()           # → i64
-pto.set_flag("MTE2", "V", event_id=0)
-pto.wait_flag("MTE2", "V", event_id=0)
-pto.pipe_barrier(pto.Pipe.ALL)
-```
+- `ptodsl/docs/user_guide/01-introduction.md`
+- `ptodsl/docs/user_guide/03-kernel-entry-and-subkernels.md`
+- `ptodsl/docs/user_guide/04-type-system-and-buffer.md`
+- `ptodsl/docs/user_guide/05-control-flow.md`
+- `ptodsl/docs/user_guide/06-scalar-and-pointer-ops.md`
+- `ptodsl/docs/user_guide/07-data-movement-ops.md`
+- `ptodsl/docs/user_guide/08-compute-operations.md`
+- `ptodsl/docs/user_guide/09-predicate-and-mask-ops.md`
+- `ptodsl/docs/user_guide/10-sync-ops.md`
+- `ptodsl/docs/user_guide/13-simt-micro-ops.md`
 
 ## How the IR check works
 

@@ -24,9 +24,8 @@ def tile_copy(
     a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
     o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
 
-    # Allocate UB tiles for one row-strip block.
+    # Allocate a UB tile for one row-strip block.
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
-    o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
     # Partition the GM views to cover the current logical slice.
     a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
@@ -34,7 +33,7 @@ def tile_copy(
 
     # Load from GM into UB, then store back out.
     pto.tile.load(a_part, a_tile)
-    pto.tile.store(o_tile, o_part)
+    pto.tile.store(a_tile, o_part)
 ```
 
 Let us step through each piece.
@@ -43,7 +42,14 @@ Let us step through each piece.
 
 ```python
 @pto.jit(target="a5")
-def tile_copy(A, O, *, BLOCK: pto.const_expr = 128):
+def tile_copy(
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+    *,
+    BLOCK: pto.const_expr = 128,
+):
 ```
 
 `@pto.jit` marks this function as a launchable PTO kernel. The positional parameters `A_ptr` and `O_ptr` are explicit GM pointers, while `rows` and `cols` are runtime scalar metadata passed at launch time. The keyword-only argument `BLOCK` is a compile-time constant declared with `pto.const_expr`; the compiler specializes the kernel for each tile width.
@@ -76,7 +82,7 @@ a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
 
 ```python
 pto.tile.load(a_part, a_tile)   # GM → UB
-pto.tile.store(o_tile, o_part)  # UB → GM
+pto.tile.store(a_tile, o_part)  # UB → GM
 ```
 
 `tile.load` copies a block of data from GM (described by a partition) into a UB tile. `tile.store` copies a UB tile back to GM. These are **Tile Ops** — they operate on entire tile buffers at once.
@@ -85,7 +91,7 @@ pto.tile.store(o_tile, o_part)  # UB → GM
 
 ```python
 pto.tile.load(a_part, a_tile)
-pto.tile.store(o_tile, o_part)
+pto.tile.store(a_tile, o_part)
 ```
 
 A copy kernel strips the example down to the essential PTODSL boundary objects:

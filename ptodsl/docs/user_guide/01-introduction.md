@@ -154,6 +154,12 @@ the same kernel.
 
 The SPMD launch contract is also owned here: the runtime grid (e.g., `batch * heads` blocks) is declared at the call site, and block/subblock indices are queried via `pto.get_block_idx()` and friends.
 
+PTODSL does not expose a second public "module" decorator alongside
+`@pto.jit`. For ordinary code organization, write plain Python helper
+functions that are called from the entry body. Use `@pto.cube`,
+`@pto.simd`, and `@pto.simt` only when the helper must execute on a
+specific hardware unit.
+
 ### Sub-kernels — `@pto.cube` / `@pto.simd` / `@pto.simt`
 
 These are hardware-bound compute sub-kernels, each mapped to a specific NPU compute unit:
@@ -221,7 +227,6 @@ Chapter 11 walks through this example in full detail.
 | If you are... | Start with... |
 |---------------|---------------|
 | New to PTODSL | Chapter 2 (Quick Start), then Chapter 3 (Kernel Entries) |
-
 | Writing your first kernel | Chapter 2 → Chapter 4 (Type System) → Chapter 5 (Control Flow) |
 | Looking up a specific operation | Chapters 6–10 and Chapter 13 (organized by topic) |
 | Understanding the flash attention reference | Chapter 11 |
@@ -243,4 +248,3 @@ Chapter 11 walks through this example in full detail.
 | 11 | Flash attention walkthrough |
 | 12 | Additional examples |
 | 13 | SIMT micro-ops |
-| 14 | Common errors and compatibility notes |

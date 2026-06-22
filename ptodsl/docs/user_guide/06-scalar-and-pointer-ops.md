@@ -234,6 +234,11 @@ For fixed-width bit manipulation where the exact integer width matters, cast to 
 
 Non-trivial scalar math functions live under the top-level `scalar` namespace (imported as `from ptodsl import scalar`). They are intentionally separate from the `pto.*` namespace:
 
+Use the `scalar.*` helpers for device-side runtime math. Python built-ins such
+as `max(...)`, `min(...)`, and `abs(...)` run at trace time and are only
+correct for plain Python values. When the operands are PTO runtime scalars,
+write `scalar.max(a, b)`, `scalar.min(a, b)`, and `scalar.abs(x)` explicitly.
+
 #### `scalar.max(a: ScalarType, b: ScalarType) -> ScalarType`
 
 **Description**: Returns the maximum of two scalars.

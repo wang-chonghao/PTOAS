@@ -214,7 +214,7 @@ This surface avoids explicit result-type declarations and explicit
 
 ## 5.4 `pto.const_expr` and tracing
 
-`pto.const_expr` parameters (Section 3.8) are compile-time constants. They are fixed at `.compile()` time and cannot change between launches of the same compiled kernel. Because their values are known during tracing, they interact naturally with Python control flow:
+`pto.const_expr` parameters (Section 3.6) are compile-time constants. They are fixed at `.compile()` time and cannot change between launches of the same compiled kernel. Because their values are known during tracing, they interact naturally with Python control flow:
 
 ```python
 @pto.jit(target="a5")

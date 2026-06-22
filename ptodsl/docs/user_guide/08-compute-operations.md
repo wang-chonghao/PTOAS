@@ -84,6 +84,41 @@ Element-wise operations between a tile and a scalar.
 
 ---
 
+### 8.1.2a Tile movement between domains
+
+#### `pto.tile.mov(src: Tile, dst: Tile, *, mode=None) -> None`
+
+**Description**: Moves data between compatible tile domains without going
+through GM. This is the tile-domain transfer surface used when a workflow needs
+to stage data from one tile contract into another, for example UB → MAT before
+a cube sub-kernel consumes the result.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src` | `Tile` | Source tile |
+| `dst` | `Tile` | Destination tile |
+| `mode` | implementation-defined or `None` | Optional transfer mode used only for specialized backend paths |
+
+**Returns**: None.
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.l1_tiles","symbol":"flash_attention_l1_tiles_probe","compile":{"BLOCK_Q":128,"BLOCK_KV":128,"HEAD_DIM":128}} -->
+```python
+p_tile = pto.alloc_tile(shape=[Br, Bc], dtype=pto.f32, valid_shape=[full_br, full_bc])
+p_mat = pto.alloc_tile(
+    shape=[Br, Bc],
+    dtype=pto.f32,
+    memory_space=pto.MemorySpace.MAT,
+    valid_shape=[full_br, full_bc],
+    blayout="ColMajor",
+    slayout="RowMajor",
+)
+pto.tile.mov(p_tile, p_mat)
+```
+
+---
+
 ### 8.1.3 Unary math
 
 Single-source element-wise math functions.
@@ -677,6 +712,7 @@ pto.tile.matmul_acc(acc_prev, lhs_l0a, rhs_l0b, acc_next)
 | Partial elementwise | `tile.partadd`, `tile.partmul`, `tile.partmax`, `tile.partmin` |
 | Fill/padding | `tile.fillpad`, `tile.fillpad_expand`, `tile.fillpad_inplace` |
 | Windowing | `tile.extract`, `tile.insert` |
+| Tile movement | `tile.mov` |
 | Tile matmul | `tile.matmul`, `tile.matmul_acc` |
 
 ---

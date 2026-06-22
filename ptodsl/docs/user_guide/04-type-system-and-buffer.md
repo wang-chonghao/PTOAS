@@ -245,6 +245,11 @@ For packed types (`pto.f4e1m2x2`, `pto.f4e2m1x2`), `shape` dimensions refer to t
 | `memory_space` | `MemorySpace` | Where the tile lives (UB, LEFT, RIGHT, ACC, BIAS) |
 | `valid_shape` | `tuple[int, ...]` | Logical data region, ≤ `shape` in each dimension |
 
+`valid_shape` is mutable. PTODSL uses this to describe runtime tails without
+changing the physical tile allocation. A common pattern is to allocate one
+full-size tile per block shape, then update `tile.valid_shape = [...]` before
+each sub-kernel or Tile Op call so the live region matches the current tail.
+
 ### Tile methods
 
 | Method | Description |
@@ -264,6 +269,10 @@ tail_tile.valid_shape = [rows]
 
 meta_ptr = meta_tile.as_ptr()
 ```
+
+When the live region is compile-time known, direct Python integers and
+`pto.const(...)` both work. When the live region depends on runtime metadata,
+assign PTO scalar values directly with `tile.valid_shape = [rows, cols]`.
 
 ## 4.8 Tile Reinterpretation
 

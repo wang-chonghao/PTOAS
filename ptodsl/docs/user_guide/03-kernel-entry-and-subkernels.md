@@ -306,6 +306,30 @@ def my_kernel(
         pto.tile.store(o_tile, o_part)
 ```
 
+### Plain helpers vs sub-kernels
+
+PTODSL exposes one public launch boundary: `@pto.jit`. Inside that entry,
+there are two kinds of helpers:
+
+- **Plain Python helpers** for code organization, repeated index math,
+  partition construction, and orchestration that should stay in the caller's
+  context.
+- **Sub-kernels** (`@pto.cube`, `@pto.simd`, `@pto.simt`) when the helper must
+  run on a specific hardware unit or use unit-local value categories such as
+  `vreg` or cube-local scratch.
+
+Use a plain helper when the code should not introduce a new hardware-unit
+boundary. Plain helpers do not define a separate ABI, target, mode, or
+backend. They are traced as part of the enclosing `@pto.jit` specialization
+and therefore inherit the caller's context.
+
+Use a sub-kernel when the helper's semantics belong to a specific unit:
+vector register math on SIMD, matrix instructions on Cube, or scalar-thread
+work on SIMT. Sub-kernels are the only public way to express that boundary.
+
+Named sub-kernels and plain nested helpers both use the same default AST
+rewrite behavior when they are traced from a compiled specialization.
+
 Sub-kernels are the mechanism for custom compute in PTODSL — when Tile Ops
 cover your needs, you don't need one; when they don't, a sub-kernel gives you
 direct access to the hardware unit. In auto mode, a sub-kernel's parameters
@@ -727,6 +751,7 @@ pointers:
 | Host → `@pto.jit` | explicit GM pointers + runtime scalars |
 | `@pto.jit(mode="auto")` → sub-kernel | `Tile`, PTO scalars (compiler handles staging + sync) |
 | `@pto.jit(mode="explicit")` → sub-kernel | `Tile`, `PartitionTensorView`, `pto.ptr`, PTO scalars |
+| `@pto.jit` → plain helper | same values as the caller; no new PTODSL boundary is introduced |
 | `@pto.jit` → `with pto.{cube,simd,simt}:` | `Tile` captured from enclosing scope |
 | Sub-kernel → sub-kernel | Not allowed (go through UB tiles via the caller) |
 | `@pto.simd` → caller | Only via `vsts`/`psts` to UB tiles; `vreg` cannot escape |
@@ -738,6 +763,10 @@ pointers:
 constant. The compiler specializes the kernel for each combination of constexpr
 values, and the compiled artifact is cached by specialization key together with
 the kernel's entry annotation contract.
+
+`pto.const_expr` is the public API name. In prose, this manual sometimes uses
+"constexpr" as shorthand for "compile-time constant"; it does not refer to a
+second PTODSL symbol.
 
 <!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel","compile":{}} -->
 ```python

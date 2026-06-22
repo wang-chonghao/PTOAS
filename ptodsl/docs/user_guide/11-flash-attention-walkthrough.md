@@ -214,22 +214,10 @@ beta_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, o
 
 The walkthrough keeps Q/K/V/P on the MAT path so the cube sub-kernels consume the same tile objects that the top-level kernel owns. Runtime tails still live in `valid_shape`; the physical tile shapes stay static.
 
-**UB-resident state and scratch tiles** — the online-softmax state plus intermediate outputs:
-
-```python
-o_prev_tile = pto.alloc_tile(shape=[Br, D], dtype=pto.f32, valid_shape=[full_br, dim])
-o_next_tile = pto.alloc_tile(shape=[Br, D], dtype=pto.f32, valid_shape=[full_br, dim])
-m_prev_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-m_next_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-l_prev_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-l_next_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-
-s_tile = pto.alloc_tile(shape=[Br, Bc], dtype=pto.f32, valid_shape=[full_br, full_bc])
-p_tile = pto.alloc_tile(shape=[Br, Bc], dtype=pto.f32, valid_shape=[full_br, full_bc])
-pv_tile = pto.alloc_tile(shape=[Br, D], dtype=pto.f32, valid_shape=[full_br, dim])
-alpha_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-beta_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-```
+**UB-resident state and scratch tiles** — among the allocations above, the
+online-softmax state lives in `o_prev_tile` / `o_next_tile`, `m_prev_tile` /
+`m_next_tile`, `l_prev_tile` / `l_next_tile`, plus the scratch tiles
+`s_tile`, `p_tile`, `pv_tile`, `alpha_tile`, and `beta_tile`.
 
 The online-softmax algorithm requires **ping-pong state tiles**: `m_prev`/`m_next`, `l_prev`/`l_next`, `o_prev`/`o_next`. After each KV block, `next` becomes `prev` for the following iteration.
 
@@ -607,7 +595,12 @@ This is a scalar element-wise blend over the tile domain:
 O_next[row, col] = alpha[row] * O_prev[row, col] + beta[row] * PV[row, col]
 ```
 
-The SIMT kernel walks the tile element by element with nested `pto.for_` loops. Each iteration loads two scalars (`o_prev` and `pv_val`), computes the weighted sum, and stores the result. The `alpha`/`beta` coefficients are per-row (loaded once per row), while the blend is per-element.
+The SIMT kernel walks the tile element by element with nested Python
+`for range(...)` loops. Under the default AST rewrite path these become
+device-side runtime loops. Each iteration loads two scalars (`o_prev` and
+`pv_val`), computes the weighted sum, and stores the result. The `alpha` /
+`beta` coefficients are per-row (loaded once per row), while the blend is
+per-element.
 
 **Why SIMT instead of SIMD?** The intent is to contrast with `online_softmax_rows`: softmax is dominated by row-wise vector reductions and exponentials — natural SIMD work. The final blend is a simple linear combination with per-row coefficients — expressing it as explicit scalar work-items makes the per-element access pattern explicit and leaves the compiler free to vectorize or fuse as it sees fit.
 
