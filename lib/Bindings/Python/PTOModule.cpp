@@ -236,7 +236,9 @@ static void bindPTOModule(pybind11::module &m) {
     py::enum_<mlir::pto::Layout>(m, "Layout")
       .value("ND", mlir::pto::Layout::ND)
       .value("DN", mlir::pto::Layout::DN)
-      .value("NZ", mlir::pto::Layout::NZ);
+      .value("NZ", mlir::pto::Layout::NZ)
+      .value("MX_A_ZZ", mlir::pto::Layout::MX_A_ZZ)
+      .value("MX_B_NN", mlir::pto::Layout::MX_B_NN);
 
     py::enum_<mlir::pto::AccToVecMode>(m, "AccToVecMode")
       .value("SingleModeVec0", mlir::pto::AccToVecMode::SingleModeVec0)
@@ -881,6 +883,17 @@ static void bindPTOModule(pybind11::module &m) {
             "get",
             [](py::object cls, MlirContext context) -> py::object {
                 MlirType t = mlirPTOHiF8TypeGet(context);
+                return cls.attr("__call__")(t);
+            },
+            py::arg("cls"), py::arg("context") = py::none());
+
+    mlir_type_subclass(
+        m, "F8E8M0Type",
+        [](MlirType type) -> bool { return mlirPTOTypeIsAF8E8M0Type(type); })
+        .def_classmethod(
+            "get",
+            [](py::object cls, MlirContext context) -> py::object {
+                MlirType t = mlirPTOF8E8M0TypeGet(context);
                 return cls.attr("__call__")(t);
             },
             py::arg("cls"), py::arg("context") = py::none());

@@ -486,6 +486,10 @@ static std::string layoutToEmitCString(mlir::pto::Layout layout) {
     return "pto::Layout::DN";
   case mlir::pto::Layout::NZ:
     return "pto::Layout::NZ";
+  case mlir::pto::Layout::MX_A_ZZ:
+    return "pto::Layout::MX_A_ZZ";
+  case mlir::pto::Layout::MX_B_NN:
+    return "pto::Layout::MX_B_NN";
   }
   return "pto::Layout::ND";
 }
@@ -493,6 +497,10 @@ static std::string layoutToEmitCString(mlir::pto::Layout layout) {
 static bool isEmitCGlobalTensorLikeType(Type ty) {
   auto opaqueTy = dyn_cast<emitc::OpaqueType>(ty);
   return opaqueTy && opaqueTy.getValue().contains("GlobalTensor<");
+}
+
+static bool isF8E8M0ElemType(Type elemTy) {
+  return mlir::pto::isPTOF8E8M0Type(elemTy);
 }
 
 static std::string getEmitCScalarTypeToken(Type elemTy) {
@@ -503,6 +511,8 @@ static std::string getEmitCScalarTypeToken(Type elemTy) {
   if (pto::isPTOFloat8Type(elemTy) &&
       (elemTy.isFloat8E5M2() || elemTy.isFloat8E5M2FNUZ()))
     return "float8_e5m2_t";
+  if (isF8E8M0ElemType(elemTy))
+    return "float8_e8m0_t";
   if (isa<pto::HiF8Type>(elemTy))
     return "hifloat8_t";
   if (isa<pto::F4E1M2x2Type>(elemTy))
@@ -568,10 +578,155 @@ static std::string tileBufBLayoutToken(pto::TileBufConfigAttr configAttr);
 static std::string tileBufSLayoutToken(pto::TileBufConfigAttr configAttr);
 static std::string tileBufPadToken(pto::TileBufConfigAttr configAttr);
 static pto::BLayout getTileBufBLayoutValue(pto::TileBufConfigAttr configAttr);
+static pto::SLayout getTileBufSLayoutValue(pto::TileBufConfigAttr configAttr);
 static int64_t renderTileTemplateDim(int64_t rawDim, Type elemTy,
                                      pto::BLayout blayout, int dimIdx);
+static bool isLowPrecisionCubeOperandType(Type elemTy) {
+  return pto::isPTOFloat8Type(elemTy) || isa<pto::F4E1M2x2Type>(elemTy) ||
+         isa<pto::F4E2M1x2Type>(elemTy);
+}
 
-static const char *tileRoleToken(Attribute memorySpace) {
+struct SpecialGlobalTensorTypeSpec {
+  std::string shapeTypeExpr;
+  std::string strideTypeExpr;
+  std::string layoutEnum;
+};
+
+static std::optional<SpecialGlobalTensorTypeSpec>
+getSpecialScaleGlobalTensorTypeSpecForTileValue(Value dstValue,
+                                                ArrayRef<int64_t> shape,
+                                                Type elemTy) {
+  dstValue = peelUnrealized(dstValue);
+
+  auto dstMrTy = dyn_cast<MemRefType>(dstValue.getType());
+  if (!dstMrTy)
+    return std::nullopt;
+
+  auto dstSpace = dyn_cast_or_null<pto::AddressSpaceAttr>(dstMrTy.getMemorySpace());
+  if (!dstSpace || dstSpace.getAddressSpace() != pto::AddressSpace::MAT)
+    return std::nullopt;
+
+  std::optional<pto::TileBufConfigAttr> configAttr;
+  if (auto bind = dstValue.getDefiningOp<pto::BindTileOp>()) {
+    configAttr = bind.getConfigAttr();
+  } else if (auto cast = dstValue.getDefiningOp<pto::PointerCastOp>()) {
+    if (auto config = cast.getConfig())
+      configAttr = config;
+  }
+  if (!configAttr)
+    return std::nullopt;
+
+  ArrayRef<int64_t> effectiveShape = shape;
+  if (dstMrTy.getRank() == 2 && dstMrTy.hasStaticShape())
+    effectiveShape = dstMrTy.getShape();
+
+  auto config = *configAttr;
+  if (!isF8E8M0ElemType(elemTy))
+    return std::nullopt;
+  if (effectiveShape.size() != 2)
+    return std::nullopt;
+
+  pto::BLayout blayout = getTileBufBLayoutValue(config);
+  pto::SLayout slayout = getTileBufSLayoutValue(config);
+  std::string elemTypeStr = getEmitCScalarTypeToken(elemTy);
+
+  if (blayout == pto::BLayout::RowMajor &&
+      slayout == pto::SLayout::RowMajor) {
+    if (effectiveShape[0] == 1)
+      return std::nullopt;
+    return SpecialGlobalTensorTypeSpec{
+        "TileShape2D<" + elemTypeStr + ", " +
+            std::to_string(effectiveShape[0]) + ", " +
+            std::to_string(effectiveShape[1]) + ", pto::Layout::MX_A_ZZ>",
+        "BaseShape2D<" + elemTypeStr + ", " +
+            std::to_string(effectiveShape[0]) + ", " +
+            std::to_string(effectiveShape[1]) + ", pto::Layout::MX_A_ZZ>",
+        "pto::Layout::MX_A_ZZ",
+    };
+  }
+
+  if (blayout == pto::BLayout::ColMajor &&
+      slayout == pto::SLayout::ColMajor) {
+    return SpecialGlobalTensorTypeSpec{
+        "TileShape2D<" + elemTypeStr + ", " +
+            std::to_string(effectiveShape[0]) + ", " +
+            std::to_string(effectiveShape[1]) + ", pto::Layout::MX_B_NN>",
+        "BaseShape2D<" + elemTypeStr + ", " +
+            std::to_string(effectiveShape[0]) + ", " +
+            std::to_string(effectiveShape[1]) + ", pto::Layout::MX_B_NN>",
+        "pto::Layout::MX_B_NN",
+    };
+  }
+
+  return std::nullopt;
+}
+
+static std::optional<SpecialGlobalTensorTypeSpec>
+getSpecialGlobalTensorTypeSpecForLayout(std::optional<mlir::pto::Layout> layout,
+                                        ArrayRef<int64_t> shape, Type elemTy) {
+  if (!layout || !isF8E8M0ElemType(elemTy) || shape.size() != 2)
+    return std::nullopt;
+
+  auto alignUp = [](int64_t value, int64_t align) -> int64_t {
+    if (value < 0 || align <= 0)
+      return value;
+    return ((value + align - 1) / align) * align;
+  };
+
+  std::string elemTypeStr = getEmitCScalarTypeToken(elemTy);
+  switch (*layout) {
+  case mlir::pto::Layout::MX_A_ZZ: {
+    int64_t rows = alignUp(shape[0], 16);
+    int64_t cols = alignUp(shape[1], 2);
+    return SpecialGlobalTensorTypeSpec{
+        "TileShape2D<" + elemTypeStr + ", " + std::to_string(rows) + ", " +
+            std::to_string(cols) + ", pto::Layout::MX_A_ZZ>",
+        "BaseShape2D<" + elemTypeStr + ", " + std::to_string(rows) + ", " +
+            std::to_string(cols) + ", pto::Layout::MX_A_ZZ>",
+        "pto::Layout::MX_A_ZZ",
+    };
+  }
+  case mlir::pto::Layout::MX_B_NN: {
+    int64_t rows = alignUp(shape[0], 2);
+    int64_t cols = alignUp(shape[1], 16);
+    return SpecialGlobalTensorTypeSpec{
+        "TileShape2D<" + elemTypeStr + ", " + std::to_string(rows) + ", " +
+            std::to_string(cols) + ", pto::Layout::MX_B_NN>",
+        "BaseShape2D<" + elemTypeStr + ", " + std::to_string(rows) + ", " +
+            std::to_string(cols) + ", pto::Layout::MX_B_NN>",
+        "pto::Layout::MX_B_NN",
+    };
+  }
+  default:
+    return std::nullopt;
+  }
+}
+
+static std::optional<SpecialGlobalTensorTypeSpec>
+getSpecialScaleGlobalTensorTypeSpec(Operation *anchor, MemRefType mrTy) {
+  auto load = dyn_cast_or_null<pto::TLoadOp>(anchor);
+  if (!load)
+    return std::nullopt;
+  return getSpecialScaleGlobalTensorTypeSpecForTileValue(
+      load.getDst(), mrTy.getShape(), mrTy.getElementType());
+}
+
+static const char *scalingRoleToken(Type elemTy,
+                                    pto::TileBufConfigAttr configAttr) {
+  if (!isF8E8M0ElemType(elemTy))
+    return "TileType::Scaling";
+  pto::BLayout bl = getTileBufBLayoutValue(configAttr);
+  pto::SLayout sl = getTileBufSLayoutValue(configAttr);
+  if (bl == pto::BLayout::RowMajor && sl == pto::SLayout::RowMajor)
+    return "TileType::ScaleLeft";
+  if (bl == pto::BLayout::ColMajor && sl == pto::SLayout::ColMajor)
+    return "TileType::ScaleRight";
+  return "TileType::Scaling";
+}
+
+static const char *tileRoleToken(Attribute memorySpace,
+                                 std::optional<Type> elemType = std::nullopt,
+                                 std::optional<pto::TileBufConfigAttr> configAttr = std::nullopt) {
   if (auto asAttr = dyn_cast_or_null<pto::AddressSpaceAttr>(memorySpace)) {
     switch (asAttr.getAddressSpace()) {
     case pto::AddressSpace::VEC:
@@ -587,6 +742,8 @@ static const char *tileRoleToken(Attribute memorySpace) {
     case pto::AddressSpace::BIAS:
       return "TileType::Bias";
     case pto::AddressSpace::SCALING:
+      if (elemType && configAttr)
+        return scalingRoleToken(*elemType, *configAttr);
       return "TileType::Scaling";
     case pto::AddressSpace::GM:
     case pto::AddressSpace::Zero:
@@ -594,6 +751,20 @@ static const char *tileRoleToken(Attribute memorySpace) {
     }
   }
   return "TileType::Vec";
+}
+
+static const char *inferScalingRoleFromValue(Value value) {
+  auto opaqueTy = dyn_cast<emitc::OpaqueType>(value.getType());
+  if (!opaqueTy)
+    return nullptr;
+  StringRef token = opaqueTy.getValue();
+  if (token.contains("TileType::ScaleLeft"))
+    return "TileType::ScaleLeft";
+  if (token.contains("TileType::ScaleRight"))
+    return "TileType::ScaleRight";
+  if (token.contains("TileType::Scaling"))
+    return "TileType::Scaling";
+  return nullptr;
 }
 
 static std::string tileBufCompactToken(pto::TileBufConfigAttr configAttr) {
@@ -641,11 +812,25 @@ static std::optional<std::string> getEmitCTileTypeString(pto::TileBufType type) 
           ? "-1"
           : std::to_string(render(validShape[1], 1));
 
+  if (auto asAttr = dyn_cast_or_null<pto::AddressSpaceAttr>(type.getMemorySpace())) {
+    if (isLowPrecisionCubeOperandType(elemTy)) {
+      if (asAttr.getAddressSpace() == pto::AddressSpace::LEFT &&
+          shape[0] != 1 &&
+          validShape[1] != ShapedType::kDynamic) {
+        vcolTok = std::to_string(render(cols, 1));
+      } else if (asAttr.getAddressSpace() == pto::AddressSpace::RIGHT &&
+                 validShape[0] != ShapedType::kDynamic) {
+        vrowTok = std::to_string(render(rows, 0));
+      }
+    }
+  }
+
   int32_t fractal = 512;
   if (auto frAttr = dyn_cast<IntegerAttr>(configAttr.getSFractalSize()))
     fractal = frAttr.getInt();
 
-  return std::string("Tile<") + tileRoleToken(type.getMemorySpace()) + ", " +
+  return std::string("Tile<") +
+         tileRoleToken(type.getMemorySpace(), elemTy, type.getConfigAttr()) + ", " +
          getEmitCScalarTypeToken(elemTy) + ", " +
          std::to_string(render(rows, 0)) + ", " +
          std::to_string(render(cols, 1)) + ", " +
@@ -681,6 +866,11 @@ public:
 
     addConversion([Ctx](pto::HiF8Type) -> Type {
       return emitc::OpaqueType::get(Ctx, "hifloat8_t");
+    });
+    addConversion([Ctx](Type type) -> std::optional<Type> {
+      if (isF8E8M0ElemType(type))
+        return emitc::OpaqueType::get(Ctx, "float8_e8m0_t");
+      return std::nullopt;
     });
     addConversion([Ctx](pto::F4E1M2x2Type) -> Type {
       return emitc::OpaqueType::get(Ctx, "float4_e1m2x2_t");
@@ -3532,15 +3722,25 @@ struct SubviewToEmitCPattern : public OpConversionPattern<memref::SubViewOp> {
     std::string shapeParams = joinIntTemplateParams(finalShape);
     std::string strideParams = joinIntTemplateParams(finalStride);
 
+    auto resolvedLayout = resolveLayoutForGlobalTensor(op, op.getSource());
+    auto specialScaleSpec = getSpecialGlobalTensorTypeSpecForLayout(
+        resolvedLayout, resTy.getShape(), resTy.getElementType());
+
     // Spelled-out C++ types.
-    std::string shapeCppType = "pto::Shape<" + shapeParams + ">";
-    std::string strideCppType = "pto::Stride<" + strideParams + ">";
+    std::string shapeCppType = specialScaleSpec
+                                   ? specialScaleSpec->shapeTypeExpr
+                                   : "pto::Shape<" + shapeParams + ">";
+    std::string strideCppType = specialScaleSpec
+                                    ? specialScaleSpec->strideTypeExpr
+                                    : "pto::Stride<" + strideParams + ">";
 
     // 3.0 Layout: prefer the attribute from InferPTOLayout; only fall back to
     // local inference when the pass is disabled.
     std::string layoutEnum = "pto::Layout::ND";
-    if (auto layout = resolveLayoutForGlobalTensor(op, op.getSource())) {
-      layoutEnum = layoutToEmitCString(*layout);
+    if (specialScaleSpec) {
+      layoutEnum = specialScaleSpec->layoutEnum;
+    } else if (resolvedLayout) {
+      layoutEnum = layoutToEmitCString(*resolvedLayout);
     } else {
       bool allStatic =
           llvm::all_of(finalShape, [](int64_t value) { return value != -1; }) &&
@@ -3840,15 +4040,24 @@ static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
   SmallVector<int64_t, 5> stride5D;
   buildGlobalTensorShapeAndStride(shape, strides, shape5D, stride5D);
 
-  rewriter.create<emitc::VerbatimOp>(
-      loc, "using " + names.shapeTypeName + " = pto::Shape<" +
-               joinIntTemplateParams(shape5D) + ">;");
-  rewriter.create<emitc::VerbatimOp>(
-      loc, "using " + names.strideTypeName + " = pto::Stride<" +
-               joinIntTemplateParams(stride5D) + ">;");
+  std::string layoutEnum;
+  if (auto spec = getSpecialScaleGlobalTensorTypeSpec(anchor, mrTy)) {
+    rewriter.create<emitc::VerbatimOp>(
+        loc, "using " + names.shapeTypeName + " = " + spec->shapeTypeExpr + ";");
+    rewriter.create<emitc::VerbatimOp>(
+        loc, "using " + names.strideTypeName + " = " + spec->strideTypeExpr + ";");
+    layoutEnum = spec->layoutEnum;
+  } else {
+    rewriter.create<emitc::VerbatimOp>(
+        loc, "using " + names.shapeTypeName + " = pto::Shape<" +
+                 joinIntTemplateParams(shape5D) + ">;");
+    rewriter.create<emitc::VerbatimOp>(
+        loc, "using " + names.strideTypeName + " = pto::Stride<" +
+                 joinIntTemplateParams(stride5D) + ">;");
+    layoutEnum = resolveGlobalTensorLayout(anchor, basePtr, shape5D, stride5D,
+                                           mrTy.getElementType());
+  }
 
-  std::string layoutEnum = resolveGlobalTensorLayout(
-      anchor, basePtr, shape5D, stride5D, mrTy.getElementType());
   rewriter.create<emitc::VerbatimOp>(loc, "constexpr pto::Layout " +
                                               names.layoutConstName + " = " +
                                               layoutEnum + ";");
@@ -3984,6 +4193,12 @@ static pto::BLayout getTileBufBLayoutValue(pto::TileBufConfigAttr configAttr) {
   if (auto blAttr = dyn_cast<BLayoutAttr>(configAttr.getBLayout()))
     return blAttr.getValue();
   return pto::BLayout::RowMajor;
+}
+
+static pto::SLayout getTileBufSLayoutValue(pto::TileBufConfigAttr configAttr) {
+  if (auto slAttr = dyn_cast<SLayoutAttr>(configAttr.getSLayout()))
+    return slAttr.getValue();
+  return pto::SLayout::NoneBox;
 }
 
 static int64_t renderTileTemplateDim(int64_t rawDim, Type elemTy,
@@ -4202,6 +4417,30 @@ struct PointerCastConversion : public OpConversionPattern<pto::PointerCastOp> {
         if (peelUnrealized(mmacc.getLhs()) == op.getResult()) return TileRole::Left;
         if (peelUnrealized(mmacc.getRhs()) == op.getResult()) return TileRole::Right;
       }
+      if (auto tgemv = dyn_cast<pto::TGemvMxOp>(user)) {
+        if (peelUnrealized(tgemv.getAScale()) == op.getResult()) return TileRole::Left;
+        if (peelUnrealized(tgemv.getBScale()) == op.getResult()) return TileRole::Right;
+      }
+      if (auto tgemvAcc = dyn_cast<pto::TGemvMxAccOp>(user)) {
+        if (peelUnrealized(tgemvAcc.getAScale()) == op.getResult()) return TileRole::Left;
+        if (peelUnrealized(tgemvAcc.getBScale()) == op.getResult()) return TileRole::Right;
+      }
+      if (auto tgemvBias = dyn_cast<pto::TGemvMxBiasOp>(user)) {
+        if (peelUnrealized(tgemvBias.getAScale()) == op.getResult()) return TileRole::Left;
+        if (peelUnrealized(tgemvBias.getBScale()) == op.getResult()) return TileRole::Right;
+      }
+      if (auto tmatmulMx = dyn_cast<pto::TMatmulMxOp>(user)) {
+        if (peelUnrealized(tmatmulMx.getAScale()) == op.getResult()) return TileRole::Left;
+        if (peelUnrealized(tmatmulMx.getBScale()) == op.getResult()) return TileRole::Right;
+      }
+      if (auto tmatmulMxAcc = dyn_cast<pto::TMatmulMxAccOp>(user)) {
+        if (peelUnrealized(tmatmulMxAcc.getAScale()) == op.getResult()) return TileRole::Left;
+        if (peelUnrealized(tmatmulMxAcc.getBScale()) == op.getResult()) return TileRole::Right;
+      }
+      if (auto tmatmulMxBias = dyn_cast<pto::TMatmulMxBiasOp>(user)) {
+        if (peelUnrealized(tmatmulMxBias.getAScale()) == op.getResult()) return TileRole::Left;
+        if (peelUnrealized(tmatmulMxBias.getBScale()) == op.getResult()) return TileRole::Right;
+      }
     }
 
     return TileRole::Vec;
@@ -4252,7 +4491,12 @@ struct PointerCastConversion : public OpConversionPattern<pto::PointerCastOp> {
       case TileRole::Bias:  roleTok = "TileType::Bias"; break;
       case TileRole::Mat:   roleTok = "TileType::Mat"; break;
       case TileRole::Vec:   roleTok = "TileType::Vec"; break;
-      case TileRole::Scaling: roleTok = "TileType::Scaling"; break;
+      case TileRole::Scaling:
+        if (auto configOpt = op.getConfig())
+          roleTok = scalingRoleToken(elemType, *configOpt);
+        else
+          roleTok = "TileType::Scaling";
+        break;
     }
 
     // 4. Config & Layout (support BLayoutAttr/SLayoutAttr/PadValueAttr after namespace change)
@@ -6048,10 +6292,52 @@ struct PTOGetScaleAddrToEmitC
     Value src = peelUnrealized(adaptor.getSrc());
     Value dst = peelUnrealized(adaptor.getDst());
 
+    std::optional<pto::AddressSpace> srcSpace;
+    Type srcElemTy;
+    if (auto srcTy = dyn_cast<MemRefType>(op.getSrc().getType())) {
+      if (auto asAttr =
+              dyn_cast_or_null<pto::AddressSpaceAttr>(srcTy.getMemorySpace()))
+        srcSpace = asAttr.getAddressSpace();
+      srcElemTy = srcTy.getElementType();
+    } else if (auto srcTy = dyn_cast<pto::TileBufType>(op.getSrc().getType())) {
+      if (auto asAttr =
+              dyn_cast_or_null<pto::AddressSpaceAttr>(srcTy.getMemorySpace()))
+        srcSpace = asAttr.getAddressSpace();
+      srcElemTy = srcTy.getElementType();
+    }
+    if (!srcSpace || !srcElemTy)
+      return rewriter.notifyMatchFailure(
+          op, "failed to resolve src address space or element type");
+
+    std::string srcElemTok = getEmitCScalarTypeToken(srcElemTy);
+    auto isEmitCTileLike = [](Type ty) {
+      auto opaqueTy = dyn_cast<emitc::OpaqueType>(ty);
+      return opaqueTy &&
+             (opaqueTy.getValue().contains("Tile<") ||
+              opaqueTy.getValue().contains("ConvTile<"));
+    };
+    if (!isEmitCTileLike(src.getType()))
+      return rewriter.notifyMatchFailure(op,
+                                         "expected src to lower to a tile-like value");
+    Value rawPtr = src;
+    rawPtr = materializeTileDataValue(rewriter, loc, src, *srcSpace, srcElemTok);
+    if (tileDataReturnsIntegralAddress(*srcSpace))
+      rawPtr = materializeAddressAsPointer(rewriter, loc, rawPtr, *srcSpace,
+                                           srcElemTok);
+
+    auto u64Ty = emitc::OpaqueType::get(rewriter.getContext(), "uint64_t");
+    auto scaleAddr = rewriter
+                         .create<emitc::CallOpaqueOp>(
+                             loc, TypeRange{u64Ty}, "GetScaleAddr",
+                             /*args=*/ArrayAttr{},
+                             /*templateArgs=*/ArrayAttr{},
+                             /*operands=*/ValueRange{rawPtr})
+                         .getResult(0);
+
     rewriter.create<emitc::CallOpaqueOp>(
-        loc, TypeRange{}, "TGET_SCALE_ADDR",
+        loc, TypeRange{}, "TASSIGN",
         /*args=*/ArrayAttr{}, /*templateArgs=*/ArrayAttr{},
-        /*operands=*/ValueRange{dst, src});
+        /*operands=*/ValueRange{dst, scaleAddr});
 
     rewriter.eraseOp(op);
     return success();
@@ -7217,6 +7503,7 @@ static std::optional<int64_t> getStaticIndexLikeValue(Value value) {
 static FailureOr<Value> buildGlobalTensorViewFromPointer(
     ConversionPatternRewriter &rewriter, Location loc, Value ptr, Type elemTy,
     ArrayRef<int64_t> shape, ArrayRef<int64_t> strides = {},
+    std::optional<SpecialGlobalTensorTypeSpec> specialSpec = std::nullopt,
     StringRef layoutEnum = "pto::Layout::ND") {
   if (llvm::any_of(shape, [](int64_t dim) {
         return dim == ShapedType::kDynamic;
@@ -7234,9 +7521,16 @@ static FailureOr<Value> buildGlobalTensorViewFromPointer(
   SmallVector<int64_t, 5> stride5D;
   buildGlobalTensorShapeAndStride(shape, effectiveStrides, shape5D, stride5D);
 
-  std::string shapeType = "pto::Shape<" + joinIntTemplateParams(shape5D) + ">";
-  std::string strideType =
-      "pto::Stride<" + joinIntTemplateParams(stride5D) + ">";
+  std::string shapeType;
+  std::string strideType;
+  if (specialSpec) {
+    shapeType = specialSpec->shapeTypeExpr;
+    strideType = specialSpec->strideTypeExpr;
+    layoutEnum = specialSpec->layoutEnum;
+  } else {
+    shapeType = "pto::Shape<" + joinIntTemplateParams(shape5D) + ">";
+    strideType = "pto::Stride<" + joinIntTemplateParams(stride5D) + ">";
+  }
   auto shapeVal = rewriter
                       .create<emitc::CallOpaqueOp>(
                           loc, emitc::OpaqueType::get(ctx, shapeType),
@@ -7418,7 +7712,15 @@ struct PTOPartitionViewToEmitC
 
     auto resultOr = buildGlobalTensorViewFromPointer(
         rewriter, op.getLoc(), ptr, resTy.getElementType(), resTy.getShape(),
-        srcStrides);
+        srcStrides,
+        getSpecialGlobalTensorTypeSpecForLayout(
+            resolveLayoutForGlobalTensor(op.getOperation(), op.getSource()),
+            resTy.getShape(), resTy.getElementType()),
+        resolveLayoutForGlobalTensor(op.getOperation(), op.getSource())
+                ? layoutToEmitCString(
+                      *resolveLayoutForGlobalTensor(op.getOperation(),
+                                                    op.getSource()))
+                : "pto::Layout::ND");
     if (failed(resultOr))
       return rewriter.notifyMatchFailure(
           op, "failed to materialize partition GlobalTensor");
@@ -7648,7 +7950,10 @@ struct ReinterpretCastToEmitC : public OpConversionPattern<memref::ReinterpretCa
       roleTok = "TileType::Vec";
       break;
     case pto::AddressSpace::SCALING:
-      roleTok = "TileType::Scaling";
+      if (const char *inferredRole = inferScalingRoleFromValue(source))
+        roleTok = inferredRole;
+      else
+        roleTok = "TileType::Scaling";
       break;
     }
 
@@ -11159,6 +11464,12 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
     SmallVector<Value> constructorArgs;
   };
 
+  enum class MxValidAlignPolicy {
+    None,
+    AlignRowToShape,
+    AlignColToShape,
+  };
+
   static bool getIndexConst(Value v, int64_t &out) {
     if (!v)
       return false;
@@ -11281,8 +11592,11 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
         return failure();
 
       const char *roleTok = "TileType::Vec";
+      pto::AddressSpace resultAS = pto::AddressSpace::GM;
+      Type elemTy = resMrTy.getElementType();
       if (auto asAttr =
               dyn_cast_or_null<pto::AddressSpaceAttr>(resMrTy.getMemorySpace())) {
+        resultAS = asAttr.getAddressSpace();
         switch (asAttr.getAddressSpace()) {
         case pto::AddressSpace::VEC:
           roleTok = "TileType::Vec";
@@ -11303,7 +11617,7 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
           roleTok = "TileType::Bias";
           break;
         case pto::AddressSpace::SCALING:
-          roleTok = "TileType::Scaling";
+          roleTok = scalingRoleToken(elemTy, configAttr);
           break;
         case pto::AddressSpace::GM:
         case pto::AddressSpace::Zero:
@@ -11312,7 +11626,6 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
         }
       }
 
-      Type elemTy = resMrTy.getElementType();
       Type emitElemTy = getTypeConverter()->convertType(elemTy);
       if (!emitElemTy)
         return failure();
@@ -11327,6 +11640,84 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
       int64_t cols = resMrTy.getDimSize(1);
       if (rows == ShapedType::kDynamic || cols == ShapedType::kDynamic)
         return failure();
+
+      auto inferMxValidAlignPolicy = [&]() -> MxValidAlignPolicy {
+        auto matchTMatmulMxLike = [&](auto user) -> MxValidAlignPolicy {
+          if (resultAS == pto::AddressSpace::LEFT &&
+              peelAllCasts(user.getA()) == op.getResult())
+            return MxValidAlignPolicy::AlignColToShape;
+          if (resultAS == pto::AddressSpace::RIGHT &&
+              peelAllCasts(user.getB()) == op.getResult())
+            return MxValidAlignPolicy::AlignRowToShape;
+          return MxValidAlignPolicy::None;
+        };
+        auto matchTGemvMxLike = [&](auto user) -> MxValidAlignPolicy {
+          if (resultAS == pto::AddressSpace::RIGHT &&
+              peelAllCasts(user.getB()) == op.getResult())
+            return MxValidAlignPolicy::AlignRowToShape;
+          return MxValidAlignPolicy::None;
+        };
+
+        auto walkUsers = [&](auto &&self, Value value) -> MxValidAlignPolicy {
+          for (Operation *user : value.getUsers()) {
+            if (auto unrealized = dyn_cast<UnrealizedConversionCastOp>(user)) {
+              for (Value result : unrealized.getResults()) {
+                if (auto policy = self(self, result);
+                    policy != MxValidAlignPolicy::None)
+                  return policy;
+              }
+              continue;
+            }
+            if (auto cast = dyn_cast<memref::CastOp>(user)) {
+              if (auto policy = self(self, cast.getResult());
+                  policy != MxValidAlignPolicy::None)
+                return policy;
+              continue;
+            }
+
+          if (auto tmatmul = dyn_cast<pto::TMatmulMxOp>(user)) {
+            auto policy = matchTMatmulMxLike(tmatmul);
+            if (policy != MxValidAlignPolicy::None)
+              return policy;
+            continue;
+          }
+          if (auto tmatmulAcc = dyn_cast<pto::TMatmulMxAccOp>(user)) {
+            auto policy = matchTMatmulMxLike(tmatmulAcc);
+            if (policy != MxValidAlignPolicy::None)
+              return policy;
+            continue;
+          }
+          if (auto tmatmulBias = dyn_cast<pto::TMatmulMxBiasOp>(user)) {
+            auto policy = matchTMatmulMxLike(tmatmulBias);
+            if (policy != MxValidAlignPolicy::None)
+              return policy;
+            continue;
+          }
+          if (auto tgemv = dyn_cast<pto::TGemvMxOp>(user)) {
+            auto policy = matchTGemvMxLike(tgemv);
+            if (policy != MxValidAlignPolicy::None)
+              return policy;
+            continue;
+          }
+          if (auto tgemvAcc = dyn_cast<pto::TGemvMxAccOp>(user)) {
+            auto policy = matchTGemvMxLike(tgemvAcc);
+            if (policy != MxValidAlignPolicy::None)
+              return policy;
+            continue;
+          }
+          if (auto tgemvBias = dyn_cast<pto::TGemvMxBiasOp>(user)) {
+            auto policy = matchTGemvMxLike(tgemvBias);
+            if (policy != MxValidAlignPolicy::None)
+              return policy;
+            continue;
+          }
+        }
+          return MxValidAlignPolicy::None;
+        };
+        return walkUsers(walkUsers, op.getResult());
+      };
+
+      MxValidAlignPolicy mxValidAlignPolicy = inferMxValidAlignPolicy();
 
       std::string blTok = "BLayout::RowMajor";
       if (auto blAttr = dyn_cast<BLayoutAttr>(configAttr.getBLayout())) {
@@ -11485,6 +11876,31 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
             constructorArgs.push_back(maybeScaleDynamicValid(vRowEmitC, 0));
           if (colIsDynamic && vColEmitC)
             constructorArgs.push_back(maybeScaleDynamicValid(vColEmitC, 1));
+        }
+      }
+
+      if (!forceDynamicValid) {
+        bool alignedByRole = false;
+        if (isLowPrecisionCubeOperandType(elemTy)) {
+          if (resultAS == pto::AddressSpace::LEFT && rows != 1 && !vcolTok.empty() &&
+              vcolTok != "-1") {
+            vcolTok = std::to_string(
+                renderTileTemplateDim(cols, elemTy, blayout, 1));
+            alignedByRole = true;
+          } else if (resultAS == pto::AddressSpace::RIGHT && !vrowTok.empty() &&
+                     vrowTok != "-1") {
+            vrowTok = std::to_string(
+                renderTileTemplateDim(rows, elemTy, blayout, 0));
+            alignedByRole = true;
+          }
+        }
+        if (!alignedByRole) {
+          if (mxValidAlignPolicy == MxValidAlignPolicy::AlignRowToShape)
+            vrowTok = std::to_string(
+                renderTileTemplateDim(rows, elemTy, blayout, 0));
+          if (mxValidAlignPolicy == MxValidAlignPolicy::AlignColToShape)
+            vcolTok = std::to_string(
+                renderTileTemplateDim(cols, elemTy, blayout, 1));
         }
       }
 

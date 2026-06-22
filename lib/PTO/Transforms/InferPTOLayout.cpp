@@ -76,6 +76,18 @@ static unsigned elemByteSize(Type ty) {
   return getPTOStorageElemByteSize(ty);
 }
 
+static bool isF8E8M0ElemType(Type ty) {
+  return getPTOStorageElemByteSize(ty) == 1 && isa<Type>(ty) &&
+         ty.getTypeID() == ty.getTypeID() &&
+         [&]() {
+           std::string buffer;
+           llvm::raw_string_ostream os(buffer);
+           os << ty;
+           os.flush();
+           return buffer == "!pto.f8E8M0";
+         }();
+}
+
 static bool isGlobalMemRef(MemRefType ty) {
   if (auto asAttr =
           dyn_cast_or_null<pto::AddressSpaceAttr>(ty.getMemorySpace())) {
@@ -346,7 +358,7 @@ struct LayoutPreference {
 static LayoutPreference collectPreferredLayoutFromConsumers(Value tensorView) {
   LayoutPreference result;
   auto mergePref = [&](std::optional<Layout> candidate) {
-    if (!candidate || (*candidate != Layout::ND && *candidate != Layout::DN))
+    if (!candidate)
       return;
     if (!result.preferred) {
       result.preferred = candidate;
@@ -370,8 +382,31 @@ static LayoutPreference collectPreferredLayoutFromConsumers(Value tensorView) {
       }
 
       if (auto load = dyn_cast<pto::TLoadOp>(owner)) {
-        if (operandIndex == 0 && isVectorTileType(load.getDst().getType()))
-          mergePref(tileBLayoutToGlobalLayout(load.getDst().getType()));
+        if (operandIndex == 0) {
+          if (auto dstTy = dyn_cast<TileBufType>(load.getDst().getType())) {
+            auto dstSpace =
+                dyn_cast_or_null<AddressSpaceAttr>(dstTy.getMemorySpace());
+            if (dstSpace &&
+                dstSpace.getAddressSpace() == AddressSpace::MAT &&
+                isF8E8M0ElemType(dstTy.getElementType())) {
+              auto cfg = dstTy.getConfigAttr();
+              auto bl = dyn_cast_or_null<BLayoutAttr>(cfg.getBLayout());
+              auto sl = dyn_cast_or_null<SLayoutAttr>(cfg.getSLayout());
+              if (bl && sl) {
+                if (bl.getValue() == BLayout::RowMajor &&
+                    sl.getValue() == SLayout::RowMajor &&
+                    dstTy.getShape().size() == 2 && dstTy.getShape()[0] != 1) {
+                  mergePref(Layout::MX_A_ZZ);
+                } else if (bl.getValue() == BLayout::ColMajor &&
+                           sl.getValue() == SLayout::ColMajor) {
+                  mergePref(Layout::MX_B_NN);
+                }
+              }
+            } else if (isVectorTileType(dstTy)) {
+              mergePref(tileBLayoutToGlobalLayout(dstTy));
+            }
+          }
+        }
         continue;
       }
 
@@ -391,6 +426,10 @@ static std::optional<Layout> inferMakeTensorViewLayout(
     MakeTensorViewOp op, ArrayRef<int64_t> shape, ArrayRef<int64_t> strides,
     bool &isAmbiguous) {
   auto pref = collectPreferredLayoutFromConsumers(op.getResult());
+  if (!pref.conflict && pref.preferred &&
+      (*pref.preferred == Layout::MX_A_ZZ ||
+       *pref.preferred == Layout::MX_B_NN))
+    return pref.preferred;
   std::optional<Layout> preferredForAmbiguous = std::nullopt;
   if (!pref.conflict && isMinorColsOne(shape))
     preferredForAmbiguous = pref.preferred;
