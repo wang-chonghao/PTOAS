@@ -341,6 +341,10 @@ std::optional<TileOpPatternSpec> lookupTileOpPatternSpec(StringRef opName) {
                                     VfOpcode::VMUL, 2, 0})
           .Case("tdiv", PatternKey{TilePatternKind::BinaryElementwise,
                                     VfOpcode::VDIV, 2, 0})
+          .Case("tmax", PatternKey{TilePatternKind::BinaryElementwise,
+                                    VfOpcode::VMAX, 2, 0})
+          .Case("tmin", PatternKey{TilePatternKind::BinaryElementwise,
+                                    VfOpcode::VMIN, 2, 0})
           .Case("texp", PatternKey{TilePatternKind::UnaryElementwise,
                                     VfOpcode::VEXP, 1, 0})
           .Case("tadds", PatternKey{TilePatternKind::ScaleElementwise,
@@ -351,6 +355,10 @@ std::optional<TileOpPatternSpec> lookupTileOpPatternSpec(StringRef opName) {
                                      VfOpcode::VMULS, 1, 1})
           .Case("tdivs", PatternKey{TilePatternKind::ScaleElementwise,
                                      VfOpcode::VDIVS, 1, 1})
+          .Case("tmaxs", PatternKey{TilePatternKind::ScaleElementwise,
+                                     VfOpcode::VMAXS, 1, 1})
+          .Case("tmins", PatternKey{TilePatternKind::ScaleElementwise,
+                                     VfOpcode::VMINS, 1, 1})
           .Default(std::nullopt);
   if (!key)
     return std::nullopt;

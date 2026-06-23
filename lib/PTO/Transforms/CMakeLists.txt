@@ -48,6 +48,15 @@ add_mlir_dialect_library(PTOTransforms
   ../VFcostmodel/VfCostModel.cpp
   ../VFcostmodel/VfSimProgram.cpp
   ../VFcostmodel/VfLatencyModel.cpp
+  ../VFcostmodel/VfSimulator/Json.cpp
+  ../VFcostmodel/VfSimulator/ParamDB.cpp
+  ../VFcostmodel/VfSimulator/ISATraits.cpp
+  ../VFcostmodel/VfSimulator/ProgramAnalysis.cpp
+  ../VFcostmodel/VfSimulator/ProgramFlatten.cpp
+  ../VFcostmodel/VfSimulator/IFU.cpp
+  ../VFcostmodel/VfSimulator/IDU.cpp
+  ../VFcostmodel/VfSimulator/OOO.cpp
+  ../VFcostmodel/VfSimulator/SimulatorRunner.cpp
   InsertSync/PTOInsertSync.cpp
   PTOInjectBarrierAllSync.cpp
   InsertSync/InsertSyncDebug.cpp
@@ -150,4 +159,33 @@ target_include_directories(PTOTransforms INTERFACE
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
   $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(PTOTransforms PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+
+target_compile_definitions(PTOTransforms PRIVATE
+  PTOAS_VFSIM_ROOT="${PROJECT_SOURCE_DIR}"
+)
+
+target_compile_options(PTOTransforms PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-fexceptions>
+)
+
+set(PTO_NATIVE_VFSIM_SOURCES
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/Json.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/ParamDB.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/ISATraits.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/ProgramAnalysis.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/ProgramFlatten.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/IFU.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/IDU.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/OOO.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfSimulator/SimulatorRunner.cpp
+  ${PROJECT_SOURCE_DIR}/lib/PTO/VFcostmodel/VfLatencyModel.cpp
+)
+
+set_source_files_properties(${PTO_NATIVE_VFSIM_SOURCES}
+  PROPERTIES COMPILE_FLAGS "-fexceptions"
 )
