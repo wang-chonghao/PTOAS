@@ -115,6 +115,14 @@ CASE_POINTER_COUNT_MINIMUMS = {
         "v1": 123648,
         "v2": 123648,
     },
+    "tquant_mx": {
+        # The generated MX auxiliary tiles use 1x32 Vec storage even though
+        # the logical tensor views are 1x16. Keep the GM backing buffers large
+        # enough for the lowered TSTORE footprint on A5.
+        "v3": 32,
+        "v4": 32,
+        "v5": 32,
+    },
     **{
         testcase: {
             "v1": 1024 * 4096,
