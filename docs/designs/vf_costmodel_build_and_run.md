@@ -238,92 +238,299 @@ loop 0 trip_count=16 unroll=1
 - 动态 shape 当前不作为第一阶段支持目标。
 - vector lane 相关参数后续应继续和 PTOAS/VPTO 后端配置统一，目前还有进一步收敛空间。
 
-## 4. 从头构建环境
+## 4. 新机器从零配置环境
 
-### 4.1 拉取代码
+本节按 Ubuntu/WSL 环境写。目标是从一台干净机器开始，最终跑出：
+
+```text
+[pto-fusion-plan] VF latency cycles=82
+```
+
+PTOAS 依赖 LLVM/MLIR `llvmorg-19.1.7`。如果机器上没有可用的 LLVM/MLIR 19.1.7，需要先编译 LLVM。
+
+### 4.1 推荐目录结构
+
+先建一个统一工作目录：
 
 ```bash
+export WORKSPACE_DIR=$HOME/ptoas-workspace
+export LLVM_SOURCE_DIR=$WORKSPACE_DIR/llvm-project
+export LLVM_BUILD_DIR=$LLVM_SOURCE_DIR/build-shared
+export PTO_SOURCE_DIR=$WORKSPACE_DIR/PTOAS
+export PTO_BUILD_DIR=$PTO_SOURCE_DIR/build-vf-costmodel
+export PTO_INSTALL_DIR=$PTO_SOURCE_DIR/install-vf-costmodel
+
+mkdir -p "$WORKSPACE_DIR"
+```
+
+后续命令默认这些变量已经设置。换 shell 后需要重新 export，或者写入自己的环境脚本。
+
+### 4.2 安装系统依赖
+
+Ubuntu/WSL：
+
+```bash
+sudo apt update
+sudo apt install -y \
+  git \
+  cmake \
+  ninja-build \
+  build-essential \
+  clang \
+  lld \
+  python3 \
+  python3-pip \
+  python3-venv \
+  zlib1g-dev \
+  libzstd-dev
+```
+
+检查版本：
+
+```bash
+cmake --version
+ninja --version
+python3 --version
+clang++ --version
+```
+
+基本要求：
+
+- CMake >= 3.20。
+- Python >= 3.8。
+- C++ 编译器支持 C++17。
+
+### 4.3 创建 Python 虚拟环境
+
+建议新机器上使用 venv，避免污染系统 Python：
+
+```bash
+cd "$WORKSPACE_DIR"
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install pybind11==2.12.0 numpy lit
+```
+
+说明：
+
+- `pybind11==2.12.0` 是为了兼容当前 LLVM/MLIR Python binding。
+- `lit` 用于后续跑 LLVM/MLIR 风格测试，不跑测试时不是必须，但建议安装。
+
+确认：
+
+```bash
+python -m pybind11 --cmakedir
+```
+
+### 4.4 下载并编译 LLVM/MLIR 19.1.7
+
+如果机器上已经有 LLVM/MLIR 19.1.7，可以跳到 4.5。
+
+下载源码：
+
+```bash
+cd "$WORKSPACE_DIR"
+git clone https://github.com/llvm/llvm-project.git
+cd "$LLVM_SOURCE_DIR"
+git checkout llvmorg-19.1.7
+```
+
+配置 LLVM/MLIR：
+
+```bash
+cmake -G Ninja -S llvm -B "$LLVM_BUILD_DIR" \
+  -DLLVM_ENABLE_PROJECTS="mlir;clang" \
+  -DBUILD_SHARED_LIBS=ON \
+  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+  -DPython3_EXECUTABLE="$(which python)" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_TARGETS_TO_BUILD="host"
+```
+
+编译：
+
+```bash
+cmake --build "$LLVM_BUILD_DIR" -j2
+```
+
+新机器第一次编译 LLVM 会比较久。WSL 内存不稳定时先用 `-j2`，确认稳定后再提高并行度。
+
+验证 LLVM：
+
+```bash
+"$LLVM_BUILD_DIR/bin/llvm-config" --version
+```
+
+预期输出：
+
+```text
+19.1.7
+```
+
+### 4.5 如果已有 LLVM/MLIR 19.1.7
+
+如果另一台机器已经安装了 LLVM/MLIR 19.1.7，例如在 `/opt/llvm`，可以不编译 LLVM，直接设置：
+
+```bash
+export LLVM_BUILD_DIR=/opt/llvm
+```
+
+然后确认：
+
+```bash
+"$LLVM_BUILD_DIR/bin/llvm-config" --version
+ls "$LLVM_BUILD_DIR/lib/cmake/llvm"
+ls "$LLVM_BUILD_DIR/lib/cmake/mlir"
+```
+
+如果 `llvm-config --version` 不是 `19.1.7`，不建议继续构建 PTOAS。
+
+### 4.6 下载 PTOAS VF CostModel 分支
+
+从 fork 拉取：
+
+```bash
+cd "$WORKSPACE_DIR"
 git clone https://github.com/wang-chonghao/PTOAS.git
-cd PTOAS
+cd "$PTO_SOURCE_DIR"
+git fetch origin
 git checkout vf-costmodel-phase1
 ```
 
-如果是在已有目录中：
+如果分支还没有推到远程，先在有代码的机器上执行：
 
 ```bash
 cd /mnt/e/vfsimulator_structure/PTOAS
-git checkout vf-costmodel-phase1
+git push -u myfork vf-costmodel-phase1
 ```
 
-### 4.2 准备编译环境
-
-如果使用已有 A5/PTO 环境脚本：
+确认当前分支：
 
 ```bash
-source /mnt/e/PTO/tools/wsl_env_a5_davc310.sh
+git branch --show-current
 ```
 
-然后检查关键工具：
-
-```bash
-which cmake
-which ninja
-which clang++
-```
-
-如果本地 LLVM/MLIR 环境没有配置好，CMake 可能找不到 MLIR/LLVM package。此时需要先按照 PTOAS README 或本地环境脚本配置 LLVM/MLIR 路径。
-
-### 4.3 配置 CMake
-
-建议使用独立构建目录：
-
-```bash
-cmake -S . -B build-vf-costmodel -G Ninja
-```
-
-如果 CMake 找不到 LLVM/MLIR，可以检查：
-
-```bash
-echo $LLVM_DIR
-echo $MLIR_DIR
-```
-
-必要时显式传入：
-
-```bash
-cmake -S . -B build-vf-costmodel -G Ninja \
-  -DLLVM_DIR=<path-to-llvm-cmake> \
-  -DMLIR_DIR=<path-to-mlir-cmake>
-```
-
-具体路径取决于本机 LLVM/MLIR 安装位置。
-
-### 4.4 编译 ptoas
-
-```bash
-cmake --build build-vf-costmodel --target ptoas -j2
-```
-
-建议先用 `-j2`。如果 WSL 内存或进程资源不稳定，不建议直接开很高并行度。
-
-编译完成后，二进制位置通常是：
+预期：
 
 ```text
-build-vf-costmodel/tools/ptoas/ptoas
+vf-costmodel-phase1
 ```
 
-检查：
+### 4.7 配置 PTOAS CMake
+
+进入 PTOAS：
 
 ```bash
-./build-vf-costmodel/tools/ptoas/ptoas --help
+cd "$PTO_SOURCE_DIR"
+export PYBIND11_CMAKE_DIR=$(python -m pybind11 --cmakedir)
 ```
 
-应能看到和 VF costmodel 相关的参数：
+配置：
+
+```bash
+cmake -G Ninja \
+  -S . \
+  -B "$PTO_BUILD_DIR" \
+  -DLLVM_DIR="$LLVM_BUILD_DIR/lib/cmake/llvm" \
+  -DMLIR_DIR="$LLVM_BUILD_DIR/lib/cmake/mlir" \
+  -DPython3_EXECUTABLE="$(which python)" \
+  -DPython3_FIND_STRATEGY=LOCATION \
+  -Dpybind11_DIR="$PYBIND11_CMAKE_DIR" \
+  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+  -DMLIR_PYTHON_PACKAGE_DIR="$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core" \
+  -DCMAKE_INSTALL_PREFIX="$PTO_INSTALL_DIR"
+```
+
+如果使用的是安装版 LLVM，例如 `/opt/llvm`，`MLIR_PYTHON_PACKAGE_DIR` 可能是：
+
+```text
+$LLVM_BUILD_DIR/python_packages/mlir_core
+```
+
+此时配置命令改成：
+
+```bash
+cmake -G Ninja \
+  -S . \
+  -B "$PTO_BUILD_DIR" \
+  -DLLVM_DIR="$LLVM_BUILD_DIR/lib/cmake/llvm" \
+  -DMLIR_DIR="$LLVM_BUILD_DIR/lib/cmake/mlir" \
+  -DPython3_EXECUTABLE="$(which python)" \
+  -DPython3_FIND_STRATEGY=LOCATION \
+  -Dpybind11_DIR="$PYBIND11_CMAKE_DIR" \
+  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+  -DMLIR_PYTHON_PACKAGE_DIR="$LLVM_BUILD_DIR/python_packages/mlir_core" \
+  -DCMAKE_INSTALL_PREFIX="$PTO_INSTALL_DIR"
+```
+
+如何判断用哪个 `MLIR_PYTHON_PACKAGE_DIR`：
+
+```bash
+ls "$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core" 2>/dev/null
+ls "$LLVM_BUILD_DIR/python_packages/mlir_core" 2>/dev/null
+```
+
+哪个存在就用哪个。
+
+### 4.8 编译 PTOAS
+
+只编译 `ptoas`：
+
+```bash
+cmake --build "$PTO_BUILD_DIR" --target ptoas -j2
+```
+
+也可以完整编译：
+
+```bash
+cmake --build "$PTO_BUILD_DIR" -j2
+```
+
+新机器建议先只编译 `ptoas`，能更快验证 VF CostModel 链路。
+
+编译产物：
+
+```text
+$PTO_BUILD_DIR/tools/ptoas/ptoas
+```
+
+验证：
+
+```bash
+"$PTO_BUILD_DIR/tools/ptoas/ptoas" --help | grep -E "dump-vf-program|enable-op-fusion"
+```
+
+预期能看到：
 
 ```text
 --dump-vf-program
 --dump-vf-program-json=<string>
+--enable-op-fusion
 ```
+
+### 4.9 配置运行时环境
+
+使用 build 目录运行 `ptoas` 时，设置：
+
+```bash
+export PATH="$PTO_BUILD_DIR/tools/ptoas:$PTO_BUILD_DIR/tools/ptobc:$PATH"
+export LD_LIBRARY_PATH="$LLVM_BUILD_DIR/lib:$PTO_BUILD_DIR/lib:$LD_LIBRARY_PATH"
+```
+
+如果需要 Python binding，再补：
+
+```bash
+if [ -d "$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core" ]; then
+  export MLIR_PYTHON_ROOT="$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core"
+else
+  export MLIR_PYTHON_ROOT="$LLVM_BUILD_DIR/python_packages/mlir_core"
+fi
+
+export PYTHONPATH="$MLIR_PYTHON_ROOT:$PTO_BUILD_DIR/python:$PYTHONPATH"
+```
+
+本 VF CostModel 最小验证只需要 CLI，不强制使用 Python binding。
 
 ## 5. 运行最小例子
 
@@ -373,6 +580,38 @@ loop 0 trip_count=16 unroll=1
 - 当前按 `256B` vector 宽度理解，`fp32` 每次处理 `64` 个元素。
 - 因此循环次数是 `1024 / 64 = 16`。
 - `VF latency cycles=82` 是 C++ VfSimulator 主线模型给出的预测结果。
+
+### 5.1 新环境 smoke test 顺序
+
+新机器上建议按下面顺序确认，每一步成功后再继续：
+
+```bash
+# 1. 确认 LLVM 版本
+"$LLVM_BUILD_DIR/bin/llvm-config" --version
+
+# 2. 确认 ptoas 可以启动
+"$PTO_BUILD_DIR/tools/ptoas/ptoas" --version
+
+# 3. 确认 VF CostModel 参数已经编进 ptoas
+"$PTO_BUILD_DIR/tools/ptoas/ptoas" --help | grep -E "dump-vf-program|enable-op-fusion"
+
+# 4. 跑最小 VF CostModel case
+"$PTO_BUILD_DIR/tools/ptoas/ptoas" \
+  --pto-arch=a5 \
+  --pto-level=level2 \
+  --enable-op-fusion \
+  --emit-pto-ir \
+  --dump-vf-program \
+  "$PTO_SOURCE_DIR/test/lit/tile_fusion/min_tadd_tmul.pto" \
+  -o /dev/null
+```
+
+第 4 步至少应该看到：
+
+```text
+[pto-fusion-plan] VF program for fusion group:
+[pto-fusion-plan] VF latency cycles=82
+```
 
 ## 6. 输出 JSON 方便调试
 
@@ -476,30 +715,103 @@ pto.last_use
 
 ### 8.3 CMake 找不到 MLIR/LLVM
 
-先确认环境脚本是否 source：
+先确认 `LLVM_BUILD_DIR` 是否指向正确位置：
 
 ```bash
-source /mnt/e/PTO/tools/wsl_env_a5_davc310.sh
+echo "$LLVM_BUILD_DIR"
+"$LLVM_BUILD_DIR/bin/llvm-config" --version
+ls "$LLVM_BUILD_DIR/lib/cmake/llvm"
+ls "$LLVM_BUILD_DIR/lib/cmake/mlir"
 ```
 
-再检查：
+如果 `llvm-config --version` 不是 `19.1.7`，需要切换到正确 LLVM。
+
+如果 `lib/cmake/llvm` 或 `lib/cmake/mlir` 不存在，说明当前路径不是可供 PTOAS 使用的 LLVM build/install root。
+
+重新配置 PTOAS 时显式传入：
 
 ```bash
-echo $LLVM_DIR
-echo $MLIR_DIR
+cmake -G Ninja \
+  -S . \
+  -B "$PTO_BUILD_DIR" \
+  -DLLVM_DIR="$LLVM_BUILD_DIR/lib/cmake/llvm" \
+  -DMLIR_DIR="$LLVM_BUILD_DIR/lib/cmake/mlir" \
+  -DPython3_EXECUTABLE="$(which python)" \
+  -DPython3_FIND_STRATEGY=LOCATION \
+  -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" \
+  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+  -DMLIR_PYTHON_PACKAGE_DIR="$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core" \
+  -DCMAKE_INSTALL_PREFIX="$PTO_INSTALL_DIR"
 ```
 
-如果仍然为空，需要按本机 LLVM/MLIR 安装路径显式传入 CMake。
+如果是安装版 LLVM，把 `MLIR_PYTHON_PACKAGE_DIR` 改成实际存在的路径。
 
 ### 8.4 WSL 编译中途退出
 
 优先降低并行度：
 
 ```bash
-cmake --build build-vf-costmodel --target ptoas -j2
+cmake --build "$PTO_BUILD_DIR" --target ptoas -j2
 ```
 
 不要直接使用很大的 `-j` 数。
+
+### 8.5 运行时找不到 libMLIR 或 libLLVM
+
+如果执行 `ptoas` 时出现类似：
+
+```text
+error while loading shared libraries: libMLIR*.so
+```
+
+设置：
+
+```bash
+export LD_LIBRARY_PATH="$LLVM_BUILD_DIR/lib:$PTO_BUILD_DIR/lib:$LD_LIBRARY_PATH"
+```
+
+然后重试：
+
+```bash
+"$PTO_BUILD_DIR/tools/ptoas/ptoas" --version
+```
+
+### 8.6 `git checkout vf-costmodel-phase1` 失败
+
+如果提示分支不存在，先确认远程分支：
+
+```bash
+git branch -a | grep vf-costmodel
+```
+
+如果远程确实没有该分支，说明本地修改还没有 push 到 fork。需要先在原机器执行：
+
+```bash
+cd /mnt/e/vfsimulator_structure/PTOAS
+git push -u myfork vf-costmodel-phase1
+```
+
+### 8.7 `MLIR_PYTHON_PACKAGE_DIR` 路径不存在
+
+源码 build 版 LLVM 常见路径：
+
+```text
+$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core
+```
+
+安装版 LLVM 常见路径：
+
+```text
+$LLVM_BUILD_DIR/python_packages/mlir_core
+```
+
+用下面命令确认：
+
+```bash
+find "$LLVM_BUILD_DIR" -path '*python_packages/mlir_core' -type d
+```
+
+找到实际路径后重新配置 PTOAS。
 
 ## 9. 后续计划
 
