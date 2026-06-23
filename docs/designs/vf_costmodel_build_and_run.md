@@ -439,6 +439,7 @@ cmake -G Ninja \
   -Dpybind11_DIR="$PYBIND11_CMAKE_DIR" \
   -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
   -DMLIR_PYTHON_PACKAGE_DIR="$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core" \
+  -DPTO_ENABLE_VPTO_LLVM_EMITTER=OFF \
   -DCMAKE_INSTALL_PREFIX="$PTO_INSTALL_DIR"
 ```
 
@@ -461,6 +462,7 @@ cmake -G Ninja \
   -Dpybind11_DIR="$PYBIND11_CMAKE_DIR" \
   -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
   -DMLIR_PYTHON_PACKAGE_DIR="$LLVM_BUILD_DIR/python_packages/mlir_core" \
+  -DPTO_ENABLE_VPTO_LLVM_EMITTER=OFF \
   -DCMAKE_INSTALL_PREFIX="$PTO_INSTALL_DIR"
 ```
 
@@ -488,6 +490,17 @@ cmake --build "$PTO_BUILD_DIR" -j2
 ```
 
 新机器建议先只编译 `ptoas`，能更快验证 VF CostModel 链路。
+
+注意：
+
+- `PTO_ENABLE_VPTO_LLVM_EMITTER` 在 PTOAS 顶层 CMake 中默认是 `ON`。
+- 该开关会编译 `VPTOLLVMEmitter.cpp`，其中包含 `LLVM::LLVMHiFloat8Type` 等 hif8/f8 相关 LLVM dialect 类型。
+- 某些 LLVM 19 包不包含这些类型，或者不同 LLVM 小版本接口不一致，会导致编译失败。
+- 当前 VF CostModel 的 tile fusion 验证不依赖 VPTO LLVM/fatobj emission，因此新环境建议显式设置：
+
+```text
+-DPTO_ENABLE_VPTO_LLVM_EMITTER=OFF
+```
 
 编译产物：
 
@@ -741,6 +754,7 @@ cmake -G Ninja \
   -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" \
   -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
   -DMLIR_PYTHON_PACKAGE_DIR="$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core" \
+  -DPTO_ENABLE_VPTO_LLVM_EMITTER=OFF \
   -DCMAKE_INSTALL_PREFIX="$PTO_INSTALL_DIR"
 ```
 
