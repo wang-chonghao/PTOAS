@@ -149,7 +149,7 @@ def main():
     # scaling_per_group is [16]; broadcast across each group of 32 to match src [16,32].
     scaling_broadcast = np.repeat(scaling_per_group, GROUP_SIZE).reshape(M, K).astype(np.float32)
     scaled = src.astype(np.float64) * scaling_broadcast.astype(np.float64)
-    scaled = scaled.astype(np.float32)
+    scaled = np.clip(scaled, -448.0, 448.0).astype(np.float32)
     dst_bytes = fp32_to_fp8e4m3fn_bytes(scaled)
     dst_bytes.tofile("golden.bin")
 

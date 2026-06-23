@@ -1160,10 +1160,10 @@ def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
 
 def PTO_QuantTypeEnum : PTO_I32Enum<
   "QuantType", "PTO quantization type", [
-    I32EnumAttrCase<"MXFP8", 0>,
-    I32EnumAttrCase<"MXFP4_E2M1", 1>,
-    I32EnumAttrCase<"INT8_SYM",  2>,
-    I32EnumAttrCase<"INT8_ASYM", 3>
+    I32EnumAttrCase<"INT8_SYM",  0>,
+    I32EnumAttrCase<"INT8_ASYM", 1>,
+    I32EnumAttrCase<"MXFP8", 2>,
+    I32EnumAttrCase<"MXFP4_E2M1", 3>
   ]>;
 
 def PTO_QuantTypeAttr : EnumAttr<PTO_Dialect, PTO_QuantTypeEnum, "quant_type"> {

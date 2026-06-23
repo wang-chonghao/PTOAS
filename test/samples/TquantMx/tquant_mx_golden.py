@@ -84,7 +84,7 @@ def fp32_to_fp8e4m3fn_bytes(arr):
     fp8_exp_r = fp8_exp + carry
     over_after_carry = inrange & (fp8_exp_r > 15)
     result = np.where(over_after_carry, (sign << np.int32(7)) | np.int32(0x7E), result)
-    inrange = inrange & (fp8_exp_r <= 14)
+    inrange = inrange & (fp8_exp_r <= 15)
     assembled = (sign << np.int32(7)) | (fp8_exp_r << np.int32(3)) | m_rounded
     result = np.where(inrange, assembled, result)
 

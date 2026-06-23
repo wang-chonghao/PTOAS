@@ -9608,20 +9608,13 @@ struct PTOQuantToEmitC : public OpConversionPattern<pto::TQuantOp> {
     Value src = peelUnrealized(adaptor.getSrc());
     Value fp  = peelUnrealized(adaptor.getFp());
 
-    // Optional offset (INT8_ASYM only): passed as pointer (&offset)
-    Value offsetPtr;
+    // Optional offset (INT8_ASYM only): pass the tile value directly.
+    Value offset;
     if (op.getOffset()) {
-      Value offset = peelUnrealized(adaptor.getOffset());
-      auto offsetOT = mlir::dyn_cast<emitc::OpaqueType>(offset.getType());
-      if (offsetOT) {
-        offsetPtr = rewriter
-                        .create<emitc::ApplyOp>(
-                            loc, emitc::PointerType::get(offsetOT), "&", offset)
-                        .getResult();
-      }
+      offset = peelUnrealized(adaptor.getOffset());
     }
 
-    // TQUANT<QuantType, DstTile, SrcTile, FpTile>(dst, src, fp[, &offset])
+    // TQUANT<QuantType, DstTile, SrcTile, FpTile>(dst, src, fp[, offset])
     std::string quantTypeStr =
         op.getQuantType() == pto::QuantType::INT8_SYM
             ? "pto::QuantType::INT8_SYM"
@@ -9642,8 +9635,8 @@ struct PTOQuantToEmitC : public OpConversionPattern<pto::TQuantOp> {
     }
 
     SmallVector<Value> operands{dst, src, fp};
-    if (offsetPtr)
-      operands.push_back(offsetPtr);
+    if (offset)
+      operands.push_back(offset);
 
     rewriter.create<emitc::CallOpaqueOp>(
         loc, TypeRange{}, "TQUANT",
