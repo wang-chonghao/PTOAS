@@ -1,0 +1,16 @@
+// Minimal VF case: a single tadd feeding a tmul.
+module {
+  func.func @min_tadd_tmul(
+      %a: !pto.tile_buf<vec, 32x32xf32>,
+      %b: !pto.tile_buf<vec, 32x32xf32>,
+      %c: !pto.tile_buf<vec, 32x32xf32>) {
+    %tmp0 = pto.alloc_tile : !pto.tile_buf<vec, 32x32xf32>
+    %tmp1 = pto.alloc_tile : !pto.tile_buf<vec, 32x32xf32>
+
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 32x32xf32>, !pto.tile_buf<vec, 32x32xf32>)
+             outs(%tmp0 : !pto.tile_buf<vec, 32x32xf32>)
+    pto.tmul ins(%tmp0, %c : !pto.tile_buf<vec, 32x32xf32>, !pto.tile_buf<vec, 32x32xf32>)
+             outs(%tmp1 : !pto.tile_buf<vec, 32x32xf32>)
+    return
+  }
+}

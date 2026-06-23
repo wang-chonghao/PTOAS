@@ -875,19 +875,19 @@ public:
 };
 ```
 
-第一版 `predict()` 先做接口打通：
+第一版 `predict()` 已经改成 native bridge：
 
 ```text
-1. 递归遍历 VfSimProgram。
-2. 检查 opcode + dtype 是否在当前支持集内。
-3. unsupported 时返回 supported=false。
-4. cycles 可以先返回占位值，直到 C++ sim core 接入。
+1. 递归遍历 VfSimProgram，转换为 native ProgramNode。
+2. 推断 dtype，混合 dtype 直接 reject。
+3. 用 native ParamDB + ProgramFlatten + IFU + IDU + OOO 主线计算 latency。
+4. 成功时返回 supported=true 和 vf_end_cycle。
+5. 预测路径默认不落盘，debug 时可再接日志目录。
 ```
 
 当前状态：`include/PTO/VFcostmodel/VfLatencyModel.h` 已新增抽象接口定义，
-后续 TileFusion / VPTO 两侧都将复用这一层入口。
-当前 PTOAS 侧已经通过 `PTOFusionPlan` 调用该接口；`VfLatencyModel`
-实现仍为占位版本，后续将替换为 C++ 化 VfSimulator 核心。
+当前 `VfLatencyModel` 实现已切到 native VfSimulator 主线桥接。
+TileFusion / VPTO 两侧继续复用这一层入口。
 
 #### 阶段 2.4：C++ 化 VfSimulator 子集
 
@@ -942,8 +942,7 @@ lit 测试覆盖简单链、unsupported、domain mismatch、hard boundary。
    virtual register operand 从绑定的 tile input/output element type 推导
    无法推导时 buildFusedElementwiseVfSimProgram() 返回 failure
 
-4. JSON dump 已由 VfSimProgram 导出。
-   JSON 仍只用于 debug / 外挂 Python VfSimulator 对比，不作为最终源码级接口。
+4. JSON dump 仍保留为 debug / 外挂 Python VfSimulator 对比路径。
 
 5. 现阶段已验证：
    tadd + tmul fused case
@@ -1095,3 +1094,91 @@ UB 超限时能稳定切 group。
 - `tdiv/tcvt/soft div/mod` 等复杂模板可能包含 helper call 和多条微指令，第一阶段应谨慎开放。
 - vreg pressure 的轻量估计可能和真实 rename/OoO 行为有偏差，需要用 Python VfSimulator 校准。
 - 完整 C++ 化 VfSimulator 难度中高，应分 op 子集逐步推进。
+
+## 11. VfSimulator C++ 化后续计划
+
+这一节只记录 VfSimulator 主线的 C++ 化计划，和上面的 PTOAS 接入设计分开。
+当前约束是：
+
+- 只接主线 `queue_level4`，暂不迁理论极限分支。
+- 继续把现有 `configs/*.json` 作为单一事实来源。
+- C++ 侧先做行为对齐，再做性能优化。
+- `VfSimProgram` 是统一输入边界，PTOAS 与 VPTO 侧都只负责构造它。
+
+### 11.1 当前已完成的准备
+
+- 主线模型已经稳定在 `queue_level4`。
+- 主线解释链路已经收敛为：
+  `JSON/CCE input -> api -> flatten -> IFU -> IDU -> OOO -> VF end cycle`
+- 当前关键魔法值已经逐步整理进 `configs/uarch.json`，包括：
+  - `idu_to_ooo_delay`
+  - `ooo_to_shq_delay`
+  - `ooo_to_lsq_delay`
+  - `vloop_to_dispatch_delay`
+  - `initial_top_block_vloop_start_cycle`
+  - `nested_vloop_initial_start_gap`
+  - `loop1_min_feedback_gap`
+  - `innermost_iter_dispatch_stride`
+  - `consumer_release_start_offset`
+- `isa.json`、`forwarding.json`、`InitiationInterval.json` 的结构已经明确，后续可以直接映射到 C++ 查询对象。
+
+### 11.2 Python -> C++ 映射表
+
+| Python 模块 | 作用 | C++ 目标 |
+|---|---|---|
+| `api/simulator_costmodel.py` | 入口编排 | `native/VfLatencyModel.*` |
+| `core/param_db.py` | 参数加载与查询 | `native/ParamDB.*` |
+| `core/isa_traits.py` | ISA class / load-store 判定 | `native/ISATraits.*` |
+| `core/program_analysis.py` | loop / bounds / 结构分析 | `native/ProgramAnalysis.*` |
+| `core/vreg_live_range_normalization.py` | vreg 规范化 | `native/VRegLiveRangeNormalization.*` |
+| `core/flatten.py` | 程序展平 | `native/ProgramFlatten.*` |
+| `core/ifu.py` | 动态指令展开 | `native/IFU.*` |
+| `core/idu.py` | 发射 / credit gate / VLOOP 可见性 | `native/IDU.*` |
+| `core/ooo.py` | OoO 核心 | `native/OOO.*` |
+| `core/ooo_factory.py` | 模型/参数组装 | `native/OOOFactory.*` |
+| `core/simulator_runner.py` | 主循环与日志 | `native/SimulatorRunner.*` |
+
+### 11.3 参数 C++ 化方案
+
+参数层不改 JSON 文件格式，继续把下面这些文件作为单一事实来源：
+
+- `configs/isa.json`
+- `configs/uarch.json`
+- `configs/forwarding.json`
+- `configs/InitiationInterval.json`
+
+第一阶段的 C++ 化方式是：
+
+1. C++ 在启动时读取 JSON 配置。
+2. 把配置解析到内存对象中缓存。
+3. 对外提供和当前 Python `ParamDB` 等价的查询接口。
+
+这样做的好处是：
+
+- 不改配置格式
+- 不引入双份配置
+- 不改变回归数据
+- 后面如果启动成本变高，再考虑生成编译期快照
+
+### 11.4 第一阶段 C++ 化范围
+
+第一步只接主线，不碰理论极限分支：
+
+1. `ParamDB`
+2. `ISATraits`
+3. `ProgramAnalysis`
+
+这三者先完成后，再继续：
+
+4. `flatten`
+5. `IFU`
+6. `IDU`
+7. `OOO`
+8. `SimulatorRunner`
+
+### 11.5 设计原则
+
+- C++ 版先做行为对齐，不先做性能优化。
+- Python 版继续保留，作为行为 oracle。
+- 理论极限分支先不迁移，先把主线稳定住。
+- `VfSimProgram` 是新的输入边界，PTOAS 和 VPTO 两边都只负责构造它，不把仿真细节散到上层。
