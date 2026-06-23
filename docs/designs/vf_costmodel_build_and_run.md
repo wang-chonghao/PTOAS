@@ -240,7 +240,7 @@ loop 0 trip_count=16 unroll=1
 
 ## 4. 新机器从零配置环境
 
-本节按 Ubuntu/WSL 环境写。目标是从一台干净机器开始，最终跑出：
+本节按 Linux 服务器环境写。目标是从一台干净机器开始，最终跑出：
 
 ```text
 [pto-fusion-plan] VF latency cycles=82
@@ -267,7 +267,7 @@ mkdir -p "$WORKSPACE_DIR"
 
 ### 4.2 安装系统依赖
 
-Ubuntu/WSL：
+Ubuntu/Debian Linux：
 
 ```bash
 sudo apt update
@@ -354,7 +354,7 @@ cmake -G Ninja -S llvm -B "$LLVM_BUILD_DIR" \
 cmake --build "$LLVM_BUILD_DIR" -j2
 ```
 
-新机器第一次编译 LLVM 会比较久。WSL 内存不稳定时先用 `-j2`，确认稳定后再提高并行度。
+新机器第一次编译 LLVM 会比较久。远程服务器内存不确定时先用 `-j2`，确认稳定后再提高并行度。
 
 验证 LLVM：
 
@@ -398,10 +398,10 @@ git fetch origin
 git checkout vf-costmodel-phase1
 ```
 
-如果分支还没有推到远程，先在有代码的机器上执行：
+如果分支还没有推到远程，先在原开发机的 PTOAS 仓库中执行：
 
 ```bash
-cd /mnt/e/vfsimulator_structure/PTOAS
+cd <path-to-your-PTOAS-repo>
 git push -u myfork vf-costmodel-phase1
 ```
 
@@ -746,7 +746,7 @@ cmake -G Ninja \
 
 如果是安装版 LLVM，把 `MLIR_PYTHON_PACKAGE_DIR` 改成实际存在的路径。
 
-### 8.4 WSL 编译中途退出
+### 8.4 编译中途退出或进程被 kill
 
 优先降低并行度：
 
@@ -755,6 +755,14 @@ cmake --build "$PTO_BUILD_DIR" --target ptoas -j2
 ```
 
 不要直接使用很大的 `-j` 数。
+
+如果服务器内存较小，LLVM/MLIR 编译阶段尤其容易被系统 kill。可以用下面命令检查是否发生过 OOM：
+
+```bash
+dmesg | tail -50
+```
+
+如果看到 `Out of memory` 或 `Killed process`，继续降低并行度，例如 `-j1`。
 
 ### 8.5 运行时找不到 libMLIR 或 libLLVM
 
@@ -784,10 +792,10 @@ export LD_LIBRARY_PATH="$LLVM_BUILD_DIR/lib:$PTO_BUILD_DIR/lib:$LD_LIBRARY_PATH"
 git branch -a | grep vf-costmodel
 ```
 
-如果远程确实没有该分支，说明本地修改还没有 push 到 fork。需要先在原机器执行：
+如果远程确实没有该分支，说明本地修改还没有 push 到 fork。需要先在原开发机执行：
 
 ```bash
-cd /mnt/e/vfsimulator_structure/PTOAS
+cd <path-to-your-PTOAS-repo>
 git push -u myfork vf-costmodel-phase1
 ```
 
