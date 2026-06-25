@@ -552,6 +552,14 @@ def main() -> None:
     )
 
     lowp_text = low_precision_vcvt_frontend.compile().mlir_text()
+    expect(
+        "pto.vcvt" in lowp_text,
+        "low_precision_vcvt_frontend source MLIR should include vcvt ops before frontend verification",
+    )
+    expect(
+        "f8E4M3FN" in lowp_text,
+        "low_precision_vcvt_frontend source MLIR should preserve f8e4m3 type information before frontend verification",
+    )
     lowp_frontend_texts = run_ptoas_frontend_verify(
         ptoas_bin,
         lowp_text,
@@ -563,12 +571,8 @@ def main() -> None:
     )
     lowp_frontend_text = lowp_frontend_texts[0]
     expect(
-        "pto.vcvt" in lowp_frontend_text,
-        "low_precision_vcvt_frontend output should preserve vcvt ops after frontend verification",
-    )
-    expect(
-        "f8E4M3FN" in lowp_frontend_text,
-        "low_precision_vcvt_frontend output should preserve f8e4m3 type information",
+        lowp_frontend_text == "",
+        "low_precision_vcvt_frontend should continue to compile through the VPTO fallback object path when --emit-pto-ir is unavailable",
     )
 
     invalid_lowp_vcvt_mlir = """
