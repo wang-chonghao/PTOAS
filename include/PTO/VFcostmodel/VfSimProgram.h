@@ -39,6 +39,10 @@ enum class VfOpcode {
   VMIN,
   VMINS,
   VEXP,
+  VCVT_F16_TO_F32,
+  VCVT_F32_TO_F16,
+  VCVT_F32_TO_S32,
+  VCVT_S32_TO_F32,
 };
 
 enum class VfOperandKind {
@@ -70,6 +74,7 @@ struct VfSimOperand {
 
 struct VfSimInst {
   VfOpcode opcode;
+  std::string form;
   SmallVector<VfSimOperand, 4> dst;
   SmallVector<VfSimOperand, 4> src;
 };

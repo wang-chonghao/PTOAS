@@ -19,6 +19,7 @@ namespace vfsim {
 
 struct ProgramInstNode {
   std::string op;
+  std::string form;
   std::vector<std::string> src;
   std::vector<std::string> dst;
 };

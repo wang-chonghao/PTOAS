@@ -42,6 +42,29 @@ def _operand_obj_name(operand: dict[str, Any]) -> str:
     raise ValueError(f"unsupported VFProgram operand kind: {kind}")
 
 
+def _operand_obj_dtype(operand: Any) -> str:
+    if not isinstance(operand, dict):
+        return ""
+    return str(operand.get("dtype", "") or "")
+
+
+def _infer_inst_form(op: str, dst: list[Any], src: list[Any], explicit_form: str) -> str:
+    if explicit_form:
+        return explicit_form
+    op = op.upper()
+    if op == "VLDS":
+        return _operand_obj_dtype(dst[0]) if dst else ""
+    if op == "VSTS":
+        return _operand_obj_dtype(src[-1]) if src else ""
+    if dst:
+        return _operand_obj_dtype(dst[0])
+    for operand in src:
+        dtype = _operand_obj_dtype(operand)
+        if dtype:
+            return dtype
+    return ""
+
+
 def _operand_names(operands: list[str], *, drop_scalars: bool = False) -> list[str]:
     names = [_operand_name(operand) for operand in operands]
     if drop_scalars:
@@ -189,18 +212,24 @@ def _convert_vfsim_json_node(node: dict[str, Any]) -> dict[str, Any]:
         }
     if node_type == "inst":
         op = str(node.get("op", "")).upper()
-        return {
+        dst_operands = node.get("dst", [])
+        src_operands = node.get("src", [])
+        inst = {
             "type": "inst",
             "op": op,
             "dst": _convert_vfsim_json_operands(
-                node.get("dst", []),
+                dst_operands,
                 drop_scalars=False,
             ),
             "src": _convert_vfsim_json_operands(
-                node.get("src", []),
+                src_operands,
                 drop_scalars=op.endswith("S"),
             ),
         }
+        form = _infer_inst_form(op, dst_operands, src_operands, str(node.get("form", "") or ""))
+        if form:
+            inst["form"] = form
+        return inst
     raise ValueError(f"unsupported VFProgram JSON node type: {node_type}")
 
 

@@ -34,6 +34,10 @@ std::string readStringField(const JsonValue::Object &object, const char *key,
   return value ? value->asString(defaultValue) : defaultValue;
 }
 
+std::string makeFormKey(const std::string &op, const std::string &form) {
+  return op + "." + form;
+}
+
 int64_t readIntField(const JsonValue::Object &object, const char *key,
                      int64_t defaultValue = 0) {
   const JsonValue *value = findKey(object, key);
@@ -46,19 +50,61 @@ bool readBoolField(const JsonValue::Object &object, const char *key,
   return value ? value->asBool(defaultValue) : defaultValue;
 }
 
+std::vector<std::string> readStringArrayField(const JsonValue::Object &object,
+                                              const char *key) {
+  std::vector<std::string> out;
+  const JsonValue *value = findKey(object, key);
+  if (!value || !value->isArray())
+    return out;
+  for (const JsonValue &item : value->asArray())
+    out.push_back(item.asString());
+  return out;
+}
+
+void overlayInstConfig(InstConfig &cfg, const JsonValue::Object &object) {
+  if (findKey(object, "pipeline_startup_cost"))
+    cfg.pipelineStartupCost = readIntField(object, "pipeline_startup_cost");
+  if (findKey(object, "latency"))
+    cfg.latency = readIntField(object, "latency");
+  if (findKey(object, "throughput"))
+    cfg.throughput = readIntField(object, "throughput");
+  if (findKey(object, "pipeline_drain_cost"))
+    cfg.pipelineDrainCost = readIntField(object, "pipeline_drain_cost");
+  if (findKey(object, "data_load_cost"))
+    cfg.dataLoadCost = readIntField(object, "data_load_cost");
+  if (findKey(object, "data_store_cost"))
+    cfg.dataStoreCost = readIntField(object, "data_store_cost");
+  if (findKey(object, "EXU"))
+    cfg.exu = readStringField(object, "EXU");
+  if (findKey(object, "dispatch_exu"))
+    cfg.dispatchExu = readStringField(object, "dispatch_exu");
+  if (findKey(object, "op_class"))
+    cfg.opClass = readStringField(object, "op_class");
+  if (cfg.opClass.empty())
+    cfg.opClass = readStringField(object, "class", readStringField(object, "category", cfg.opClass));
+  if (findKey(object, "dtype"))
+    cfg.dtype = readStringField(object, "dtype");
+  if (findKey(object, "src_dtypes"))
+    cfg.srcDtypes = readStringArrayField(object, "src_dtypes");
+  if (findKey(object, "dst_dtypes"))
+    cfg.dstDtypes = readStringArrayField(object, "dst_dtypes");
+}
+
 InstConfig readInstConfig(const JsonValue::Object &object) {
   InstConfig cfg;
-  cfg.pipelineStartupCost = readIntField(object, "pipeline_startup_cost");
-  cfg.latency = readIntField(object, "latency");
-  cfg.throughput = readIntField(object, "throughput");
-  cfg.pipelineDrainCost = readIntField(object, "pipeline_drain_cost");
-  cfg.dataLoadCost = readIntField(object, "data_load_cost");
-  cfg.dataStoreCost = readIntField(object, "data_store_cost");
-  cfg.exu = readStringField(object, "EXU");
-  cfg.dispatchExu = readStringField(object, "dispatch_exu");
-  cfg.opClass = readStringField(object, "op_class");
-  if (cfg.opClass.empty())
-    cfg.opClass = readStringField(object, "class", readStringField(object, "category"));
+  overlayInstConfig(cfg, object);
+  return cfg;
+}
+
+InstConfig readInstFormConfig(const JsonValue::Object &opObject,
+                              const std::string &formName,
+                              const JsonValue::Object &formObject) {
+  InstConfig cfg;
+  overlayInstConfig(cfg, opObject);
+  overlayInstConfig(cfg, formObject);
+  cfg.form = formName;
+  if (cfg.dtype.empty())
+    cfg.dtype = formName;
   return cfg;
 }
 
@@ -145,11 +191,31 @@ ParamDB::ParamDB(std::filesystem::path baseDir)
         throw std::runtime_error("isa.json.instructions." + opName +
                                  " must be an object");
       auto &dtypeMap = bundle_.isa[opName];
-      for (const auto &[dtypeName, dtypeValue] : opValue.asObject()) {
-        if (!dtypeValue.isObject())
-          throw std::runtime_error("isa.json.instructions." + opName + "." +
-                                   dtypeName + " must be an object");
-        dtypeMap.emplace(dtypeName, readInstConfig(dtypeValue.asObject()));
+      const auto &opObject = opValue.asObject();
+      if (const JsonValue *forms = findKey(opObject, "forms")) {
+        if (!forms->isObject())
+          throw std::runtime_error("isa.json.instructions." + opName +
+                                   ".forms must be an object");
+        for (const auto &[formName, formValue] : forms->asObject()) {
+          if (!formValue.isObject())
+            throw std::runtime_error("isa.json.instructions." + opName +
+                                     ".forms." + formName +
+                                     " must be an object");
+          dtypeMap.emplace(formName,
+                           readInstFormConfig(opObject, formName,
+                                              formValue.asObject()));
+        }
+      } else {
+        for (const auto &[dtypeName, dtypeValue] : opObject) {
+          if (!dtypeValue.isObject())
+            throw std::runtime_error("isa.json.instructions." + opName + "." +
+                                     dtypeName + " must be an object");
+          InstConfig cfg = readInstConfig(dtypeValue.asObject());
+          cfg.form = dtypeName;
+          if (cfg.dtype.empty())
+            cfg.dtype = dtypeName;
+          dtypeMap.emplace(dtypeName, std::move(cfg));
+        }
       }
     }
   }
@@ -204,18 +270,33 @@ ParamDB::ParamDB(std::filesystem::path baseDir)
   if (const JsonValue *forwarding = findKey(fwdRoot, "forwarding")) {
     if (!forwarding->isObject())
       throw std::runtime_error("forwarding.json.forwarding must be an object");
-    for (const auto &[dtypeName, dtypeValue] : forwarding->asObject()) {
-      if (!dtypeValue.isObject())
-        throw std::runtime_error("forwarding.json.forwarding." + dtypeName +
-                                 " must be an object");
-      auto &prodMap = bundle_.forwarding[dtypeName];
-      for (const auto &[prodName, prodValue] : dtypeValue.asObject()) {
+    const bool v2Forwarding =
+        findKey(fwdRoot, "schema_version") &&
+        findKey(fwdRoot, "schema_version")->asInt(1) >= 2;
+    if (v2Forwarding) {
+      auto &prodMap = bundle_.forwarding["__forms"];
+      for (const auto &[prodKey, prodValue] : forwarding->asObject()) {
         if (!prodValue.isObject())
+          throw std::runtime_error("forwarding.json.forwarding." + prodKey +
+                                   " must be an object");
+        auto &consMap = prodMap[prodKey];
+        for (const auto &[consKey, consValue] : prodValue.asObject())
+          consMap.emplace(consKey, consValue.asInt());
+      }
+    } else {
+      for (const auto &[dtypeName, dtypeValue] : forwarding->asObject()) {
+        if (!dtypeValue.isObject())
           throw std::runtime_error("forwarding.json.forwarding." + dtypeName +
-                                   "." + prodName + " must be an object");
-        auto &consMap = prodMap[prodName];
-        for (const auto &[consName, consValue] : prodValue.asObject())
-          consMap.emplace(consName, consValue.asInt());
+                                   " must be an object");
+        auto &prodMap = bundle_.forwarding[dtypeName];
+        for (const auto &[prodName, prodValue] : dtypeValue.asObject()) {
+          if (!prodValue.isObject())
+            throw std::runtime_error("forwarding.json.forwarding." + dtypeName +
+                                     "." + prodName + " must be an object");
+          auto &consMap = prodMap[prodName];
+          for (const auto &[consName, consValue] : prodValue.asObject())
+            consMap.emplace(consName, consValue.asInt());
+        }
       }
     }
   }
@@ -223,18 +304,33 @@ ParamDB::ParamDB(std::filesystem::path baseDir)
   if (const JsonValue *ii = findKey(iiRoot, "InitiationInterval")) {
     if (!ii->isObject())
       throw std::runtime_error("InitiationInterval.json.InitiationInterval must be an object");
-    for (const auto &[dtypeName, dtypeValue] : ii->asObject()) {
-      if (!dtypeValue.isObject())
-        throw std::runtime_error("InitiationInterval.json.InitiationInterval." +
-                                 dtypeName + " must be an object");
-      auto &prevMap = bundle_.initiationInterval[dtypeName];
-      for (const auto &[prevName, prevValue] : dtypeValue.asObject()) {
+    const bool v2Ii =
+        findKey(iiRoot, "schema_version") &&
+        findKey(iiRoot, "schema_version")->asInt(1) >= 2;
+    if (v2Ii) {
+      auto &prevMap = bundle_.initiationInterval["__forms"];
+      for (const auto &[prevKey, prevValue] : ii->asObject()) {
         if (!prevValue.isObject())
           throw std::runtime_error("InitiationInterval.json.InitiationInterval." +
-                                   dtypeName + "." + prevName + " must be an object");
-        auto &curMap = prevMap[prevName];
-        for (const auto &[curName, curValue] : prevValue.asObject())
-          curMap.emplace(curName, curValue.asInt());
+                                   prevKey + " must be an object");
+        auto &curMap = prevMap[prevKey];
+        for (const auto &[curKey, curValue] : prevValue.asObject())
+          curMap.emplace(curKey, curValue.asInt());
+      }
+    } else {
+      for (const auto &[dtypeName, dtypeValue] : ii->asObject()) {
+        if (!dtypeValue.isObject())
+          throw std::runtime_error("InitiationInterval.json.InitiationInterval." +
+                                   dtypeName + " must be an object");
+        auto &prevMap = bundle_.initiationInterval[dtypeName];
+        for (const auto &[prevName, prevValue] : dtypeValue.asObject()) {
+          if (!prevValue.isObject())
+            throw std::runtime_error("InitiationInterval.json.InitiationInterval." +
+                                     dtypeName + "." + prevName + " must be an object");
+          auto &curMap = prevMap[prevName];
+          for (const auto &[curName, curValue] : prevValue.asObject())
+            curMap.emplace(curName, curValue.asInt());
+        }
       }
     }
   }
@@ -247,25 +343,49 @@ std::filesystem::path ParamDB::resolveBaseDir(std::filesystem::path baseDir) {
 }
 
 bool ParamDB::hasInst(const std::string &op, const std::string &dtype) const {
-  const auto opIt = bundle_.isa.find(op);
-  if (opIt == bundle_.isa.end())
-    return false;
-  return opIt->second.find(dtype) != opIt->second.end();
+  return hasInstForm(op, dtype);
 }
 
 const InstConfig &ParamDB::inst(const std::string &op, const std::string &dtype) const {
-  const auto opIt = bundle_.isa.find(op);
-  if (opIt == bundle_.isa.end())
-    throw std::runtime_error("Instruction not found: op=" + op + ", dtype=" + dtype);
-  const auto dtypeIt = opIt->second.find(dtype);
-  if (dtypeIt == opIt->second.end())
-    throw std::runtime_error("Instruction not found: op=" + op + ", dtype=" + dtype);
-  return dtypeIt->second;
+  return instForm(op, dtype);
 }
 
-int64_t ParamDB::forwardingCycles(const std::string &dtype, const std::string &prod,
+bool ParamDB::hasInstForm(const std::string &op, const std::string &form) const {
+  const auto opIt = bundle_.isa.find(op);
+  if (opIt == bundle_.isa.end())
+    return false;
+  return opIt->second.find(form) != opIt->second.end();
+}
+
+const InstConfig &ParamDB::instForm(const std::string &op, const std::string &form) const {
+  const auto opIt = bundle_.isa.find(op);
+  if (opIt == bundle_.isa.end())
+    throw std::runtime_error("Instruction not found: op=" + op + ", form=" + form);
+  const auto formIt = opIt->second.find(form);
+  if (formIt != opIt->second.end())
+    return formIt->second;
+  if (form != "fp32") {
+    const auto fp32It = opIt->second.find("fp32");
+    if (fp32It != opIt->second.end())
+      return fp32It->second;
+  }
+  throw std::runtime_error("Instruction not found: op=" + op + ", form=" + form);
+}
+
+int64_t ParamDB::forwardingCycles(const std::string &prodForm,
+                                  const std::string &prod,
+                                  const std::string &consForm,
                                   const std::string &cons) const {
-  const auto dtypeIt = bundle_.forwarding.find(dtype);
+  const auto formsIt = bundle_.forwarding.find("__forms");
+  if (formsIt != bundle_.forwarding.end()) {
+    const auto prodIt = formsIt->second.find(makeFormKey(prod, prodForm));
+    if (prodIt != formsIt->second.end()) {
+      const auto consIt = prodIt->second.find(makeFormKey(cons, consForm));
+      if (consIt != prodIt->second.end())
+        return std::max<int64_t>(0, consIt->second);
+    }
+  }
+  const auto dtypeIt = bundle_.forwarding.find(prodForm);
   if (dtypeIt != bundle_.forwarding.end()) {
     const auto prodIt = dtypeIt->second.find(prod);
     if (prodIt != dtypeIt->second.end()) {
@@ -274,13 +394,24 @@ int64_t ParamDB::forwardingCycles(const std::string &dtype, const std::string &p
         return std::max<int64_t>(0, consIt->second);
     }
   }
-  const int64_t latency = hasInst(prod, dtype) ? inst(prod, dtype).latency : 0;
+  const int64_t latency = hasInstForm(prod, prodForm) ? instForm(prod, prodForm).latency : 0;
   return std::max<int64_t>(0, latency - 3);
 }
 
-int64_t ParamDB::initiationInterval(const std::string &dtype, const std::string &prev,
+int64_t ParamDB::initiationInterval(const std::string &prevForm,
+                                    const std::string &prev,
+                                    const std::string &curForm,
                                     const std::string &cur) const {
-  const auto dtypeIt = bundle_.initiationInterval.find(dtype);
+  const auto formsIt = bundle_.initiationInterval.find("__forms");
+  if (formsIt != bundle_.initiationInterval.end()) {
+    const auto prevIt = formsIt->second.find(makeFormKey(prev, prevForm));
+    if (prevIt != formsIt->second.end()) {
+      const auto curIt = prevIt->second.find(makeFormKey(cur, curForm));
+      if (curIt != prevIt->second.end())
+        return std::max<int64_t>(1, curIt->second);
+    }
+  }
+  const auto dtypeIt = bundle_.initiationInterval.find(curForm);
   if (dtypeIt != bundle_.initiationInterval.end()) {
     const auto prevIt = dtypeIt->second.find(prev);
     if (prevIt != dtypeIt->second.end()) {

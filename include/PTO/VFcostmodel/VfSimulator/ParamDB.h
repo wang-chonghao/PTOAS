@@ -26,10 +26,16 @@ public:
 
   bool hasInst(const std::string &op, const std::string &dtype) const;
   const InstConfig &inst(const std::string &op, const std::string &dtype) const;
+  bool hasInstForm(const std::string &op, const std::string &form) const;
+  const InstConfig &instForm(const std::string &op, const std::string &form) const;
 
-  int64_t forwardingCycles(const std::string &dtype, const std::string &prod,
+  int64_t forwardingCycles(const std::string &prodForm,
+                           const std::string &prod,
+                           const std::string &consForm,
                            const std::string &cons) const;
-  int64_t initiationInterval(const std::string &dtype, const std::string &prev,
+  int64_t initiationInterval(const std::string &prevForm,
+                             const std::string &prev,
+                             const std::string &curForm,
                              const std::string &cur) const;
 
   static std::filesystem::path resolveBaseDir(std::filesystem::path baseDir);

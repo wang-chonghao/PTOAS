@@ -121,9 +121,12 @@ OoOCore::OoOCore(const UarchConfig &uarch, const ParamDB &db, std::string dtype)
   lastIssueCycleALU_.assign(issuePorts_, -1000000000);
   lastIssueCycleSFU_.assign(issuePorts_, -1000000000);
   lastOpALU_.assign(issuePorts_, "");
+  lastFormALU_.assign(issuePorts_, "");
   lastOpSFU_.assign(issuePorts_, "");
+  lastFormSFU_.assign(issuePorts_, "");
   lastIssueCycleExu_.assign(issuePorts_, -1000000000);
   lastOpExu_.assign(issuePorts_, "");
+  lastFormExu_.assign(issuePorts_, "");
   exqInflight_.assign(issuePorts_, 0);
   loadDoneLatency_ = static_cast<int>(uarch.loadDoneLatency ? uarch.loadDoneLatency : 9);
   oooToShqDelay_ = static_cast<int>(uarch.oooToShqDelay ? uarch.oooToShqDelay : 1);
@@ -201,14 +204,16 @@ std::string OoOCore::classifyOpClass(const std::string &op) const {
   return isLoadOp(db_, op, dtype_) ? "LOAD" : (isStoreOp(db_, op, dtype_) ? "STORE" : "COMPUTE");
 }
 
-int64_t OoOCore::computeReadyTimeForSrc(const std::tuple<std::string, int64_t, std::string> &producerInfo,
-                                        const std::string &consumerOp) const {
-  const auto &prodOp = std::get<0>(producerInfo);
-  const auto prodStart = std::get<1>(producerInfo);
-  const int64_t fwd = db_.forwardingCycles(dtype_, prodOp, consumerOp);
-  if (isComputeOp(db_, consumerOp, dtype_) && enableIsuQueueModel_)
-    return prodStart + std::max<int64_t>(0, fwd - 1);
-  return prodStart + fwd;
+int64_t OoOCore::computeReadyTimeForSrc(const ProducerInfo &producerInfo,
+                                        const Uop &consumer) const {
+  const std::string prodForm = producerInfo.form.empty() ? dtype_ : producerInfo.form;
+  const std::string consumerForm = consumer.form.empty() ? dtype_ : consumer.form;
+  const int64_t fwd =
+      db_.forwardingCycles(prodForm, producerInfo.op, consumerForm,
+                           consumer.op);
+  if (isComputeOp(db_, consumer.op, consumerForm) && enableIsuQueueModel_)
+    return producerInfo.startCycle + std::max<int64_t>(0, fwd - 1);
+  return producerInfo.startCycle + fwd;
 }
 
 int64_t OoOCore::computeLoadReadyCycle(const Uop &u) const {
@@ -232,17 +237,19 @@ int64_t OoOCore::computeLoadReadyCycle(const Uop &u) const {
   return t;
 }
 
-std::tuple<int64_t, std::optional<std::string>, std::optional<int64_t>>
+std::tuple<int64_t, std::optional<std::string>, std::optional<std::string>,
+           std::optional<int64_t>>
 OoOCore::computeStoreReadyCycle(const Uop &u) const {
   for (const auto &ps : u.pregSrc) {
     if (!ps.has_value())
       continue;
     if (pregPending_.count(*ps) && pregProducer_.find(*ps) == pregProducer_.end())
-      return {1000000000, std::nullopt, std::nullopt};
+      return {1000000000, std::nullopt, std::nullopt, std::nullopt};
   }
 
   int64_t bestT = -1;
   std::optional<std::string> pop;
+  std::optional<std::string> pform;
   std::optional<int64_t> pst;
   for (const auto &ps : u.pregSrc) {
     if (!ps.has_value())
@@ -250,28 +257,32 @@ OoOCore::computeStoreReadyCycle(const Uop &u) const {
     auto it = pregProducer_.find(*ps);
     if (it == pregProducer_.end())
       continue;
-    const auto &kind = std::get<2>(it->second);
+    const auto &kind = it->second.kind;
     if (kind != "COMPUTE" && kind != "LOAD")
       continue;
-    const int64_t cand = computeReadyTimeForSrc(it->second, u.op);
+    const int64_t cand = computeReadyTimeForSrc(it->second, u);
     if (cand > bestT) {
       bestT = cand;
-      pop = std::get<0>(it->second);
-      pst = std::get<1>(it->second);
+      pop = it->second.op;
+      pform = it->second.form;
+      pst = it->second.startCycle;
     }
   }
   if (bestT < 0)
-    return {1000000000, std::nullopt, std::nullopt};
+    return {1000000000, std::nullopt, std::nullopt, std::nullopt};
   bestT = std::max<int64_t>(bestT, u.lsqReadyCycle);
-  return {bestT, pop, pst};
+  return {bestT, pop, pform, pst};
 }
 
-int64_t OoOCore::dataStoreCost(const std::string &producerOp) const {
-  return db_.inst(producerOp, dtype_).dataStoreCost > 0 ? db_.inst(producerOp, dtype_).dataStoreCost : 1;
+int64_t OoOCore::dataStoreCost(const ProducerInfo &producer) const {
+  const std::string form = producer.form.empty() ? dtype_ : producer.form;
+  const auto &cfg = db_.instForm(producer.op, form);
+  return cfg.dataStoreCost > 0 ? cfg.dataStoreCost : 1;
 }
 
-std::string OoOCore::getFuType(const std::string &op) const {
-  const auto &cfg = db_.inst(op, dtype_);
+std::string OoOCore::getFuType(const Uop &u) const {
+  const std::string form = u.form.empty() ? dtype_ : u.form;
+  const auto &cfg = db_.instForm(u.op, form);
   std::string fu = cfg.exu.empty() ? "ALU" : cfg.exu;
   std::transform(fu.begin(), fu.end(), fu.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
   if (fu != "ALU" && fu != "SFU")
@@ -279,8 +290,9 @@ std::string OoOCore::getFuType(const std::string &op) const {
   return fu;
 }
 
-std::vector<int> OoOCore::eligibleExuPorts(const std::string &op) const {
-  std::string tag = db_.inst(op, dtype_).dispatchExu;
+std::vector<int> OoOCore::eligibleExuPorts(const Uop &u) const {
+  const std::string form = u.form.empty() ? dtype_ : u.form;
+  std::string tag = db_.instForm(u.op, form).dispatchExu;
   std::transform(tag.begin(), tag.end(), tag.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
   if (tag == "EXU0_ONLY")
     return issuePorts_ > 0 ? std::vector<int>{0} : std::vector<int>{};
@@ -294,10 +306,14 @@ std::vector<int> OoOCore::eligibleExuPorts(const std::string &op) const {
   return out;
 }
 
-int64_t OoOCore::getIi(const std::string *prevOp, const std::string &curOp) const {
+int64_t OoOCore::getIi(const std::string *prevOp, const std::string *prevForm,
+                       const Uop &cur) const {
   if (!prevOp)
     return 1;
-  return db_.initiationInterval(dtype_, *prevOp, curOp);
+  const std::string form = cur.form.empty() ? dtype_ : cur.form;
+  const std::string prevFormValue =
+      (!prevForm || prevForm->empty()) ? form : *prevForm;
+  return db_.initiationInterval(prevFormValue, *prevOp, form, cur.op);
 }
 
 void OoOCore::log(const std::string &event, const Uop &u) {
@@ -465,21 +481,30 @@ int OoOCore::totalComputeInflight() const {
 }
 
 int64_t OoOCore::predictExqIssueCycle(int port, const std::string &fuType,
-                                      const std::string &op, int64_t recvCycle) const {
+                                      const std::string &op,
+                                      const std::string &form,
+                                      int64_t recvCycle) const {
   int64_t pred = recvCycle;
   const std::string *prevOp = nullptr;
+  const std::string *prevForm = nullptr;
   int64_t prevIssue = -1000000000;
   if (enableCrossFuIi_) {
     prevOp = &lastOpExu_[static_cast<size_t>(port)];
+    prevForm = &lastFormExu_[static_cast<size_t>(port)];
     prevIssue = lastIssueCycleExu_[static_cast<size_t>(port)];
   } else if (fuType == "SFU") {
     prevOp = &lastOpSFU_[static_cast<size_t>(port)];
+    prevForm = &lastFormSFU_[static_cast<size_t>(port)];
     prevIssue = lastIssueCycleSFU_[static_cast<size_t>(port)];
   } else {
     prevOp = &lastOpALU_[static_cast<size_t>(port)];
+    prevForm = &lastFormALU_[static_cast<size_t>(port)];
     prevIssue = lastIssueCycleALU_[static_cast<size_t>(port)];
   }
-  pred = std::max<int64_t>(pred, prevIssue + getIi(prevOp, op));
+  Uop cur;
+  cur.op = op;
+  cur.form = form.empty() ? dtype_ : form;
+  pred = std::max<int64_t>(pred, prevIssue + getIi(prevOp, prevForm, cur));
   return pred;
 }
 
@@ -523,6 +548,7 @@ void OoOCoreMainline::accept(const DynamicInst &inst) {
   Uop u;
   u.instId = inst.instId;
   u.op = inst.op;
+  u.form = inst.form.empty() ? dtype_ : inst.form;
   u.src = inst.src;
   u.dst = inst.dst;
   for (const auto &s : inst.src) {
@@ -583,14 +609,14 @@ void OoOCoreMainline::accept(const DynamicInst &inst) {
   if (enableCreditVisibilityDelay_ && allocCount > 0)
     visiblePregFree_ = std::max(0, visiblePregFree_ - allocCount);
 
-  if (enableShqCreditModel_ && usesSharedShqCredit(db_, u.op, dtype_)) {
+  if (enableShqCreditModel_ && usesSharedShqCredit(db_, u.op, u.form)) {
     ++shqUsed_;
     if (enableCreditVisibilityDelay_)
       ++visibleShqUsed_;
     u.isShqTracked = true;
   }
 
-  if (usesLsq(db_, u.op, dtype_)) {
+  if (usesLsq(db_, u.op, u.form)) {
     u.lsqReadyCycle = static_cast<int64_t>(cycle_) + oooToLsqDelay_;
     lsq_.push_back(u);
   } else {
@@ -599,7 +625,7 @@ void OoOCoreMainline::accept(const DynamicInst &inst) {
   }
   rob_.push_back(u);
 
-  if (isStoreOp(db_, u.op, dtype_))
+  if (isStoreOp(db_, u.op, u.form))
     blockOutstandingStores_[u.topBlockId] += 1;
 
   for (const auto &oldPreg : u.pregOld) {
@@ -629,7 +655,7 @@ void OoOCoreMainline::step() {
         exqInflight_[static_cast<size_t>(u.exuPort)] = std::max(0, exqInflight_[static_cast<size_t>(u.exuPort)] - 1);
       if (u.isLastInTopBlock)
         blockLastInstDone_[u.topBlockId] = true;
-      if (isStoreOp(db_, u.op, dtype_)) {
+      if (isStoreOp(db_, u.op, u.form)) {
         auto it = blockOutstandingStores_.find(u.topBlockId);
         if (it != blockOutstandingStores_.end())
           it->second = std::max(0, it->second - 1);
@@ -664,7 +690,7 @@ void OoOCoreMainline::step() {
   for (auto &u : lsq_) {
     if (u.state == "running" || u.state == "done")
       continue;
-    if (isLoadOp(db_, u.op, dtype_))
+    if (isLoadOp(db_, u.op, u.form))
       u.readyCycle = computeLoadReadyCycle(u);
     else
       u.readyCycle = std::get<0>(computeStoreReadyCycle(u));
@@ -683,7 +709,7 @@ void OoOCoreMainline::step() {
           t = std::max<int64_t>(t, 1000000000);
         continue;
       }
-      t = std::max<int64_t>(t, computeReadyTimeForSrc(it->second, u.op));
+      t = std::max<int64_t>(t, computeReadyTimeForSrc(it->second, u));
     }
     u.readyCycle = t;
     u.state = (c >= u.readyCycle) ? "ready" : "blocked";
@@ -692,7 +718,7 @@ void OoOCoreMainline::step() {
   int ld = 0;
   for (auto it = lsq_.begin(); it != lsq_.end();) {
     auto &u = *it;
-    if (u.state != "ready" || !isLoadOp(db_, u.op, dtype_)) {
+    if (u.state != "ready" || !isLoadOp(db_, u.op, u.form)) {
       ++it;
       continue;
     }
@@ -712,7 +738,7 @@ void OoOCoreMainline::step() {
     ++ld;
     for (const auto &pd : u.pregDst) {
       if (!pd.empty()) {
-        pregProducer_[pd] = std::make_tuple(u.op, *u.startCycle, std::string("LOAD"));
+        pregProducer_[pd] = ProducerInfo{u.op, u.form, *u.startCycle, std::string("LOAD")};
         pregPending_.erase(pd);
       }
     }
@@ -732,7 +758,7 @@ void OoOCoreMainline::step() {
           t = std::max<int64_t>(t, 1000000000);
         continue;
       }
-      t = std::max<int64_t>(t, computeReadyTimeForSrc(it->second, u.op));
+      t = std::max<int64_t>(t, computeReadyTimeForSrc(it->second, u));
     }
     u.readyCycle = t;
     u.state = (c >= u.readyCycle) ? "ready" : "blocked";
@@ -744,7 +770,7 @@ void OoOCoreMainline::step() {
     int ex = 0;
     for (auto it = shq_.begin(); it != shq_.end();) {
       auto &u = *it;
-      if (u.state != "ready" || isLoadOp(db_, u.op, dtype_) || isStoreOp(db_, u.op, dtype_)) {
+      if (u.state != "ready" || isLoadOp(db_, u.op, u.form) || isStoreOp(db_, u.op, u.form)) {
         ++it;
         continue;
       }
@@ -763,8 +789,8 @@ void OoOCoreMainline::step() {
           continue;
         }
       }
-      const std::string fuType = getFuType(u.op);
-      const std::vector<int> legalPorts = eligibleExuPorts(u.op);
+      const std::string fuType = getFuType(u);
+      const std::vector<int> legalPorts = eligibleExuPorts(u);
       int chosenPort = -1;
       for (int port : legalPorts) {
         if (port < 0 || port >= issuePorts_ || exuUsedThisCycle[static_cast<size_t>(port)])
@@ -772,10 +798,13 @@ void OoOCoreMainline::step() {
         const std::string *prevOp = enableCrossFuIi_ ? &lastOpExu_[static_cast<size_t>(port)]
                                                      : (fuType == "SFU" ? &lastOpSFU_[static_cast<size_t>(port)]
                                                                         : &lastOpALU_[static_cast<size_t>(port)]);
+        const std::string *prevForm = enableCrossFuIi_ ? &lastFormExu_[static_cast<size_t>(port)]
+                                                       : (fuType == "SFU" ? &lastFormSFU_[static_cast<size_t>(port)]
+                                                                          : &lastFormALU_[static_cast<size_t>(port)]);
         const int64_t prevIssue = enableCrossFuIi_ ? lastIssueCycleExu_[static_cast<size_t>(port)]
                                                    : (fuType == "SFU" ? lastIssueCycleSFU_[static_cast<size_t>(port)]
                                                                       : lastIssueCycleALU_[static_cast<size_t>(port)]);
-        if (c >= prevIssue + getIi(prevOp, u.op)) {
+        if (c >= prevIssue + getIi(prevOp, prevForm, u)) {
           chosenPort = port;
           break;
         }
@@ -785,7 +814,7 @@ void OoOCoreMainline::step() {
         continue;
       }
       u.startCycle = c;
-      u.doneCycle = c + std::max<int64_t>(1, db_.inst(u.op, dtype_).latency);
+      u.doneCycle = c + std::max<int64_t>(1, db_.instForm(u.op, u.form).latency);
       u.state = "running";
       u.exuPort = chosenPort;
       scheduleSrcReleaseFromStart(u);
@@ -805,17 +834,20 @@ void OoOCoreMainline::step() {
       if (enableCrossFuIi_) {
         lastIssueCycleExu_[static_cast<size_t>(chosenPort)] = c;
         lastOpExu_[static_cast<size_t>(chosenPort)] = u.op;
+        lastFormExu_[static_cast<size_t>(chosenPort)] = u.form;
       } else if (fuType == "SFU") {
         lastIssueCycleSFU_[static_cast<size_t>(chosenPort)] = c;
         lastOpSFU_[static_cast<size_t>(chosenPort)] = u.op;
+        lastFormSFU_[static_cast<size_t>(chosenPort)] = u.form;
       } else {
         lastIssueCycleALU_[static_cast<size_t>(chosenPort)] = c;
         lastOpALU_[static_cast<size_t>(chosenPort)] = u.op;
+        lastFormALU_[static_cast<size_t>(chosenPort)] = u.form;
       }
       exqInflight_[static_cast<size_t>(chosenPort)] += 1;
       for (const auto &pd : u.pregDst) {
         if (!pd.empty()) {
-          pregProducer_[pd] = std::make_tuple(u.op, *u.startCycle, std::string("COMPUTE"));
+          pregProducer_[pd] = ProducerInfo{u.op, u.form, *u.startCycle, std::string("COMPUTE")};
           pregPending_.erase(pd);
         }
       }
@@ -845,8 +877,8 @@ void OoOCoreMainline::step() {
         ++it;
         continue;
       }
-      const std::string fuType = getFuType(u.op);
-      const auto legalPorts = eligibleExuPorts(u.op);
+      const std::string fuType = getFuType(u);
+      const auto legalPorts = eligibleExuPorts(u);
       int chosenPort = -1;
       int64_t chosenPred = 0;
       int chosenOcc = 0;
@@ -866,9 +898,9 @@ void OoOCoreMainline::step() {
         const auto &fq = q.at(fuType);
         if (!fq.empty()) {
           const Uop &prev = fq.back();
-          pred = std::max<int64_t>(pred, prev.exqPredIssue + getIi(&prev.op, u.op));
+          pred = std::max<int64_t>(pred, prev.exqPredIssue + getIi(&prev.op, &prev.form, u));
         } else {
-          pred = std::max<int64_t>(pred, predictExqIssueCycle(port, fuType, u.op, recv));
+          pred = std::max<int64_t>(pred, predictExqIssueCycle(port, fuType, u.op, u.form, recv));
         }
         const auto key = std::make_tuple(pred, occ, port);
         const auto best = std::make_tuple(chosenPred, chosenOcc, chosenPort);
@@ -886,7 +918,7 @@ void OoOCoreMainline::step() {
       u.exqRecvCycle = c + exqRecvDelay_;
       u.exqPredIssue = chosenPred;
       u.state = "exq_wait";
-      if (usesSharedShqCredit(db_, u.op, dtype_)) {
+      if (usesSharedShqCredit(db_, u.op, u.form)) {
         scheduleShqRelease(c, 1);
         u.isShqTracked = false;
         if (auto *robU = findRobUop(u.instId))
@@ -929,11 +961,12 @@ void OoOCoreMainline::step() {
               pending = true;
             continue;
           }
-          ready = std::max<int64_t>(ready, computeReadyTimeForSrc(pit->second, cand.op));
+          ready = std::max<int64_t>(ready, computeReadyTimeForSrc(pit->second, cand));
         }
         if (pending || ready > c)
           continue;
-        const int64_t ii = getIi(&lastOpExu_[static_cast<size_t>(port)], cand.op);
+        const int64_t ii = getIi(&lastOpExu_[static_cast<size_t>(port)],
+                                 &lastFormExu_[static_cast<size_t>(port)], cand);
         if (c < lastIssueCycleExu_[static_cast<size_t>(port)] + ii)
           continue;
         auto key = std::make_tuple(ready, cand.exqRecvCycle, cand.instId);
@@ -948,7 +981,7 @@ void OoOCoreMainline::step() {
       Uop u = *bestU;
       q[bestFu].pop_front();
       u.startCycle = c;
-      u.doneCycle = c + std::max<int64_t>(1, db_.inst(u.op, dtype_).latency);
+      u.doneCycle = c + std::max<int64_t>(1, db_.instForm(u.op, u.form).latency);
       u.state = "running";
       u.exuPort = port;
       scheduleSrcReleaseFromStart(u);
@@ -962,18 +995,21 @@ void OoOCoreMainline::step() {
       logStartSimple(u);
       lastIssueCycleExu_[static_cast<size_t>(port)] = c;
       lastOpExu_[static_cast<size_t>(port)] = u.op;
+      lastFormExu_[static_cast<size_t>(port)] = u.form;
       if (bestFu == "SFU") {
         lastIssueCycleSFU_[static_cast<size_t>(port)] = c;
         lastOpSFU_[static_cast<size_t>(port)] = u.op;
+        lastFormSFU_[static_cast<size_t>(port)] = u.form;
       } else {
         lastIssueCycleALU_[static_cast<size_t>(port)] = c;
         lastOpALU_[static_cast<size_t>(port)] = u.op;
+        lastFormALU_[static_cast<size_t>(port)] = u.form;
       }
       exuUsedThisCycle[static_cast<size_t>(port)] = true;
       exqInflight_[static_cast<size_t>(port)] += 1;
       for (const auto &pd : u.pregDst) {
         if (!pd.empty()) {
-          pregProducer_[pd] = std::make_tuple(u.op, *u.startCycle, std::string("COMPUTE"));
+          pregProducer_[pd] = ProducerInfo{u.op, u.form, *u.startCycle, std::string("COMPUTE")};
           pregPending_.erase(pd);
         }
       }
@@ -983,7 +1019,7 @@ void OoOCoreMainline::step() {
   int st = 0;
   for (auto it = lsq_.begin(); it != lsq_.end();) {
     auto &u = *it;
-    if (u.state != "ready" || !isStoreOp(db_, u.op, dtype_)) {
+    if (u.state != "ready" || !isStoreOp(db_, u.op, u.form)) {
       ++it;
       continue;
     }
@@ -995,21 +1031,27 @@ void OoOCoreMainline::step() {
       continue;
     }
     u.producerOpForStore = std::get<1>(ready);
-    u.producerStartForStore = std::get<2>(ready);
+    u.producerFormForStore = std::get<2>(ready);
+    u.producerStartForStore = std::get<3>(ready);
     if (!u.producerOpForStore.has_value()) {
       ++it;
       continue;
     }
     u.startCycle = c;
-    u.doneCycle = c + dataStoreCost(*u.producerOpForStore);
+    u.doneCycle = c + dataStoreCost(ProducerInfo{
+                          *u.producerOpForStore,
+                          u.producerFormForStore.value_or(std::string{}),
+                          *u.producerStartForStore,
+                          std::string("COMPUTE")});
     u.state = "running";
     scheduleSrcReleaseFromStart(u);
-    if (usesSharedShqCredit(db_, u.op, dtype_)) {
+    if (usesSharedShqCredit(db_, u.op, u.form)) {
       scheduleShqRelease(c, 1);
       u.isShqTracked = false;
     }
     if (auto *robU = findRobUop(u.instId)) {
       robU->producerOpForStore = u.producerOpForStore;
+      robU->producerFormForStore = u.producerFormForStore;
       robU->producerStartForStore = u.producerStartForStore;
       robU->startCycle = u.startCycle;
       robU->doneCycle = u.doneCycle;
