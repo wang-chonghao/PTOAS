@@ -271,7 +271,7 @@ static LogicalResult appendLoadIfNeeded(VfSimProgramBuilder &builder,
   if (failed(source) || failed(reg))
     return failure();
   body.push_back(
-      makeInstNode(VfSimInst{VfOpcode::VLDS, {*reg}, {*source}}));
+      makeInstNode(VfSimInst{VfOpcode::VLDS, {}, {*reg}, {*source}}));
   valueToReg.try_emplace(input, *reg);
   return success();
 }
@@ -285,6 +285,27 @@ getTileInputReg(VfSimProgramBuilder &builder, std::vector<VfSimNode> &body,
   if (it == valueToReg.end())
     return failure();
   return it->second;
+}
+
+static Type getTileElementType(Value value) {
+  if (auto tileType = dyn_cast<pto::TileBufType>(value.getType()))
+    return tileType.getElementType();
+  return {};
+}
+
+static std::optional<std::pair<VfOpcode, std::string>>
+selectConvertOpcodeAndForm(Type srcType, Type dstType) {
+  if (!srcType || !dstType)
+    return std::nullopt;
+  if (srcType.isF16() && dstType.isF32())
+    return std::make_pair(VfOpcode::VCVT_F16_TO_F32, "f16_to_f32");
+  if (srcType.isF32() && dstType.isF16())
+    return std::make_pair(VfOpcode::VCVT_F32_TO_F16, "f32_to_f16");
+  if (srcType.isF32() && dstType.isInteger(32))
+    return std::make_pair(VfOpcode::VCVT_F32_TO_S32, "f32_to_s32");
+  if (srcType.isInteger(32) && dstType.isF32())
+    return std::make_pair(VfOpcode::VCVT_S32_TO_F32, "s32_to_f32");
+  return std::nullopt;
 }
 
 static FailureOr<VfSimOperand>
@@ -315,8 +336,25 @@ emitComputeNode(VfSimProgramBuilder &builder, std::vector<VfSimNode> &body,
       builder.makeVirtualReg(node.semantics.tileOutputs.front());
   if (failed(result))
     return failure();
+
+  VfOpcode opcode = spec->vectorOpcode;
+  std::string form;
+  if (node.semantics.opName == "tcvt") {
+    if (node.semantics.tileInputs.size() != 1 ||
+        node.semantics.tileOutputs.size() != 1)
+      return failure();
+    std::optional<std::pair<VfOpcode, std::string>> selected =
+        selectConvertOpcodeAndForm(
+            getTileElementType(node.semantics.tileInputs.front()),
+            getTileElementType(node.semantics.tileOutputs.front()));
+    if (!selected)
+      return failure();
+    opcode = selected->first;
+    form = selected->second;
+  }
+
   body.push_back(makeInstNode(
-      VfSimInst{spec->vectorOpcode, {*result}, std::move(src)}));
+      VfSimInst{opcode, form, {*result}, std::move(src)}));
   valueToReg[node.semantics.tileOutputs.front()] = *result;
   return *result;
 }
@@ -347,6 +385,8 @@ std::optional<TileOpPatternSpec> lookupTileOpPatternSpec(StringRef opName) {
                                     VfOpcode::VMIN, 2, 0})
           .Case("texp", PatternKey{TilePatternKind::UnaryElementwise,
                                     VfOpcode::VEXP, 1, 0})
+          .Case("tcvt", PatternKey{TilePatternKind::UnaryElementwise,
+                                    VfOpcode::VCVT_F32_TO_F16, 1, 0})
           .Case("tadds", PatternKey{TilePatternKind::ScaleElementwise,
                                      VfOpcode::VADDS, 1, 1})
           .Case("tsubs", PatternKey{TilePatternKind::ScaleElementwise,
@@ -444,7 +484,7 @@ buildFusedElementwiseVfSimProgram(const VfCostInput &input) {
       if (failed(destination))
         return failure();
       loopBody.push_back(makeInstNode(
-          VfSimInst{VfOpcode::VSTS, {*destination}, {regIt->second}}));
+          VfSimInst{VfOpcode::VSTS, {}, {*destination}, {regIt->second}}));
     }
   }
 

@@ -134,6 +134,8 @@ static void printVfSimNodeJson(const VfSimNode &node, raw_ostream &os,
   os << "{";
   os << "\"type\": \"inst\", \"op\": ";
   printJsonString(getVfOpcodeName(inst.opcode).upper(), os);
+  os << ", \"form\": ";
+  printJsonString(inst.form, os);
   os << ", \"dst\": ";
   printVfOperandArrayJson(inst.dst, os);
   os << ", \"src\": ";
@@ -175,6 +177,14 @@ StringRef getVfOpcodeName(VfOpcode opcode) {
     return "vmins";
   case VfOpcode::VEXP:
     return "vexp";
+  case VfOpcode::VCVT_F16_TO_F32:
+    return "vcvt_f16_to_f32";
+  case VfOpcode::VCVT_F32_TO_F16:
+    return "vcvt_f32_to_f16";
+  case VfOpcode::VCVT_F32_TO_S32:
+    return "vcvt_f32_to_s32";
+  case VfOpcode::VCVT_S32_TO_F32:
+    return "vcvt_s32_to_f32";
   }
   llvm_unreachable("unknown VF opcode");
 }

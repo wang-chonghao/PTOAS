@@ -23,7 +23,7 @@ bool isCurrentlyPlannableOp(StringRef opName) {
   return llvm::StringSwitch<bool>(opName)
       .Cases("tmul", "tdiv", "tadd", "tsub", "tmax", "tmin", true)
       .Cases("tmuls", "tdivs", "tadds", "tsubs", "tmaxs", "tmins", true)
-      .Case("texp", true)
+      .Cases("texp", "tcvt", true)
       .Case("texpands", true)
       .Cases("trowexpandmul", "trowexpanddiv", true)
       .Default(false);

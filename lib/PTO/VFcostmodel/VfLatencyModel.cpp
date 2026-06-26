@@ -57,9 +57,28 @@ std::string operandToName(const VfSimOperand &operand) {
   return makeVregName(operand.id);
 }
 
+std::string dtypeToString(VfDType dtype);
+
+std::string defaultFormForInst(const VfSimInst &inst) {
+  if (!inst.form.empty())
+    return inst.form;
+  for (const auto &dst : inst.dst) {
+    const std::string dtype = dtypeToString(dst.dtype);
+    if (!dtype.empty() && dtype != "unknown")
+      return dtype;
+  }
+  for (const auto &src : inst.src) {
+    const std::string dtype = dtypeToString(src.dtype);
+    if (!dtype.empty() && dtype != "unknown")
+      return dtype;
+  }
+  return "fp32";
+}
+
 vfsim::ProgramInstNode convertInst(const VfSimInst &inst) {
   vfsim::ProgramInstNode out;
   out.op = toUpper(std::string(getVfOpcodeName(inst.opcode)));
+  out.form = defaultFormForInst(inst);
   for (const auto &src : inst.src)
     out.src.push_back(operandToName(src));
   for (const auto &dst : inst.dst)
@@ -117,37 +136,6 @@ std::string dtypeToString(VfDType dtype) {
   return {};
 }
 
-std::string inferDType(const VfSimProgram &program) {
-  std::string dtype;
-  auto visitNode = [&](const auto &self, const VfSimNode &node) -> void {
-    if (node.kind == VfSimNode::Kind::Inst) {
-      auto checkOperand = [&](const VfSimOperand &op) {
-        const std::string cur = dtypeToString(op.dtype);
-        if (cur.empty())
-          return;
-        if (dtype.empty()) {
-          dtype = cur;
-          return;
-        }
-        if (dtype != cur)
-          throw std::runtime_error("mixed VF operand dtypes are not supported in native VfLatencyModel");
-      };
-      for (const auto &dst : node.inst.dst)
-        checkOperand(dst);
-      for (const auto &src : node.inst.src)
-        checkOperand(src);
-      return;
-    }
-    for (const auto &child : node.body)
-      self(self, child);
-  };
-
-  for (const auto &node : program.body)
-    visitNode(visitNode, node);
-
-  return dtype.empty() ? "fp32" : dtype;
-}
-
 std::filesystem::path nativeRootPath() {
 #ifdef PTOAS_VFSIM_ROOT
   return std::filesystem::path(PTOAS_VFSIM_ROOT);
@@ -174,7 +162,6 @@ public:
       const std::filesystem::path baseDir = nativeRootPath();
       vfsim::ParamDB pdb(baseDir);
       const auto nativeProgram = convertProgram(program);
-      const std::string dtype = inferDType(program);
 
       vfsim::ProgramAnalysis analysis;
       const auto topBlockLoopBounds = analysis.inferTopBlockLoopBounds(nativeProgram);
@@ -187,9 +174,9 @@ public:
       vfsim::ProgramFlatten flattener;
       const auto &linear = flattener.flatten(nativeProgram);
 
-      vfsim::IFU ifu(linear, {}, &pdb, topBlockLoopBounds, totalTopBlocks, dtype);
-      vfsim::IDU idu(pdb.uarch(), pdb, {}, {}, totalTopBlocks, topBlockLoopBounds, dtype);
-      vfsim::OoOCoreMainline ooo(pdb.uarch(), pdb, dtype);
+      vfsim::IFU ifu(linear, {}, &pdb, topBlockLoopBounds, totalTopBlocks);
+      vfsim::IDU idu(pdb.uarch(), pdb, {}, {}, totalTopBlocks, topBlockLoopBounds);
+      vfsim::OoOCoreMainline ooo(pdb.uarch(), pdb);
 
       std::string resultsDir;
       if (const char *env = std::getenv("PTOAS_VFSIM_OUT_DIR"))

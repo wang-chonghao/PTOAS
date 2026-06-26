@@ -12,10 +12,15 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace vfsim {
 
 struct InstConfig {
+  std::string form;
+  std::string dtype;
+  std::vector<std::string> srcDtypes;
+  std::vector<std::string> dstDtypes;
   int64_t pipelineStartupCost = 0;
   int64_t latency = 0;
   int64_t throughput = 0;

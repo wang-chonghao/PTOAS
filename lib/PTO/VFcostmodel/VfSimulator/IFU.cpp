@@ -257,6 +257,7 @@ DynamicInst IFU::emitNormalInst(const LinearProgramNode &node) {
   out.instId = instId_++;
   out.type = node.type;
   out.op = node.op;
+  out.form = node.form;
   out.src = node.src;
   out.dst = node.dst;
 
@@ -283,7 +284,8 @@ void IFU::buildPendingUnrolled(LoopFrame &frame) {
   std::vector<LinearProgramNode> alus;
   std::vector<LinearProgramNode> stores;
   for (const auto &n : body) {
-    const auto cls = db_ ? getOpClass(*db_, n.op, dtype_) : OpClass::Compute;
+    const std::string form = n.form.empty() ? dtype_ : n.form;
+    const auto cls = db_ ? getOpClass(*db_, n.op, form) : OpClass::Compute;
     if (cls == OpClass::Load)
       loads.push_back(n);
     else if (cls == OpClass::Store)
@@ -308,6 +310,7 @@ void IFU::buildPendingUnrolled(LoopFrame &frame) {
         inst.instId = instId_++;
         inst.type = ins.type;
         inst.op = ins.op;
+        inst.form = ins.form;
         inst.src = ins.src;
         inst.dst = ins.dst;
         inst.loopStack = loopStack;
