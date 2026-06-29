@@ -5454,7 +5454,7 @@ LogicalResult pto::TCIOp::verify() {
 
   unsigned bw = elemTy.getWidth();
   if (bw != 16 && bw != 32)
-    return emitOpError("expects dst element type to be i16/i32");
+    return emitOpError("expects dst element type to be i16/ui16/i32/ui32");
 
   auto sTy = mlir::dyn_cast<IntegerType>(getOperand(0).getType());
   if (!sTy)
