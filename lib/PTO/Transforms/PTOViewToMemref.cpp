@@ -1598,12 +1598,6 @@ struct PTOViewToMemrefPass
         return;
       }
 
-      if (!func.isExternal() &&
-          failed(synthesizeMissingTQuantTmpOps(func, ctx))) {
-        signalPassFailure();
-        return;
-      }
-
       auto fnTy = func.getFunctionType();
 
       // ------------------------------------------------------------------
@@ -1631,6 +1625,14 @@ struct PTOViewToMemrefPass
       // Stage 0.20: lower pto.inttoptr result types to GM memrefs.
       // ------------------------------------------------------------------
       if (failed(lowerIntToPtrOps(func, ctx))) {
+        signalPassFailure();
+        return;
+      }
+
+      // ------------------------------------------------------------------
+      // Stage 0.25: synthesize missing A2/A3 tquant tmp tiles before type lowering.
+      // ------------------------------------------------------------------
+      if (failed(synthesizeMissingTQuantTmpOps(func, ctx))) {
         signalPassFailure();
         return;
       }
@@ -3129,6 +3131,7 @@ struct PTOViewToMemrefPass
         Value src = op.getSrc();
         Value indexRow = op.getIndexRow();
         Value indexCol = op.getIndexCol();
+        Value preQuantScalar = op.getPreQuantScalar();
         Value dst = op.getDst();
 
         auto srcTy = dyn_cast<MemRefType>(src.getType());
@@ -3141,13 +3144,93 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TExtractOp>(
-            op,
-            TypeRange{},
-            src,
-            indexRow,
-            indexCol,
-            dst);
+        replaceOpWithClonedAttrs<pto::TExtractOp>(
+            rewriter, op, TypeRange{}, src, indexRow, indexCol,
+            preQuantScalar, dst, op.getAccToVecModeAttr(),
+            op.getReluPreModeAttr());
+      }
+
+      DefaultInlineVector<mlir::pto::TExtractFPOp> extractfpops;
+      func.walk([&](mlir::pto::TExtractFPOp op) { extractfpops.push_back(op); });
+      for (auto op : extractfpops) {
+        IRRewriter rewriter(ctx);
+        rewriter.setInsertionPoint(op);
+
+        Value src = op.getSrc();
+        Value fp = op.getFp();
+        Value indexRow = op.getIndexRow();
+        Value indexCol = op.getIndexCol();
+        Value dst = op.getDst();
+
+        if (!dyn_cast<MemRefType>(src.getType()) ||
+            !dyn_cast<MemRefType>(fp.getType()) ||
+            !dyn_cast<IndexType>(indexRow.getType()) ||
+            !dyn_cast<IndexType>(indexCol.getType()) ||
+            !dyn_cast<MemRefType>(dst.getType())) {
+          op.emitError("ins/outs are not correct yet");
+          signalPassFailure();
+          return;
+        }
+
+        replaceOpWithClonedAttrs<pto::TExtractFPOp>(
+            rewriter, op, TypeRange{}, src, fp, indexRow, indexCol, dst,
+            op.getAccToVecModeAttr(), op.getReluPreModeAttr());
+      }
+
+      DefaultInlineVector<mlir::pto::TInsertOp> insertops;
+      func.walk([&](mlir::pto::TInsertOp op) { insertops.push_back(op); });
+      for (auto op : insertops) {
+        IRRewriter rewriter(ctx);
+        rewriter.setInsertionPoint(op);
+
+        Value src = op.getSrc();
+        Value indexRow = op.getIndexRow();
+        Value indexCol = op.getIndexCol();
+        Value fp = op.getFp();
+        Value preQuantScalar = op.getPreQuantScalar();
+        Value dst = op.getDst();
+
+        if (!dyn_cast<MemRefType>(src.getType()) ||
+            !dyn_cast<IndexType>(indexRow.getType()) ||
+            !dyn_cast<IndexType>(indexCol.getType()) ||
+            !dyn_cast<MemRefType>(dst.getType()) ||
+            (fp && !dyn_cast<MemRefType>(fp.getType()))) {
+          op.emitError("ins/outs are not correct yet");
+          signalPassFailure();
+          return;
+        }
+
+        replaceOpWithClonedAttrs<pto::TInsertOp>(
+            rewriter, op, TypeRange{}, src, indexRow, indexCol, dst, fp,
+            preQuantScalar, op.getAccToVecModeAttr(), op.getReluPreModeAttr(),
+            op.getTinsertModeAttr());
+      }
+
+      DefaultInlineVector<mlir::pto::TInsertFPOp> insertfpops;
+      func.walk([&](mlir::pto::TInsertFPOp op) { insertfpops.push_back(op); });
+      for (auto op : insertfpops) {
+        IRRewriter rewriter(ctx);
+        rewriter.setInsertionPoint(op);
+
+        Value src = op.getSrc();
+        Value fp = op.getFp();
+        Value indexRow = op.getIndexRow();
+        Value indexCol = op.getIndexCol();
+        Value dst = op.getDst();
+
+        if (!dyn_cast<MemRefType>(src.getType()) ||
+            !dyn_cast<MemRefType>(fp.getType()) ||
+            !dyn_cast<IndexType>(indexRow.getType()) ||
+            !dyn_cast<IndexType>(indexCol.getType()) ||
+            !dyn_cast<MemRefType>(dst.getType())) {
+          op.emitError("ins/outs are not correct yet");
+          signalPassFailure();
+          return;
+        }
+
+        replaceOpWithClonedAttrs<pto::TInsertFPOp>(
+            rewriter, op, TypeRange{}, src, fp, indexRow, indexCol, dst,
+            op.getAccToVecModeAttr(), op.getReluPreModeAttr());
       }
 
       DefaultInlineVector<mlir::pto::TFillPadOp> fillpadops;
@@ -3584,8 +3667,8 @@ struct PTOViewToMemrefPass
 
         Value src = op.getSrc();
         Value fp = op.getFp();
-        Value offset = op.getOffset();
         Value tmp = op.getTmp();
+        Value offset = op.getOffset();
         Value dst = op.getDst();
 
         auto srcTy = dyn_cast<MemRefType>(src.getType());
@@ -3596,23 +3679,13 @@ struct PTOViewToMemrefPass
           signalPassFailure();
           return;
         }
-        if (offset && !dyn_cast<MemRefType>(offset.getType())) {
-          op.emitError("offset is not memref yet");
+        if (tmp && !dyn_cast<MemRefType>(tmp.getType())) {
+          op.emitError("tmp is not memref yet");
           signalPassFailure();
           return;
         }
-        if (!tmp &&
-            mlir::pto::getTargetArch(op.getOperation()) !=
-                mlir::pto::PTOArch::A5) {
-          if (!srcTy.hasStaticShape()) {
-            op.emitError("cannot synthesize tquant tmp for dynamic memref src");
-            signalPassFailure();
-            return;
-          }
-          tmp = rewriter.create<memref::AllocOp>(op.getLoc(), srcTy).getResult();
-        }
-        if (tmp && !dyn_cast<MemRefType>(tmp.getType())) {
-          op.emitError("tmp is not memref yet");
+        if (offset && !dyn_cast<MemRefType>(offset.getType())) {
+          op.emitError("offset is not memref yet");
           signalPassFailure();
           return;
         }
@@ -3931,10 +4004,11 @@ struct PTOViewToMemrefPass
         rewriter.setInsertionPoint(op);
 
         Value src = op.getSrc();
-        auto printFormatAttr = op.getPrintFormatAttr();
+        Value tmp = op->getNumOperands() > 1 ? op->getOperand(1) : Value();
 
         auto srcTy = dyn_cast<MemRefType>(src.getType());
-        if (!srcTy) {
+        auto tmpTy = tmp ? dyn_cast<MemRefType>(tmp.getType()) : MemRefType();
+        if (!srcTy || (tmp && !tmpTy)) {
           op.emitError("ins/outs are not memref yet");
           signalPassFailure();
           return;
@@ -3944,7 +4018,9 @@ struct PTOViewToMemrefPass
             op,
             TypeRange{},
             src,
-            printFormatAttr);
+            tmp,
+            dyn_cast_or_null<pto::PrintFormatAttr>(
+                op.getProperties().printFormat));
       }
 
       // ------------------------------------------------------------------

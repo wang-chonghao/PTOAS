@@ -986,9 +986,8 @@ func::FuncOp ExpandState::invokeTilelangDaemon(const SpecKey &key,
   OpBuilder builder(ctx);
   builder.setInsertionPointToEnd(mod.getBody());
 
-  DenseMap<StringRef, StringRef> renamedSymbols;
+  llvm::StringMap<std::string> renamedSymbols;
   SmallVector<func::FuncOp, 4> clonedFuncs;
-  std::vector<std::string> newNameStorage;
 
   std::string uniqueName = buildUniqueFunctionBaseName(key);
   SymbolTable targetSymTable(mod);
@@ -1005,9 +1004,8 @@ func::FuncOp ExpandState::invokeTilelangDaemon(const SpecKey &key,
     } else {
       newName = uniqueName + "__" + std::string(fn.getSymName());
     }
-    newNameStorage.push_back(newName);
-    renamedSymbols[fn.getSymName()] = newNameStorage.back();
-    cloned.setName(newNameStorage.back());
+    renamedSymbols[fn.getSymName()] = newName;
+    cloned.setName(newName);
     
     // Set visibility to Private for template functions (required for inline pass)
     cloned.setVisibility(SymbolTable::Visibility::Private);

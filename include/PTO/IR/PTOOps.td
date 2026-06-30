@@ -2861,13 +2861,7 @@ def MGatherOp : PTO_TOp<"mgather", [
   let results = (outs);
 
   let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    `ins` `(` $mem `,` $idx (`,` $scratch^)? `:`
-        type($mem) `,` type($idx) (`,` type($scratch)^)? `)`
-    `outs` `(` $dst `:` qualified(type($dst) ) `)`
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     static StringRef getIntrinsicName() { return "MGATHER"; }
@@ -3075,12 +3069,7 @@ def MScatterOp : PTO_TOp<"mscatter", [
   let results = (outs);
 
   let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    `ins` `(` $src `,` $idx `:` qualified(type($src)) `,` type($idx) `)`
-    `outs` `(` $mem `:` type($mem) `)`
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     static StringRef getIntrinsicName() { return "MSCATTER"; }
@@ -4282,7 +4271,10 @@ def TExtractOp : PTO_TOp<"textract", [
     PTODpsType:$src,
     Index:$indexRow,
     Index:$indexCol,
-    PTODpsType:$dst
+    Optional<I64>:$preQuantScalar,
+    PTODpsType:$dst,
+    OptionalAttr<PTO_AccToVecModeAttr>:$accToVecMode,
+    DefaultValuedAttr<PTO_ReluPreModeAttr, "::mlir::pto::ReluPreMode::NoRelu">:$reluPreMode
   );
 
   let results = (outs);
@@ -4290,7 +4282,7 @@ def TExtractOp : PTO_TOp<"textract", [
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    `ins` `(` $src `,` $indexRow `,` $indexCol `:` qualified(type($src)) `,` type($indexRow) `,` type($indexCol) `)`
+    `ins` `(` $src `,` $indexRow `,` $indexCol (`,` $preQuantScalar^)? `:` qualified(type($src)) `,` type($indexRow) `,` type($indexCol) (`,` type($preQuantScalar)^)? `)`
     `outs` `(` $dst `:` qualified(type($dst) ) `)`
     attr-dict
   }];
@@ -4368,7 +4360,9 @@ def TExtractFPOp : PTO_TOp<"textract_fp", [
     PTODpsType:$fp,
     Index:$indexRow,
     Index:$indexCol,
-    PTODpsType:$dst
+    PTODpsType:$dst,
+    OptionalAttr<PTO_AccToVecModeAttr>:$accToVecMode,
+    DefaultValuedAttr<PTO_ReluPreModeAttr, "::mlir::pto::ReluPreMode::NoRelu">:$reluPreMode
   );
 
   let results = (outs);
@@ -4413,8 +4407,8 @@ def TInsertOp : PTO_TOp<"tinsert", [
 
   let assemblyFormat = [{
     `ins` `(` $src `,` $indexRow `,` $indexCol `:` qualified(type($src)) `,` type($indexRow) `,` type($indexCol)
-    (`,` $fp^ `:` qualified(type($fp)))?
-    (`,` $preQuantScalar^ `:` type($preQuantScalar))?
+    (`fp` $fp^ `:` qualified(type($fp)))?
+    (`pre_quant` $preQuantScalar^ `:` type($preQuantScalar))?
     `)`
     `outs` `(` $dst `:` qualified(type($dst) ) `)`
     attr-dict
@@ -5407,7 +5401,6 @@ def TQuantOp : PTO_TOp<"tquant", [
   let results = (outs);
 
   let hasVerifier = 1;
-
   let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
@@ -5432,6 +5425,9 @@ def TQuantMxOp : PTO_TOp<"tquant.mx", [
       pto.tquant.mx ins(%src : <src_type>)
                     outs(%dst, %exp, %max, %scaling : <dst_type>, <exp_type>, <max_type>, <scaling_type>)
                     {quant_type = #pto<quant_type MXFP8>}
+      pto.tquant.mx ins(%src : <src_type>)
+                    outs(%dst, %exp, %max, %scaling, %exp_zz : <dst_type>, <exp_type>, <max_type>, <scaling_type>, <exp_type>)
+                    {quant_type = #pto<quant_type MXFP8>, storeMode = #pto<vec_store_mode nz>}
   }];
 
   let arguments = (ins
@@ -5440,24 +5436,21 @@ def TQuantMxOp : PTO_TOp<"tquant.mx", [
     PTODpsType:$exp,
     PTODpsType:$max,
     PTODpsType:$scaling,
-    PTO_QuantTypeAttr:$quant_type
+    Optional<PTODpsType>:$exp_zz,
+    PTO_QuantTypeAttr:$quant_type,
+    DefaultValuedAttr<PTO_QuantScaleAlgAttr, "::mlir::pto::QuantScaleAlg::OCP">:$quantScaleAlg,
+    OptionalAttr<PTO_VecStoreModeAttr>:$storeMode
   );
 
   let results = (outs);
 
   let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    `ins` `(` $src `:` qualified(type($src)) `)`
-    `outs` `(` $dst `,` $exp `,` $max `,` $scaling `:` qualified(type($dst)) `,`
-                  qualified(type($exp)) `,` qualified(type($max)) `,` qualified(type($scaling)) `)`
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
     ::mlir::MutableOperandRange getDpsInitsMutable() {
-      return ::mlir::MutableOperandRange(getOperation(), 1, 4);
+      return ::mlir::MutableOperandRange(getOperation(), 1, getExpZz() ? 5 : 4);
     }
   }];
 }
@@ -5817,6 +5810,7 @@ def TRowExpandAddOp: PTO_TOp<"trowexpandadd", [
   let results = (outs);
 
   let hasVerifier = 1;
+
   let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
@@ -6465,8 +6459,6 @@ def TStoreFPOp: PTO_TOp<"tstore_fp", [
     attr-dict
   }];
   let extraClassDeclaration = [{
-    // TStoreFPOp always transfers ACC data to GM through the FIXPIPE
-    // write-back path (same pipe used by other ACC-store variants).
     ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_FIX; }
     ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
   }];
@@ -6690,21 +6682,24 @@ def TPrintOp: PTO_TOp<"tprint", [
   OpPipeInterface,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
-  let summary = "TPRINT: Print the contents of a Tile or GlobalTensor for debugging purposes directly from device code..";
+  let summary = "TPRINT: Print the contents of a Tile or GlobalTensor for debugging purposes directly from device code.";
+  let description = [{
+    pto-isa overloads support `TPRINT(src)` and `TPRINT<Format>(src, tmp)`.
+    The optional tmp operand is used when printing Mat/Acc tiles through a
+    scratch GlobalTensor, while Vec tiles and GlobalTensors can be printed
+    without tmp.
+  }];
 
   let arguments = (ins
     PTODpsType:$src,
-    DefaultValuedOptionalAttr<I32Attr, "0">:$printFormat
+    Optional<PTODpsType>:$tmp,
+    OptionalAttr<PTO_PrintFormatAttr>:$printFormat
   );
 
   let results = (outs);
 
   let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    `ins` `(` $src `:` qualified(type($src)) `)`
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }

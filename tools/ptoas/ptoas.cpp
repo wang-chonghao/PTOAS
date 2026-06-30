@@ -17,6 +17,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
@@ -1681,6 +1682,14 @@ int mlir::pto::compilePTOASModule(
     return 1;
   }
 
+  module->getOperation()->setAttr("pto.target_arch",
+                                  mlir::StringAttr::get(module->getContext(), arch));
+
+  if (failed(mlir::verify(module.get()))) {
+    llvm::errs() << "Error: input module verification failed.\n";
+    return 1;
+  }
+
   if (enableOpFusion) {
     if (arch != "a5") {
       llvm::errs() << "Warning: --enable-op-fusion is ignored because "
@@ -1914,9 +1923,6 @@ int mlir::pto::compilePTOASModule(
   pm.addPass(createCSEPass());
   if (failed(applyConfiguredPassManagerCLOptions(pm, "main PTOAS pipeline")))
     return 1;
-
-  module->getOperation()->setAttr("pto.target_arch",
-                                  mlir::StringAttr::get(module->getContext(), arch));
 
   if (effectiveBackend == PTOBackend::VPTO) {
     if (failed(pm.run(*module))) {

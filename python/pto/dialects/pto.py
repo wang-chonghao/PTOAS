@@ -122,6 +122,8 @@ CompactMode = _pto_mod.CompactMode
 CompactModeAttr = _pto_mod.CompactModeAttr
 AccToVecMode = _pto_mod.AccToVecMode
 AccToVecModeAttr = _pto_mod.AccToVecModeAttr
+TInsertMode = _pto_mod.TInsertMode
+TInsertModeAttr = _pto_mod.TInsertModeAttr
 ReluPreMode = _pto_mod.ReluPreMode
 ReluPreModeAttr = _pto_mod.ReluPreModeAttr
 AtomicType = _pto_mod.AtomicType
@@ -162,10 +164,16 @@ SyncOpType = _pto_mod.SyncOpType
 SyncOpTypeAttr = _pto_mod.SyncOpTypeAttr
 EVENT = _pto_mod.EVENT
 EventAttr = _pto_mod.EventAttr
+Coalesce = _pto_mod.Coalesce
+CoalesceAttr = _pto_mod.CoalesceAttr
 MaskPattern = _pto_mod.MaskPattern
 MaskPatternAttr = _pto_mod.MaskPatternAttr
 QuantType = _pto_mod.QuantType
 QuantTypeAttr = _pto_mod.QuantTypeAttr
+QuantScaleAlg = _pto_mod.QuantScaleAlg
+QuantScaleAlgAttr = _pto_mod.QuantScaleAlgAttr
+VecStoreMode = _pto_mod.VecStoreMode
+VecStoreModeAttr = _pto_mod.VecStoreModeAttr
 
 
 _ptr_type_get_impl = PtrType.get
@@ -270,6 +278,8 @@ __all__ = [
     "CompactModeAttr",
     "AccToVecMode",
     "AccToVecModeAttr",
+    "TInsertMode",
+    "TInsertModeAttr",
     "ReluPreMode",
     "ReluPreModeAttr",
     "AtomicType",
@@ -310,10 +320,16 @@ __all__ = [
     "SyncOpTypeAttr",
     "EVENT",
     "EventAttr",
+    "Coalesce",
+    "CoalesceAttr",
     "MaskPattern",
     "MaskPatternAttr",
     "QuantType",
     "QuantTypeAttr",
+    "QuantScaleAlg",
+    "QuantScaleAlgAttr",
+    "VecStoreMode",
+    "VecStoreModeAttr",
     "TileBufConfigAttr",
     "TileConfig",
     # High-level sync helpers
