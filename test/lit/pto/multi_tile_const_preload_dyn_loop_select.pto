@@ -73,7 +73,7 @@ module {
 // MAT: %[[DYN_ADDR:[A-Za-z0-9_]+]] = arith.select %[[COND]], %[[ADDR1]], %[[ADDR0]] : i64
 // MAT: pto.alloc_tile addr = %[[DYN_ADDR]]
 
-// EMITC: __global__ AICORE void const_preload_dyn_loop_select
+// EMITC: AICORE void const_preload_dyn_loop_select
 // EMITC: for (
 // EMITC-NEXT: Tile<TileType::Vec{{.*}}> [[TILE:v[0-9]+]];
 // EMITC-NEXT: uint64_t [[ADDR:v[0-9]+]] = (uint64_t)

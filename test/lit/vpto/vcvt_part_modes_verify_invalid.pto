@@ -8,7 +8,7 @@
 
 // RUN: not ptoas --pto-arch=a5 --pto-backend=vpto %s 2>&1 | FileCheck %s
 
-// CHECK: error: 'pto.vcvt' op part must be P0, P1, P2, or P3 for 8/32 vcvt forms
+// CHECK: error: 'pto.vcvt' op part must be P0, P1, P2, or P3 for packed vcvt forms
 
 module attributes {pto.target_arch = "a5"} {
   func.func @vcvt_u32_to_u8_rejects_even(%seed: ui32) {

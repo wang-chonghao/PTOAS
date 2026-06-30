@@ -30,14 +30,14 @@ env:
 
 jobs:
   build_wheel:
-    # Wheel publication is paused, but this job still builds and uploads the
-    # packaged ptoas binary distribution.
-    name: Build ptoas-bin (${{ matrix.arch }})
+    # Non-release runs keep a single-Python matrix for faster gates;
+    # release/nightly runs fan out to publish the full wheel set plus binary artifacts.
+    name: Build ptoas-bin (${{ matrix.arch }}, py${{ matrix.python }})
     runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11"]
+        python: ${{ fromJson((github.event_name == 'release' || github.event_name == 'schedule') && '["3.10","3.11","3.12"]' || '["3.11"]') }}
         arch: ["x86_64", "aarch64"]
 
     container:
@@ -163,14 +163,14 @@ jobs:
           pip install . --no-build-isolation
 
       - name: Create Python wheel
-        if: false
+        if: github.event_name == 'release' || github.event_name == 'schedule'
         run: |
           export PATH="${PY_PATH}/bin:$PATH"
           export PTOAS_PYTHON_PACKAGE_VERSION="${PTOAS_VERSION}"
           bash $PTO_SOURCE_DIR/docker/create_wheel.sh
 
       - name: Repair wheel with auditwheel
-        if: false
+        if: github.event_name == 'release' || github.event_name == 'schedule'
         run: |
           export PATH="${PY_PATH}/bin:$PATH"
           export PTO_WHEEL_DIST_DIR=$PTO_SOURCE_DIR/build/wheel-dist
@@ -180,7 +180,7 @@ jobs:
           auditwheel repair --plat manylinux_2_34_${{ matrix.arch }} "$PTO_WHEEL_DIST_DIR"/ptoas*.whl -w "$PTO_WHEELHOUSE"
 
       - name: Test wheel installation
-        if: false
+        if: github.event_name == 'release' || github.event_name == 'schedule'
         run: |
           export PATH="${PY_PATH}/bin:$PATH"
           pip install $GITHUB_WORKSPACE/wheelhouse/ptoas*.whl
@@ -191,35 +191,35 @@ jobs:
           export PATH="${PY_PATH}/bin:$PATH"
           bash $PTO_SOURCE_DIR/docker/test_ptoas_cli.sh
 
-      - name: Copy wheel to workspace
-        if: false
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/wheelhouse
-          if ! compgen -G "$GITHUB_WORKSPACE/wheelhouse/ptoas*.whl" >/dev/null; then
-            cp $PTO_SOURCE_DIR/build/wheel-dist/ptoas*.whl $GITHUB_WORKSPACE/wheelhouse/
-          fi
-
       - name: Upload wheel artifact
-        if: false
+        if: github.event_name == 'release' || github.event_name == 'schedule'
         uses: actions/upload-artifact@v4
         with:
           name: ptoas-wheel-py${{ matrix.python }}-${{ matrix.arch }}
           path: wheelhouse/*.whl
 
       - name: Collect ptoas binary and dependencies
+        if: matrix.python == '3.11'
         run: |
           bash $PTO_SOURCE_DIR/docker/collect_ptoas_dist.sh $GITHUB_WORKSPACE/ptoas-dist
 
+      - name: Archive ptoas binary artifact
+        if: matrix.python == '3.11'
+        run: |
+          chmod +x "$GITHUB_WORKSPACE/ptoas-dist/ptoas" "$GITHUB_WORKSPACE/ptoas-dist/bin/ptoas"
+          tar -czf "$GITHUB_WORKSPACE/ptoas-bin-${{ matrix.arch }}.tar.gz" \
+            -C "$GITHUB_WORKSPACE/ptoas-dist" .
+
       - name: Upload ptoas binary artifact
+        if: matrix.python == '3.11'
         uses: actions/upload-artifact@v4
         with:
           name: ptoas-bin-${{ matrix.arch }}
-          path: ptoas-dist/
+          path: ptoas-bin-${{ matrix.arch }}.tar.gz
 
   upload_release_assets:
-    # Disabled together with build_wheel because wheel publication is paused.
-    if: false
     name: Upload release assets
+    if: github.event_name == 'release' || github.event_name == 'schedule'
     needs: build_wheel
     runs-on: ubuntu-latest
 
@@ -271,13 +271,13 @@ jobs:
           name: ptoas-bin-aarch64
           path: release-artifacts/ptoas-bin-aarch64
 
-      - name: Package ptoas binaries
+      - name: Collect packaged ptoas binaries
         run: |
           set -euo pipefail
-          tar -czf "release-artifacts/ptoas-bin-x86_64.tar.gz" \
-            -C "release-artifacts/ptoas-bin-x86_64" .
-          tar -czf "release-artifacts/ptoas-bin-aarch64.tar.gz" \
-            -C "release-artifacts/ptoas-bin-aarch64" .
+          mv "release-artifacts/ptoas-bin-x86_64/ptoas-bin-x86_64.tar.gz" \
+            "release-artifacts/ptoas-bin-x86_64.tar.gz"
+          mv "release-artifacts/ptoas-bin-aarch64/ptoas-bin-aarch64.tar.gz" \
+            "release-artifacts/ptoas-bin-aarch64.tar.gz"
 
       - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2

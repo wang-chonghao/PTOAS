@@ -26,6 +26,20 @@ _DTYPE_TO_CPP = {
     np.uint32: "uint32_t",
     np.int64: "int64_t",
     np.uint64: "uint64_t",
+    cases.F8E4M3: "float8_e4m3_t",
+    cases.F8E5M2: "float8_e5m2_t",
+    cases.HIF8: "hifloat8_t",
+    cases.F4E1M2X2: "float4_e1m2x2_t",
+    cases.F4E2M1X2: "float4_e2m1x2_t",
+}
+
+_DTYPE_TO_STORAGE_CPP = {
+    **_DTYPE_TO_CPP,
+    cases.F8E4M3: "uint8_t",
+    cases.F8E5M2: "uint8_t",
+    cases.HIF8: "uint8_t",
+    cases.F4E1M2X2: "uint8_t",
+    cases.F4E2M1X2: "uint8_t",
 }
 
 def gen_launch():
@@ -114,10 +128,11 @@ def gen_main():
     case_entries = []
     for c in cases.CASES:
         name = c["name"]
-        src_cpp = _DTYPE_TO_CPP.get(c["src_dtype"], "float")
-        dst_cpp = _DTYPE_TO_CPP.get(c["dst_dtype"], "float")
+        src_cpp = _DTYPE_TO_STORAGE_CPP.get(c["src_dtype"], "float")
+        dst_cpp = _DTYPE_TO_STORAGE_CPP.get(c["dst_dtype"], "float")
         rows, cols = c["shape"]
-        case_entries.append(f'    {{"{name}", LaunchTCVT_{name}, {rows}, {cols}, {rows}, {cols}, sizeof({src_cpp}), sizeof({dst_cpp})}},')
+        dst_rows, dst_cols = c.get("dst_shape", c["shape"])
+        case_entries.append(f'    {{"{name}", LaunchTCVT_{name}, {rows}, {cols}, {dst_rows}, {dst_cols}, sizeof({src_cpp}), sizeof({dst_cpp})}},')
     
     lines.extend(case_entries)
     lines.extend([

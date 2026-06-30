@@ -56,6 +56,8 @@ def _tmov_ub2ub_nd2nd_constraint(src: pto.Tile, dst: pto.Tile) -> bool:
         return False
     if dst_config.s_layout != pto.SLayout.NONE_BOX:
         return False
+    if pto.bytewidth(src.dtype) != pto.bytewidth(dst.dtype):
+        return False
 
     return True
 
@@ -78,8 +80,9 @@ def template_tmov_basic(src: pto.Tile, dst: pto.Tile):
         src: Source tile (Vec location)
         dst: Destination tile (Vec location)
     """
-    dtype = dst.element_type
-    lanes = pto.get_lanes(dtype)
+    src_dtype = src.element_type
+    dst_dtype = dst.element_type
+    lanes = pto.get_lanes(dst_dtype)
 
     # Use dst.valid_shape as the copy dimensions
     # The dst tile defines how many elements to write
@@ -88,8 +91,10 @@ def template_tmov_basic(src: pto.Tile, dst: pto.Tile):
     for row in range(0, valid_rows, 1):
         remained = valid_cols
         for col in range(0, valid_cols, lanes):
-            mask, remained = pto.make_mask(dtype, remained)
+            mask, remained = pto.make_mask(dst_dtype, remained)
             data = pto.vlds(src[row, col:])
+            if pto.constexpr(src_dtype != dst_dtype):
+                data = pto.vbitcast(data, dst_dtype)
             pto.vsts(data, dst[row, col:], mask)
 
     return None

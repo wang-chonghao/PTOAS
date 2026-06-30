@@ -21,7 +21,8 @@ from pathlib import Path
 def _candidate_python_roots() -> list[Path]:
     here = Path(__file__).resolve()
     repo_root = here.parents[2]
-    workspace_root = repo_root.parent
+    owner_root = repo_root.parent
+    github_root = owner_root.parent
     env_roots = []
     for env_name in ("MLIR_PYTHON_ROOT", "PTO_PYTHON_ROOT"):
         raw = os.environ.get(env_name)
@@ -32,7 +33,9 @@ def _candidate_python_roots() -> list[Path]:
         *env_roots,
         repo_root / "build" / "python",
         repo_root / "install",
-        workspace_root / "llvm-project" / "build-shared" / "tools" / "mlir" / "python_packages" / "mlir_core",
+        github_root / "llvm" / "llvm-project" / "build" / "tools" / "mlir" / "python_packages" / "mlir_core",
+        github_root / "llvm" / "llvm-project" / "install" / "python_packages" / "mlir_core",
+        github_root / "llvm" / "llvm-project" / "build-shared" / "tools" / "mlir" / "python_packages" / "mlir_core",
     ]
 
 

@@ -128,6 +128,18 @@ def _get_mlir_bf16_type(ctx):
     return _mlir_ir.BF16Type.get(ctx)
 
 
+def _get_mlir_f8e4m3_type(ctx):
+    """Get mlir.ir.Float8E4M3FNType."""
+    _ensure_mlir_bindings()
+    return _mlir_ir.Float8E4M3FNType.get(ctx)
+
+
+def _get_mlir_f8e5m2_type(ctx):
+    """Get mlir.ir.Float8E5M2Type."""
+    _ensure_mlir_bindings()
+    return _mlir_ir.Float8E5M2Type.get(ctx)
+
+
 def _get_mlir_index_type(ctx):
     """Get mlir.ir.IndexType."""
     _ensure_mlir_bindings()
@@ -304,7 +316,7 @@ class PybindRenderer:
         # Create function in module body
         with InsertionPoint(self._module.body):
             fn = _func_dialect.FuncOp(self.kernel.symbol_name, fn_ty)
-            # Add tilelang.instance attribute
+            fn.attributes["pto.entry"] = _get_mlir_unit_attr(self._ctx)
             fn.attributes["pto.tilelang.instance"] = _get_mlir_unit_attr(self._ctx)
             self._entry_block = fn.add_entry_block()
 
@@ -355,6 +367,16 @@ class PybindRenderer:
             return _get_mlir_f16_type(self._ctx)
         if name == "bf16":
             return _get_mlir_bf16_type(self._ctx)
+        if name == "f8e4m3":
+            return _get_mlir_f8e4m3_type(self._ctx)
+        if name == "f8e5m2":
+            return _get_mlir_f8e5m2_type(self._ctx)
+        if name == "hif8" and _pto_dialect is not None:
+            return _pto_dialect.HiF8Type.get()
+        if name == "f4e1m2x2" and _pto_dialect is not None:
+            return _pto_dialect.F4E1M2x2Type.get()
+        if name == "f4e2m1x2" and _pto_dialect is not None:
+            return _pto_dialect.F4E2M1x2Type.get()
         if name == "index":
             return _get_mlir_index_type(self._ctx)
 
@@ -1506,6 +1528,8 @@ class PybindRenderer:
             sizes = {
                 "i1": 1, "i8": 1, "i16": 2, "i32": 4, "i64": 8,
                 "f16": 2, "bf16": 2, "f32": 4,
+                "hif8": 1, "f8e4m3": 1, "f8e5m2": 1,
+                "f4e1m2x2": 1, "f4e2m1x2": 1,
             }
             return sizes.get(name, 4)
         return 4  # Default size
@@ -2520,6 +2544,8 @@ class PybindRenderer:
         sizes = {
             "i1": 1, "i8": 1, "i16": 2, "i32": 4, "i64": 8,
             "f16": 2, "bf16": 2, "f32": 4,
+            "hif8": 1, "f8e4m3": 1, "f8e5m2": 1,
+            "f4e1m2x2": 1, "f4e2m1x2": 1,
         }
         return sizes.get(name, 4)
 

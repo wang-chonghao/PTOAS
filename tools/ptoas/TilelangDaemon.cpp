@@ -12,9 +12,12 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include <chrono>
-#include <thread>
-#include <signal.h>
 #include <cstdlib>
+#include <signal.h>
+#include <thread>
+#include <unistd.h>
+
+extern char **environ;
 
 namespace ptoas {
 

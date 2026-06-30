@@ -8,6 +8,8 @@
 
 #include "PTO/Transforms/InsertSync/SyncMacroModel.h"
 #include "PTO/IR/PTO.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/Matchers.h"
 
 using namespace mlir;
 using namespace mlir::pto;
@@ -193,6 +195,220 @@ std::optional<SyncMacroModel> getTGatherSyncMacroModel(pto::TGatherOp op) {
   return model;
 }
 
+// Resolve the PTO address space of an MGatherOp operand type. Mirrors the
+// getAddressSpace helper used by MGatherOp::getPipe() so the model matches the
+// post-PTOViewToMemref (memref<...,mat>) form that InsertSync actually sees.
+static std::optional<pto::AddressSpace>
+getMGatherOperandAddressSpace(::mlir::Type ty) {
+  if (auto tb = ::mlir::dyn_cast<::mlir::pto::TileBufType>(ty)) {
+    if (auto as = ::mlir::dyn_cast_or_null<::mlir::pto::AddressSpaceAttr>(
+            tb.getMemorySpace()))
+      return as.getAddressSpace();
+    return std::nullopt;
+  }
+  if (auto mr = ::mlir::dyn_cast<::mlir::MemRefType>(ty)) {
+    if (auto ms = mr.getMemorySpace()) {
+      if (auto as = ::mlir::dyn_cast<::mlir::pto::AddressSpaceAttr>(ms))
+        return as.getAddressSpace();
+    }
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+static std::optional<SmallVector<int64_t>>
+getMGatherOperandShapeFromType(::mlir::Type ty, bool useValidShape = true) {
+  if (auto tb = ::mlir::dyn_cast<::mlir::pto::TileBufType>(ty)) {
+    ArrayRef<int64_t> shape =
+        useValidShape ? tb.getValidShape() : tb.getShape();
+    return SmallVector<int64_t>(shape.begin(), shape.end());
+  }
+  if (auto mr = ::mlir::dyn_cast<::mlir::MemRefType>(ty))
+    return SmallVector<int64_t>(mr.getShape().begin(), mr.getShape().end());
+  return std::nullopt;
+}
+
+static std::optional<int64_t> getConstantIndex(Value value) {
+  if (!value)
+    return std::nullopt;
+
+  APInt intValue;
+  if (!matchPattern(value, m_ConstantInt(&intValue)))
+    return std::nullopt;
+  return intValue.getSExtValue();
+}
+
+static std::optional<SmallVector<Value, 2>> lookupMGatherValidDims(Value value) {
+  if (auto bind = value.getDefiningOp<pto::BindTileOp>())
+    return SmallVector<Value, 2>{bind.getValidRow(), bind.getValidCol()};
+  if (auto pc = value.getDefiningOp<pto::PointerCastOp>())
+    return SmallVector<Value, 2>{pc.getValidRow(), pc.getValidCol()};
+  if (auto subview = value.getDefiningOp<memref::SubViewOp>())
+    return lookupMGatherValidDims(subview.getSource());
+  if (auto cast = value.getDefiningOp<memref::ReinterpretCastOp>())
+    return lookupMGatherValidDims(cast.getSource());
+  if (auto cast = value.getDefiningOp<memref::CastOp>())
+    return lookupMGatherValidDims(cast.getSource());
+
+  if (auto regionResult = dyn_cast<OpResult>(value)) {
+    if (auto fusionRegion = dyn_cast<pto::FusionRegionOp>(regionResult.getOwner())) {
+      auto yieldOp =
+          dyn_cast<pto::YieldOp>(fusionRegion.getBody().front().getTerminator());
+      if (!yieldOp)
+        return std::nullopt;
+      unsigned resultIndex = regionResult.getResultNumber();
+      if (resultIndex >= yieldOp.getNumOperands())
+        return std::nullopt;
+      return lookupMGatherValidDims(yieldOp.getOperand(resultIndex));
+    }
+  }
+
+  return std::nullopt;
+}
+
+static std::optional<SmallVector<int64_t>>
+getMGatherOperandShape(Value value, bool useValidShape = true) {
+  auto shape = getMGatherOperandShapeFromType(value.getType(), useValidShape);
+  if (!shape || !useValidShape)
+    return shape;
+
+  auto validDims = lookupMGatherValidDims(value);
+  if (!validDims || validDims->size() != 2)
+    return shape;
+
+  if (shape->size() >= 1) {
+    if (auto validRow = getConstantIndex((*validDims)[0]))
+      (*shape)[0] = *validRow;
+    else if ((*validDims)[0])
+      (*shape)[0] = ShapedType::kDynamic;
+  }
+  if (shape->size() >= 2) {
+    if (auto validCol = getConstantIndex((*validDims)[1]))
+      (*shape)[1] = *validCol;
+    else if ((*validDims)[1])
+      (*shape)[1] = ShapedType::kDynamic;
+  }
+  return shape;
+}
+
+// MGather is a macro-like library call whose internal pipe usage depends on the
+// destination address space, the coalesce mode, and the target arch. Model each
+// reachable lowering path as SyncMacroPhases so InsertSyncAnalysis can derive the
+// real cross-pipe sync (notably the MTE2->S wait for the scalar index read that
+// MGatherOp::getPipe() hides by reporting a single pipe).
+//
+// Also reserve pto-isa's fixed internal event ids through hiddenEvents so
+// compiler-generated sync around the macro does not reuse EVENT_ID0 on pipe
+// pairs already consumed inside the library implementation.
+std::optional<SyncMacroModel> getMGatherSyncMacroModel(pto::MGatherOp op) {
+  // GM -> L1 (dst is an L1 / cube MAT tile). A5/A2A3 share the same data flow:
+  // the scalar pipe reads the GM index to compute src rows, then MTE2 issues the
+  // GM -> L1 nd2nz DMA. pto-isa currently keeps an internal fixed EVENT_ID0 on
+  // S -> MTE2, so reserve that pair here.
+  auto dstSpace = getMGatherOperandAddressSpace(op.getDst().getType());
+  const bool isGm2L1 = dstSpace && *dstSpace == pto::AddressSpace::MAT;
+
+  auto coalesceAttr = op.getCoalesceAttr();
+  if (!coalesceAttr)
+    return std::nullopt;
+
+  const PTOArch arch = getTargetArch(op.getOperation());
+  const pto::Coalesce coalesce = coalesceAttr.getValue();
+
+  SyncMacroModel model;
+
+  if (isGm2L1) {
+    // P1/P2: GM -> L1 (Row + Elem). S reads GM idx; MTE2 DMAs GM -> L1 into dst.
+    // Elem additionally writes the GM scratch (owned by S in the template) before
+    // the MTE2 bulk copy reads it, so model scratch as a S def / MTE2 use.
+    SmallVector<Value> sDefs;
+    if (coalesce == pto::Coalesce::Elem && op.getScratch())
+      sDefs.push_back(op.getScratch());
+    addPhase(model, PipelineType::PIPE_S, ValueRange(sDefs),
+             ValueRange{op.getIdx()});
+    if (coalesce == pto::Coalesce::Elem && op.getScratch()) {
+      SmallVector<Value> mte2Uses;
+      mte2Uses.push_back(op.getMem());
+      mte2Uses.push_back(op.getScratch());
+      addPhase(model, PipelineType::PIPE_MTE2,
+               ValueRange{op.getDst()}, ValueRange(mte2Uses));
+    } else {
+      addPhase(model, PipelineType::PIPE_MTE2,
+               ValueRange{op.getDst()}, ValueRange{op.getMem()});
+    }
+    addHiddenEvent(model, PipelineType::PIPE_S, PipelineType::PIPE_MTE2,
+                   ArrayRef<unsigned>{0});
+    return model;
+  }
+
+  // GM -> UB (dst is a VEC tile).
+  if (arch == PTOArch::A5) {
+    // P3/P4: A5 lowers GM -> UB through a SIMT kernel on the vector pipe (no
+    // scalar index loop). The 1x1 scalar overload (P5) reads idx on V then does
+    // a scalar GM load + dst write on S.
+    auto dstShape = getMGatherOperandShape(op.getDst());
+    const bool isElem1x1 =
+        coalesce == pto::Coalesce::Elem && dstShape && dstShape->size() == 2 &&
+        (*dstShape)[0] == 1 && (*dstShape)[1] == 1;
+    if (isElem1x1) {
+      addPhase(model, PipelineType::PIPE_V, ValueRange{},
+               ValueRange{op.getIdx()});
+      addPhase(model, PipelineType::PIPE_S, ValueRange{op.getDst()},
+               ValueRange{op.getMem()});
+      addBidirectionalHiddenEvent(model, PipelineType::PIPE_V,
+                                  PipelineType::PIPE_S,
+                                  ArrayRef<unsigned>{0});
+    } else {
+      addPhase(model, PipelineType::PIPE_V, ValueRange{op.getDst()},
+               ValueRange{op.getMem(), op.getIdx()});
+    }
+    return model;
+  }
+
+  // A2/A3 GM -> UB. Row (P6): S reads the UB index tile to compute GM addresses,
+  // then MTE2 DMAs each gathered row GM -> UB. Elem (P7): the whole gather runs
+  // on the scalar pipe (scalar GM loads + scalar UB dst writes), single phase.
+  if (coalesce == pto::Coalesce::Row) {
+    addPhase(model, PipelineType::PIPE_S, ValueRange{},
+             ValueRange{op.getIdx()});
+    addPhase(model, PipelineType::PIPE_MTE2, ValueRange{op.getDst()},
+             ValueRange{op.getMem()});
+    addHiddenEvent(model, PipelineType::PIPE_V, PipelineType::PIPE_S,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_MTE3, PipelineType::PIPE_S,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_S, PipelineType::PIPE_MTE2,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_MTE2, PipelineType::PIPE_V,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_MTE2, PipelineType::PIPE_MTE3,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_S, PipelineType::PIPE_V,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_S, PipelineType::PIPE_MTE3,
+                   ArrayRef<unsigned>{0});
+  } else {
+    SmallVector<Value> sUses;
+    sUses.push_back(op.getIdx());
+    sUses.push_back(op.getMem());
+    addPhase(model, PipelineType::PIPE_S, ValueRange{op.getDst()},
+             ValueRange(sUses));
+    addHiddenEvent(model, PipelineType::PIPE_V, PipelineType::PIPE_S,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_MTE3, PipelineType::PIPE_S,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_MTE2, PipelineType::PIPE_S,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_S, PipelineType::PIPE_V,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_S, PipelineType::PIPE_MTE2,
+                   ArrayRef<unsigned>{0});
+    addHiddenEvent(model, PipelineType::PIPE_S, PipelineType::PIPE_MTE3,
+                   ArrayRef<unsigned>{0});
+  }
+  return model;
+}
+
 } // namespace
 
 std::optional<SyncMacroModel> mlir::pto::getSyncMacroModel(Operation *op) {
@@ -204,5 +420,7 @@ std::optional<SyncMacroModel> mlir::pto::getSyncMacroModel(Operation *op) {
     return getTScatterSyncMacroModel(tscatter);
   if (auto tgather = dyn_cast<pto::TGatherOp>(op))
     return getTGatherSyncMacroModel(tgather);
+  if (auto mgather = dyn_cast<pto::MGatherOp>(op))
+    return getMGatherSyncMacroModel(mgather);
   return std::nullopt;
 }

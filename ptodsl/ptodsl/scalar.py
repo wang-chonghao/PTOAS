@@ -17,8 +17,8 @@ address views such as `tile[row, col]` and `tile.as_ptr() + offset`.
 
 from ._bootstrap import make_context  # ensure MLIR is on sys.path  # noqa: F401
 from ._scalar_coercion import coerce_scalar_to_type
+from ._scalar_adaptation import classify_runtime_scalar_type
 from ._runtime_scalar_ops import (
-    classify_runtime_scalar_type,
     emit_runtime_abs,
     emit_runtime_binary_op,
     emit_runtime_max,

@@ -112,12 +112,17 @@ DMA **`TLOAD` / `TSTORE`** (global memory ↔ UB) use **MTE** pipes, not `RV_VLD
 ### `pto.vlds`
 
 - **syntax:** `%result = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>`
+
+  Post-update form:
+
+  `%result, %updated_base = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>, !pto.ptr<T, ub>`
 - **semantics:** Vector load with distribution mode.
 - **inputs:**
   `%source` is the UB base address, `%offset` is the load displacement, and
   `DIST` selects the distribution mode.
 - **outputs:**
-  `%result` is the loaded vector register value.
+  `%result` is the loaded vector register value. In the post-update form,
+  `%updated_base` is the base pointer advanced according to `%offset`.
 - **constraints and limitations:**
   The effective address MUST satisfy the alignment rule of the selected
   distribution mode. `NORM` reads one full vector footprint. Broadcast,
@@ -125,6 +130,8 @@ DMA **`TLOAD` / `TSTORE`** (global memory ↔ UB) use **MTE** pipes, not `RV_VLD
   how memory bytes are mapped into destination lanes, but they do not change the
   fact that the source is UB memory. PTO surface exposes load `dist` as family
   tokens, and each family only supports the element widths listed below.
+  The optional `%updated_base` result must have the same pointer type as the
+  base address operand.
 
 **Distribution families:**
 
@@ -367,13 +374,16 @@ for (int blk = 0; blk < VL / 32; ++blk) {
 ### `pto.vsts`
 
 - **syntax:** `pto.vsts %value, %dest[%offset], %mask {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>, !pto.mask<G>`
+- **post-update syntax:** `%updated_dest = pto.vsts %value, %dest[%offset], %mask {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>, !pto.mask<G> -> !pto.ptr<T, ub>`
 - **semantics:** Vector store with distribution mode.
 - **inputs:**
   `%value` is the source vector, `%dest` is the UB base pointer, `%offset` is
   the displacement, `%mask` is the predicate operand, and
   `DIST` selects the store distribution.
 - **outputs:**
-  This op has no SSA result; it writes to UB memory.
+  The normal form has no SSA result and writes to UB memory. In the post-update
+  form, `%updated_dest` is the destination pointer advanced according to
+  `%offset`.
 - **constraints and limitations:**
   The effective destination address MUST satisfy the alignment rule of the
   selected store mode. The single-input `pto.vsts` family covers contiguous
@@ -439,13 +449,16 @@ for (int i = 0; i < 64; i++) {
 ### `pto.vsstb`
 
 - **syntax:** `pto.vsstb %value, %dest, %block_stride, %repeat_stride, %mask : !pto.vreg<NxT>, !pto.ptr<T, ub>, i16, i16, !pto.mask<G>`
+- **post-update syntax:** `%updated_dest = pto.vsstb %value, %dest, %block_stride, %repeat_stride, %mask : !pto.vreg<NxT>, !pto.ptr<T, ub>, i16, i16, !pto.mask<G> -> !pto.ptr<T, ub>`
 - **semantics:** Block-strided store for 2D tile access.
 - **inputs:**
   `%value` is the source vector, `%dest` is the UB base pointer,
   `%block_stride` and `%repeat_stride` are the two 16-bit fields of the
   hardware control word, and `%mask` controls block participation.
 - **outputs:**
-  This op writes UB memory and returns no SSA value.
+  The normal form writes UB memory and returns no SSA value. In the post-update
+  form, `%updated_dest` is the destination pointer advanced according to the
+  packed stride control word.
 - **constraints and limitations:**
   PTO surface does not expose the packed control word directly. Masked-off
   blocks MUST NOT issue memory writes.
@@ -485,6 +498,46 @@ for (int i = 0; i < N; i++)
     if (mask[i])
         UB[base + offsets[i] * sizeof(T)] = src[i];
 ```
+
+---
+
+## SPR State Ops
+
+### `pto.sprclr`
+
+- **syntax:** `pto.sprclr "AR"`
+- **semantics:** Clear the hardware SPR AR state used by AR-driven unaligned
+  store forms.
+- **constraints and limitations:**
+  Only `"AR"` is supported.
+
+---
+
+### `pto.sprsti`
+
+- **syntax:** `pto.sprsti "AR", %dest[%offset] : !pto.ptr<ui32, ub>, i32`
+- **semantics:** Store SPR AR to UB using a signed 8-bit immediate offset.
+- **inputs:**
+  `%dest` is the UB base pointer and `%offset` is the immediate offset in units
+  of the SPR data width.
+- **constraints and limitations:**
+  Only `"AR"` is supported. `%dest` must be a `ui32` or signless `i32` UB
+  pointer. `%offset` must be a constant signed 8-bit `i32`. The current VPTO
+  surface models only the no-post-update form, so no updated base pointer is
+  returned.
+
+---
+
+### `pto.sprsts`
+
+- **syntax:** `pto.sprsts "AR", %dest[%offset] : !pto.ptr<ui32, ub>, i32`
+- **semantics:** Store SPR AR to UB using a scalar-register offset.
+- **inputs:**
+  `%dest` is the UB base pointer and `%offset` is the scalar offset in bytes.
+- **constraints and limitations:**
+  Only `"AR"` is supported. `%dest` must be a `ui32` or signless `i32` UB
+  pointer. The current VPTO surface models only the no-post-update form, so no
+  updated base pointer is returned.
 
 ---
 

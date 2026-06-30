@@ -17,17 +17,20 @@
 #include "PTO/IR/PTO.h"
 #include "PTO/IR/PTOTypeUtils.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -76,6 +79,20 @@ static LogicalResult verifyMaskTypeLike(Operation *op, Type type,
   return success();
 }
 
+static LogicalResult verifyNonLowPrecisionVRegElementTypeLike(
+    Operation *op, Type type, StringRef roleDescription) {
+  auto vecType = dyn_cast<VRegType>(type);
+  if (!vecType)
+    return success();
+  if (pto::isPTOLowPrecisionType(vecType.getElementType()))
+    return op->emitOpError()
+           << roleDescription
+           << " must not use low-precision vector element type; "
+              "low-precision vreg elements are currently only supported on "
+              "explicit memory/conversion ops such as vlds/vsts/vcvt/vmulscvt/vpack";
+  return success();
+}
+
 static LogicalResult verifyMaskTypeWithGranularityLike(Operation *op, Type type,
                                                        StringRef roleDescription,
                                                        StringRef granularity) {
@@ -121,14 +138,543 @@ static bool isMaskGranularityAdjacentNarrowing(StringRef inputGranularity,
          (inputGranularity == "b32" && resultGranularity == "b16");
 }
 
+static bool isSupportedShuffleValueType(Type type) {
+  if (auto intType = dyn_cast<IntegerType>(type))
+    return intType.getWidth() == 32 || intType.getWidth() == 64;
+  if (auto vecType = dyn_cast<VectorType>(type))
+    return vecType.getRank() == 1 && vecType.getDimSize(0) == 2 &&
+           vecType.getElementType().isF16();
+  return type.isF16() || type.isF32();
+}
+
+static bool isSupportedReduxValueType(Type type) {
+  if (auto intType = dyn_cast<IntegerType>(type))
+    return intType.getWidth() == 32;
+  return type.isF16() || type.isF32();
+}
+
+LogicalResult SimtLaunchOp::verify() {
+  if (auto parentFunc = (*this)->getParentOfType<func::FuncOp>()) {
+    if (parentFunc->hasAttr(pto::kPTOSimtEntryAttrName)) {
+      return emitOpError()
+             << "must not appear inside a function marked with '"
+             << pto::kPTOSimtEntryAttrName
+             << "'; launch the SIMT entry from an outer non-simt function";
+    }
+  }
+
+  func::FuncOp callee =
+      SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(*this, getCalleeAttr());
+  if (!callee)
+    return emitOpError() << "'" << getCalleeAttr().getValue()
+                         << "' does not reference a valid function";
+
+  if (!callee->hasAttr(pto::kPTOSimtEntryAttrName)) {
+    return emitOpError() << "callee '" << getCalleeAttr().getValue()
+                         << "' must be marked with '"
+                         << pto::kPTOSimtEntryAttrName << "'";
+  }
+
+  FunctionType calleeType = callee.getFunctionType();
+  if (!calleeType.getResults().empty())
+    return emitOpError("requires a callee with no results");
+
+  if (calleeType.getNumInputs() != getArgs().size())
+    return emitOpError("incorrect number of operands for callee");
+
+  for (auto [index, argType, operand] :
+       llvm::enumerate(calleeType.getInputs(), getArgs())) {
+    if (argType != operand.getType()) {
+      return emitOpError("operand type mismatch: expected operand type ")
+             << argType << ", but provided " << operand.getType()
+             << " for operand number " << index;
+    }
+  }
+  return success();
+}
+
+static LogicalResult verifyShuffleSemanticControl(Operation *op,
+                                                  Type controlType,
+                                                  IntegerAttr widthAttr,
+                                                  StringRef ctrlName) {
+  if (!isSupportedShuffleValueType(op->getResultTypes().front()))
+    return op->emitOpError()
+           << "requires i32, i64, f16, f32 or vector<2xf16> value/result type";
+  if (!controlType.isInteger(32))
+    return op->emitOpError() << "requires " << ctrlName
+                             << " operand to be i32";
+
+  int64_t width = widthAttr.getInt();
+  if (width != 16 && width != 32)
+    return op->emitOpError() << "requires width to be 16 or 32";
+  return success();
+}
+
+static LogicalResult verifyReduxSemanticType(Operation *op, Type valueType,
+                                             Attribute signednessAttr,
+                                             bool requireSignedness) {
+  if (!isSupportedReduxValueType(valueType))
+    return op->emitOpError()
+           << "requires i32, f16 or f32 value/result type";
+
+  auto intType = dyn_cast<IntegerType>(valueType);
+  if (!intType) {
+    if (signednessAttr)
+      return op->emitOpError()
+             << "does not accept signedness for floating-point redux";
+    return success();
+  }
+
+  if (!signednessAttr && requireSignedness)
+    return op->emitOpError()
+           << "requires explicit signedness for integer redux";
+
+  if (!signednessAttr)
+    return success();
+
+  auto signedness = cast<pto::SignednessAttr>(signednessAttr).getValue();
+  (void)signedness;
+  return success();
+}
+
+static bool isStandardScalarConvertType(Type type) {
+  if (auto intType = dyn_cast<IntegerType>(type))
+    return intType.getWidth() == 32 || intType.getWidth() == 64;
+  return type.isF16() || type.isBF16() || type.isF32();
+}
+
+static bool isIntegerLikeConvertType(Type type) {
+  return isa<IntegerType>(type);
+}
+
+static bool isVector2Of(Type type, llvm::function_ref<bool(Type)> elementPred) {
+  auto vecType = dyn_cast<VectorType>(type);
+  return vecType && vecType.getRank() == 1 && vecType.getDimSize(0) == 2 &&
+         elementPred(vecType.getElementType());
+}
+
+static bool isSupportedPackedConvertType(Type type) {
+  if (pto::isPTOHiFloat8x2Type(type))
+    return true;
+  return isVector2Of(type, [](Type elem) {
+    return elem.isF16() || elem.isBF16() || elem.isF32() ||
+           pto::isPTOFloat8Type(elem) || pto::isPTOHiFloat8Type(elem);
+  });
+}
+
+static bool isSupportedLowPrecisionConvertType(Type type) {
+  return pto::isPTOFloat4PackedType(type);
+}
+
+static bool isVector2F16OrBF16Type(Type type) {
+  return isVector2Of(type, [](Type elem) {
+    return elem.isF16() || elem.isBF16();
+  });
+}
+
+static bool isInsideSimtEntry(Operation *op) {
+  auto funcOp = op->getParentOfType<func::FuncOp>();
+  return funcOp && funcOp->hasAttr(pto::kPTOSimtEntryAttrName);
+}
+
+static bool isSupportedConvertType(Type type) {
+  return isStandardScalarConvertType(type) || isSupportedPackedConvertType(type) ||
+         isSupportedLowPrecisionConvertType(type);
+}
+
+static LogicalResult verifyPackedConvertControls(Operation *op, Type srcType,
+                                                 Type dstType,
+                                                 pto::Rounding rounding) {
+  auto isV2F16 = [](Type type) {
+    return isVector2Of(type, [](Type elem) { return elem.isF16(); });
+  };
+  auto isV2BF16 = [](Type type) {
+    return isVector2Of(type, [](Type elem) { return elem.isBF16(); });
+  };
+  auto isV2F32 = [](Type type) {
+    return isVector2Of(type, [](Type elem) { return elem.isF32(); });
+  };
+  auto isV2F8 = [](Type type) {
+    return isVector2Of(type, [](Type elem) { return pto::isPTOFloat8Type(elem); });
+  };
+  auto isV2HiF8 = [](Type type) {
+    return pto::isPTOHiFloat8x2Type(type);
+  };
+  auto isF4 = [](Type type) { return pto::isPTOFloat4PackedType(type); };
+  auto isRoundRAFZC = [](pto::Rounding rounding) {
+    return rounding == pto::Rounding::R || rounding == pto::Rounding::A ||
+           rounding == pto::Rounding::F || rounding == pto::Rounding::C ||
+           rounding == pto::Rounding::Z;
+  };
+
+  if (isV2F32(srcType) && isV2F16(dstType)) {
+    if (rounding == pto::Rounding::H)
+      return op->emitOpError()
+             << "f32x2-to-f16x2 conversion supports rounding r/a/f/c/z/o";
+    return success();
+  }
+  if (isV2F32(srcType) && isV2BF16(dstType)) {
+    if (rounding == pto::Rounding::O || rounding == pto::Rounding::H)
+      return op->emitOpError()
+             << "f32x2-to-bf16x2 conversion supports rounding r/a/f/c/z";
+    return success();
+  }
+  if ((isV2F16(srcType) || isV2BF16(srcType)) && isV2F32(dstType)) {
+    if (rounding == pto::Rounding::O || rounding == pto::Rounding::H)
+      return op->emitOpError()
+             << "packed-to-f32x2 conversion supports rounding r/a/f/c/z";
+    return success();
+  }
+  if (isV2F32(srcType) && isV2F8(dstType)) {
+    if (rounding != pto::Rounding::R)
+      return op->emitOpError()
+             << "f32x2-to-f8x2 conversion supports rounding r";
+    return success();
+  }
+  if ((isV2F32(srcType) || isV2F16(srcType)) && isV2HiF8(dstType)) {
+    if (rounding != pto::Rounding::A && rounding != pto::Rounding::H)
+      return op->emitOpError()
+             << "f32x2/f16x2-to-hif8x2 conversion supports rounding a/h";
+    return success();
+  }
+  if ((isV2F8(srcType) || isV2HiF8(srcType)) &&
+      (isV2F32(dstType) || isV2F16(dstType))) {
+    if (!isRoundRAFZC(rounding))
+      return op->emitOpError()
+             << "f8x2/hif8x2-to-f32x2/f16x2 conversion supports rounding r/a/f/c/z";
+    return success();
+  }
+  if ((isV2BF16(srcType) && isF4(dstType)) ||
+      (isF4(srcType) && isV2BF16(dstType))) {
+    if (!isRoundRAFZC(rounding))
+      return op->emitOpError()
+             << "bf16x2-to-f4 and f4-to-bf16x2 conversion supports rounding r/a/f/c/z";
+    return success();
+  }
+
+  return op->emitOpError()
+         << "unsupported packed conversion type pair; supported packed pairs are "
+            "f32x2-to-f16x2, f16x2-to-f32x2, f32x2-to-bf16x2, and "
+            "bf16x2-to-f32x2, f32x2-to-f8x2, f32x2/f16x2-to-hif8x2, "
+            "f8x2/hif8x2-to-f32x2/f16x2, and bf16x2-to/from-f4";
+}
+
+static LogicalResult verifyConvertControls(Operation *op, Type srcType,
+                                           Type dstType,
+                                           pto::Rounding rounding,
+                                           pto::Saturation saturation,
+                                           Attribute signednessAttr) {
+  if (!isSupportedConvertType(srcType) || !isSupportedConvertType(dstType))
+    return op->emitOpError()
+           << "requires i32, i64, f16, bf16, f32 or supported vector<2xT> "
+              "conversion types";
+
+  bool srcInt = isIntegerLikeConvertType(srcType);
+  bool dstInt = isIntegerLikeConvertType(dstType);
+  bool srcPacked = isSupportedPackedConvertType(srcType);
+  bool dstPacked = isSupportedPackedConvertType(dstType);
+  bool srcLowPrecision = isSupportedLowPrecisionConvertType(srcType);
+  bool dstLowPrecision = isSupportedLowPrecisionConvertType(dstType);
+  if (srcPacked || dstPacked || srcLowPrecision || dstLowPrecision) {
+    if (srcInt || dstInt)
+      return op->emitOpError()
+             << "does not support mixed integer and packed conversion";
+    if (signednessAttr)
+      return op->emitOpError()
+             << "does not accept signedness for packed floating conversion";
+    if (!((srcPacked || srcLowPrecision) && (dstPacked || dstLowPrecision)))
+      return op->emitOpError()
+             << "does not support mixed scalar and packed conversion";
+    return verifyPackedConvertControls(op, srcType, dstType, rounding);
+  }
+
+  if (srcInt && dstInt)
+    return op->emitOpError()
+           << "does not support integer-to-integer conversion";
+
+  if ((srcInt || dstInt) && !signednessAttr)
+    return op->emitOpError()
+           << "requires signedness when converting to or from integer type";
+  if (!srcInt && !dstInt && signednessAttr)
+    return op->emitOpError()
+           << "does not accept signedness for floating-to-floating conversion";
+
+  if (srcInt) {
+    if (srcType.isInteger(64) && !dstType.isF32())
+      return op->emitOpError()
+             << "supports i64 conversion only to f32 in the confirmed slice";
+    if (srcType.isInteger(32) &&
+        !(dstType.isF32() || dstType.isF16() || dstType.isBF16()))
+      return op->emitOpError()
+             << "unsupported integer-to-floating conversion type pair";
+    if (rounding == pto::Rounding::O || rounding == pto::Rounding::H)
+      return op->emitOpError()
+             << "integer-to-floating conversion supports rounding r/a/f/c/z";
+    (void)saturation;
+    return success();
+  }
+
+  if (dstType.isInteger(64) && !srcType.isF32())
+    return op->emitOpError()
+           << "supports conversion to i64 only from f32 in the confirmed slice";
+  if (srcType.isF32()) {
+    if (dstType.isInteger(32) || dstType.isInteger(64)) {
+      if (saturation != pto::Saturation::Enable)
+        return op->emitOpError()
+               << "fp32-to-integer conversion requires saturation enable";
+      if (rounding == pto::Rounding::O || rounding == pto::Rounding::H)
+        return op->emitOpError()
+               << "fp32-to-integer conversion supports rounding r/a/f/c/z";
+      return success();
+    }
+    if (dstType.isF16() || dstType.isBF16() || dstType.isF32()) {
+      if (dstType.isF16()) {
+        if (rounding == pto::Rounding::H)
+          return op->emitOpError()
+                 << "fp32-to-fp16 conversion supports rounding r/a/f/c/z/o";
+      } else if (rounding == pto::Rounding::O ||
+                 rounding == pto::Rounding::H) {
+        return op->emitOpError()
+               << "fp32-to-floating conversion supports rounding r/a/f/c/z";
+      }
+      return success();
+    }
+  }
+
+  if (srcType.isF16() || srcType.isBF16()) {
+    if (dstType.isInteger(32)) {
+      if (saturation != pto::Saturation::Enable)
+        return op->emitOpError()
+               << "fp16/bf16-to-integer conversion requires saturation enable";
+      if (rounding == pto::Rounding::O || rounding == pto::Rounding::H)
+        return op->emitOpError()
+               << "fp16/bf16-to-integer conversion supports rounding r/a/f/c/z";
+      return success();
+    }
+    if (dstType.isF32() || dstType.isF16() || dstType.isBF16()) {
+      if (rounding == pto::Rounding::O || rounding == pto::Rounding::H)
+        return op->emitOpError()
+               << "fp16/bf16-to-floating conversion supports rounding r/a/f/c/z";
+      return success();
+    }
+  }
+
+  return op->emitOpError() << "unsupported conversion type pair";
+}
+
+static bool isSupportedAtomicScalarType(Type type) {
+  if (auto intType = dyn_cast<IntegerType>(type))
+    return intType.getWidth() == 32 || intType.getWidth() == 64;
+  return type.isF16() || type.isBF16() || type.isF32() ||
+         isVector2F16OrBF16Type(type);
+}
+
+static LogicalResult verifyAtomicCommon(Operation *op, Value ptr, Type valueType,
+                                        Type resultType, bool bitwise,
+                                        Attribute signednessAttr) {
+  if (!isSupportedAtomicScalarType(valueType))
+    return op->emitOpError()
+           << "requires i32, i64, f16, bf16, f32, vector<2xf16> or "
+              "vector<2xbf16> atomic value type";
+  if (resultType != valueType)
+    return op->emitOpError()
+           << "requires atomic result type to match value type";
+
+  auto ptrTy = dyn_cast<PtrType>(ptr.getType());
+  if (!ptrTy)
+    return op->emitOpError() << "requires !pto.ptr pointer operand";
+  if (ptrTy.getElementType() != valueType)
+    return op->emitOpError()
+           << "requires atomic value type to match pointer element type";
+
+  AddressSpace addressSpace = ptrTy.getMemorySpace().getAddressSpace();
+  if (addressSpace != AddressSpace::GM && addressSpace != AddressSpace::VEC)
+    return op->emitOpError() << "requires GM or UB pointer";
+  if (addressSpace == AddressSpace::VEC && valueType.isInteger(64))
+    return op->emitOpError() << "does not support i64 UB-space atomics";
+
+  auto intType = dyn_cast<IntegerType>(valueType);
+  if (bitwise) {
+    if (!intType)
+      return op->emitOpError() << "requires integer type for bitwise atomics";
+    if (addressSpace == AddressSpace::VEC && intType.getWidth() == 64)
+      return op->emitOpError() << "does not support i64 UB-space bitwise atomics";
+  }
+
+  if (signednessAttr && !intType)
+    return op->emitOpError()
+           << "does not accept signedness for floating-point atomics";
+  if (isVector2F16OrBF16Type(valueType)) {
+    if (!isInsideSimtEntry(op))
+      return op->emitOpError()
+             << "requires packed atomics to be inside a pto.simt_entry "
+                "function on beta.1";
+    if (!op->getResult(0).use_empty())
+      return op->emitOpError()
+             << "does not support using the old value result for packed "
+                "atomics on beta.1; leave the result unused";
+  }
+  return success();
+}
+
+static LogicalResult verifyLdgStgAccess(Operation *op, Type ptrType,
+                                        Type valueType) {
+  auto ptrTy = dyn_cast<PtrType>(ptrType);
+  if (!ptrTy)
+    return op->emitOpError() << "requires !pto.ptr operand";
+  if (ptrTy.getMemorySpace().getAddressSpace() != AddressSpace::GM)
+    return op->emitOpError() << "requires GM pointer";
+
+  if (auto intType = dyn_cast<IntegerType>(valueType)) {
+    unsigned width = intType.getWidth();
+    if (width == 8 || width == 16 || width == 32 || width == 64)
+      return success();
+  }
+  if (valueType.isF16() || valueType.isBF16() || valueType.isF32() ||
+      valueType.isF64())
+    return success();
+  if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType))
+    return success();
+
+  return op->emitOpError()
+         << "currently supports 8/16/32/64-bit integer and "
+            "f16/bf16/f32/f64/fp8/hif8 value type";
+}
+
 LogicalResult PTOLoadOp::verify() {
-  return verifyVPTOScalarAccessTypes(getOperation(), getPtr().getType(),
-                                     getValue().getType(), "load");
+  if (failed(verifyVPTOScalarAccessTypes(getOperation(), getPtr().getType(),
+                                         getValue().getType(), "load")))
+    return failure();
+  return success();
 }
 
 LogicalResult PTOStoreOp::verify() {
-  return verifyVPTOScalarAccessTypes(getOperation(), getPtr().getType(),
-                                     getValue().getType(), "store");
+  if (failed(verifyVPTOScalarAccessTypes(getOperation(), getPtr().getType(),
+                                         getValue().getType(), "store")))
+    return failure();
+  return success();
+}
+
+LogicalResult PTOLdgOp::verify() {
+  if (failed(verifyVPTOScalarAccessTypes(getOperation(), getPtr().getType(),
+                                         getValue().getType(), "ldg")))
+    return failure();
+  return verifyLdgStgAccess(getOperation(), getPtr().getType(),
+                            getValue().getType());
+}
+
+LogicalResult PTOStgOp::verify() {
+  if (failed(verifyVPTOScalarAccessTypes(getOperation(), getPtr().getType(),
+                                         getValue().getType(), "stg")))
+    return failure();
+  return verifyLdgStgAccess(getOperation(), getPtr().getType(),
+                            getValue().getType());
+}
+
+LogicalResult ShuffleIdxOp::verify() {
+  return verifyShuffleSemanticControl(getOperation(), getIndex().getType(),
+                                      getWidthAttr(), "index");
+}
+
+LogicalResult ShuffleUpOp::verify() {
+  return verifyShuffleSemanticControl(getOperation(), getOffset().getType(),
+                                      getWidthAttr(), "offset");
+}
+
+LogicalResult ShuffleDownOp::verify() {
+  return verifyShuffleSemanticControl(getOperation(), getOffset().getType(),
+                                      getWidthAttr(), "offset");
+}
+
+LogicalResult ShuffleBflyOp::verify() {
+  return verifyShuffleSemanticControl(getOperation(), getMask().getType(),
+                                      getWidthAttr(), "mask");
+}
+
+LogicalResult ReduxAddOp::verify() {
+  return verifyReduxSemanticType(getOperation(), getValue().getType(),
+                                  getSignednessAttr(), /*requireSignedness=*/false);
+}
+
+LogicalResult ReduxMaxOp::verify() {
+  return verifyReduxSemanticType(getOperation(), getValue().getType(),
+                                  getSignednessAttr(), /*requireSignedness=*/true);
+}
+
+LogicalResult ReduxMinOp::verify() {
+  return verifyReduxSemanticType(getOperation(), getValue().getType(),
+                                  getSignednessAttr(), /*requireSignedness=*/true);
+}
+
+LogicalResult MulhiOp::verify() {
+  if (!getResult().getType().isInteger(32) &&
+      !getResult().getType().isInteger(64))
+    return emitOpError() << "requires i32 or i64 result type";
+  return success();
+}
+
+LogicalResult MulI32ToI64Op::verify() { return success(); }
+
+LogicalResult AtomicCasOp::verify() {
+  if (getCompare().getType() != getValue().getType())
+    return emitOpError() << "requires compare and value types to match";
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/false,
+                            getSignednessAttr());
+}
+
+LogicalResult AtomicExchOp::verify() {
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/false,
+                            getSignednessAttr());
+}
+
+LogicalResult AtomicAddOp::verify() {
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/false,
+                            getSignednessAttr());
+}
+
+LogicalResult AtomicSubOp::verify() {
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/false,
+                            getSignednessAttr());
+}
+
+LogicalResult AtomicMinOp::verify() {
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/false,
+                            getSignednessAttr());
+}
+
+LogicalResult AtomicMaxOp::verify() {
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/false,
+                            getSignednessAttr());
+}
+
+LogicalResult AtomicAndOp::verify() {
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/true,
+                            getSignednessAttr());
+}
+
+LogicalResult AtomicOrOp::verify() {
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/true,
+                            getSignednessAttr());
+}
+
+LogicalResult AtomicXorOp::verify() {
+  return verifyAtomicCommon(getOperation(), getPtr(), getValue().getType(),
+                            getOld().getType(), /*bitwise=*/true,
+                            getSignednessAttr());
+}
+
+LogicalResult ConvertOp::verify() {
+  return verifyConvertControls(getOperation(), getSrc().getType(),
+                               getDst().getType(), getRounding(),
+                               getSaturation(), getSignednessAttr());
 }
 
 void PTOLoadOp::getEffects(
@@ -141,6 +687,73 @@ void PTOStoreOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   effects.emplace_back(MemoryEffects::Write::get(), &getPtrMutable());
+}
+
+void PTOLdgOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getPtrMutable());
+}
+
+void PTOStgOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(), &getPtrMutable());
+}
+
+template <typename OpTy>
+static void getAtomicEffects(
+    OpTy op,
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &op.getPtrMutable());
+  effects.emplace_back(MemoryEffects::Write::get(), &op.getPtrMutable());
+}
+
+void AtomicCasOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
+}
+void AtomicExchOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
+}
+void AtomicAddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
+}
+void AtomicSubOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
+}
+void AtomicMinOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
+}
+void AtomicMaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
+}
+void AtomicAndOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
+}
+void AtomicOrOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
+}
+void AtomicXorOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getAtomicEffects(*this, effects);
 }
 
 static LogicalResult verifyNotNestedInVecScope(Operation *op,
@@ -184,7 +797,10 @@ static bool isSupportedMovPadScalarType(Type type) {
   return false;
 }
 
-static bool isMxElementType(Type type) { return isa<Float8E4M3FNType>(type); }
+static bool isMxElementType(Type type) {
+  return isa<Float8E4M3FNType, Float8E5M2Type>(type) ||
+         isa<pto::F4E1M2x2Type, pto::F4E2M1x2Type>(type);
+}
 
 static std::optional<StringRef> getVdupMaskGranularity(Type elementType) {
   if (auto intType = dyn_cast<IntegerType>(elementType)) {
@@ -724,6 +1340,8 @@ static std::optional<StringRef> normalizeRoundModeToken(StringRef token) {
     return StringRef("Z");
   if (token == "O" || token == "ROUND_O")
     return StringRef("O");
+  if (token == "H" || token == "ROUND_H")
+    return StringRef("H");
   return std::nullopt;
 }
 
@@ -768,6 +1386,11 @@ enum class VcvtElemKind {
   F16,
   BF16,
   F32,
+  F8E4M3,
+  F8E5M2,
+  HiF8,
+  F4E1M2x2,
+  F4E2M1x2,
   S8,
   U8,
   S16,
@@ -777,15 +1400,17 @@ enum class VcvtElemKind {
   S64,
 };
 
+enum class VcvtPartFamily {
+  EvenOdd,
+  Packed4,
+};
+
 struct VcvtContract {
   bool requiresRnd;
   bool requiresSat;
   bool requiresPart;
-};
-
-enum class VcvtPartFamily {
-  EvenOdd,
-  Packed4,
+  std::optional<VcvtPartFamily> partFamily = std::nullopt;
+  const char *allowedRndModes = nullptr;
 };
 
 static VcvtElemKind classifyVcvtElemType(Type type) {
@@ -795,6 +1420,17 @@ static VcvtElemKind classifyVcvtElemType(Type type) {
     return VcvtElemKind::BF16;
   if (type.isF32())
     return VcvtElemKind::F32;
+  if (type.isFloat8E4M3() || type.isFloat8E4M3FN() ||
+      type.isFloat8E4M3FNUZ() || type.isFloat8E4M3B11FNUZ())
+    return VcvtElemKind::F8E4M3;
+  if (type.isFloat8E5M2() || type.isFloat8E5M2FNUZ())
+    return VcvtElemKind::F8E5M2;
+  if (pto::isPTOHiFloat8Type(type))
+    return VcvtElemKind::HiF8;
+  if (isa<pto::F4E1M2x2Type>(type))
+    return VcvtElemKind::F4E1M2x2;
+  if (isa<pto::F4E2M1x2Type>(type))
+    return VcvtElemKind::F4E2M1x2;
   if (auto intType = dyn_cast<IntegerType>(type)) {
     switch (intType.getWidth()) {
     case 8:
@@ -823,6 +1459,11 @@ static std::optional<unsigned> getVcvtElemBitWidth(VcvtElemKind kind) {
   case VcvtElemKind::S32:
   case VcvtElemKind::U32:
     return 32;
+  case VcvtElemKind::F8E4M3:
+  case VcvtElemKind::F8E5M2:
+  case VcvtElemKind::HiF8:
+  case VcvtElemKind::F4E1M2x2:
+  case VcvtElemKind::F4E2M1x2:
   case VcvtElemKind::S8:
   case VcvtElemKind::U8:
     return 8;
@@ -855,11 +1496,27 @@ static bool isValidVcvtPartForFamily(StringRef part, VcvtPartFamily family) {
   return false;
 }
 
+static bool isValidVcvtRoundModeForContract(StringRef roundMode,
+                                            const VcvtContract &contract) {
+  if (!contract.allowedRndModes)
+    return true;
+  return StringRef(contract.allowedRndModes).contains(roundMode);
+}
+
 static std::optional<VcvtContract> lookupVcvtContract(VcvtElemKind src,
                                                       VcvtElemKind dst) {
   switch (src) {
   case VcvtElemKind::F32:
     switch (dst) {
+    case VcvtElemKind::F8E4M3:
+    case VcvtElemKind::F8E5M2:
+      return VcvtContract{/*requiresRnd=*/true, /*requiresSat=*/true,
+                          /*requiresPart=*/true, VcvtPartFamily::Packed4,
+                          "R"};
+    case VcvtElemKind::HiF8:
+      return VcvtContract{/*requiresRnd=*/true, /*requiresSat=*/true,
+                          /*requiresPart=*/true, VcvtPartFamily::Packed4,
+                          "AH"};
     case VcvtElemKind::F16:
     case VcvtElemKind::BF16:
     case VcvtElemKind::S16:
@@ -874,6 +1531,13 @@ static std::optional<VcvtContract> lookupVcvtContract(VcvtElemKind src,
     }
   case VcvtElemKind::F16:
     switch (dst) {
+    case VcvtElemKind::F8E4M3:
+    case VcvtElemKind::F8E5M2:
+      return VcvtContract{/*requiresRnd=*/true, /*requiresSat=*/true,
+                          /*requiresPart=*/true, std::nullopt, "RAFZC"};
+    case VcvtElemKind::HiF8:
+      return VcvtContract{/*requiresRnd=*/true, /*requiresSat=*/true,
+                          /*requiresPart=*/true, std::nullopt, "AH"};
     case VcvtElemKind::F32:
       return VcvtContract{/*requiresRnd=*/false, /*requiresSat=*/false,
                           /*requiresPart=*/true};
@@ -892,6 +1556,15 @@ static std::optional<VcvtContract> lookupVcvtContract(VcvtElemKind src,
     }
   case VcvtElemKind::BF16:
     switch (dst) {
+    case VcvtElemKind::F8E4M3:
+    case VcvtElemKind::F8E5M2:
+      return VcvtContract{/*requiresRnd=*/true, /*requiresSat=*/true,
+                          /*requiresPart=*/true, std::nullopt, "RAFZC"};
+    case VcvtElemKind::F4E1M2x2:
+    case VcvtElemKind::F4E2M1x2:
+      return VcvtContract{/*requiresRnd=*/true, /*requiresSat=*/false,
+                          /*requiresPart=*/true, VcvtPartFamily::Packed4,
+                          "RAFZC"};
     case VcvtElemKind::F16:
       return VcvtContract{/*requiresRnd=*/true, /*requiresSat=*/true,
                           /*requiresPart=*/false};
@@ -985,6 +1658,25 @@ static std::optional<VcvtContract> lookupVcvtContract(VcvtElemKind src,
     case VcvtElemKind::S32:
       return VcvtContract{/*requiresRnd=*/false, /*requiresSat=*/true,
                           /*requiresPart=*/true};
+    default:
+      return std::nullopt;
+    }
+  case VcvtElemKind::F8E4M3:
+  case VcvtElemKind::F8E5M2:
+  case VcvtElemKind::HiF8:
+    switch (dst) {
+    case VcvtElemKind::F32:
+      return VcvtContract{/*requiresRnd=*/false, /*requiresSat=*/false,
+                          /*requiresPart=*/true, VcvtPartFamily::Packed4};
+    default:
+      return std::nullopt;
+    }
+  case VcvtElemKind::F4E1M2x2:
+  case VcvtElemKind::F4E2M1x2:
+    switch (dst) {
+    case VcvtElemKind::BF16:
+      return VcvtContract{/*requiresRnd=*/false, /*requiresSat=*/false,
+                          /*requiresPart=*/true, VcvtPartFamily::Packed4};
     default:
       return std::nullopt;
     }
@@ -1058,17 +1750,16 @@ static bool isSupportedPostMode(StringRef mode) {
   return mode == "NO_POST_UPDATE" || mode == "POST_UPDATE";
 }
 
-static std::optional<StringRef> getOptionalPostModeAttr(Operation *op) {
-  if (auto mode = op->getAttrOfType<StringAttr>("mode"))
-    return mode.getValue();
-  return std::nullopt;
-}
-
 static unsigned getIntOrFloatBitWidth(Type type) {
   if (auto intType = dyn_cast<IntegerType>(type))
     return intType.getWidth();
   if (auto floatType = dyn_cast<FloatType>(type))
     return floatType.getWidth();
+  if (pto::isPTOFloat8Type(type) || pto::isPTOHiFloat8Type(type) ||
+      pto::isPTOFloat4PackedType(type))
+    return 8;
+  if (pto::isPTOHiFloat8x2Type(type))
+    return 16;
   return 0;
 }
 
@@ -1212,21 +1903,12 @@ static LogicalResult verifyCubeBridgeLoadLikeOp(BridgeLoadOp op,
   return success();
 }
 
-static bool hasAll(Value first, Value second, Value third) {
-  return static_cast<bool>(first) && static_cast<bool>(second) &&
-         static_cast<bool>(third);
-}
-
-static bool hasAny(Value first, Value second, Value third) {
-  return static_cast<bool>(first) || static_cast<bool>(second) ||
-         static_cast<bool>(third);
-}
-
 static ParseResult parseRequiredOperandWithComma(
     OpAsmParser &parser, OpAsmParser::UnresolvedOperand &operand) {
   if (parser.parseOperand(operand))
     return failure();
-  return parser.parseComma();
+  (void)parser.parseOptionalComma();
+  return success();
 }
 
 static ParseResult parseDmaTripleGroup(
@@ -2036,10 +2718,11 @@ static ParseResult parseStructuredAccStoreClauses(
         return success();
     }
     StringRef keyword;
-    if (parser.parseKeyword(&keyword)) {
+    OptionalParseResult optParseResult = parser.parseOptionalKeyword(&keyword);
+    if (!optParseResult.has_value() || failed(*optParseResult)) {
       if (!seenClause)
         return success();
-      return failure();
+      return parser.emitError(parser.getCurrentLocation(), "expected valid keyword");
     }
     seenClause = true;
 
@@ -2527,7 +3210,11 @@ static LogicalResult verifyOptionalDmaLoopGroup(DmaOp op, Value count,
                                                 Value srcStride,
                                                 Value dstStride,
                                                 StringRef name) {
-  if (hasAny(count, srcStride, dstStride) && !hasAll(count, srcStride, dstStride))
+  bool hasAny = static_cast<bool>(count) || static_cast<bool>(srcStride) ||
+                static_cast<bool>(dstStride);
+  bool hasAll = static_cast<bool>(count) && static_cast<bool>(srcStride) &&
+                static_cast<bool>(dstStride);
+  if (hasAny && !hasAll)
     return op.emitOpError() << "requires " << name
                             << " group to provide count, src stride, and dst stride together";
   return success();
@@ -2636,9 +3323,12 @@ LogicalResult VRegType::verify(function_ref<InFlightDiagnostic()> emitError,
     elementBitWidth = intOrFloat.getWidth();
   } else if (auto floatType = mlir::dyn_cast<FloatType>(elementType)) {
     elementBitWidth = floatType.getWidth();
+  } else if (pto::isPTOLowPrecisionType(elementType)) {
+    elementBitWidth = pto::getPTOStorageElemBitWidth(elementType);
   } else {
     return emitError() << "'" << formatVRegType(elementCount, elementType)
-                       << "' expected an integer or floating-point element type";
+                       << "' expected an integer, floating-point, or PTO "
+                          "low-precision element type";
   }
 
   if (elementCount * static_cast<int64_t>(elementBitWidth) != 2048)
@@ -3041,7 +3731,8 @@ static LogicalResult verifyMadMxCommon(Operation *op, Type lhsTy, Type rhsTy,
   if (!isMxElementType(lhsType.getElementType()) ||
       !isMxElementType(rhsType.getElementType())) {
     return op->emitOpError(
-        "requires MX lhs/rhs element types (currently f8E4M3FN)");
+        "requires MX lhs/rhs element types (f8E4M3FN, f8E5M2, f4E1M2x2, or "
+        "f4E2M1x2)");
   }
   return success();
 }
@@ -3947,25 +4638,12 @@ static LogicalResult verifyVldsCommon(LoadOp op) {
 LogicalResult VldsOp::verify() {
   if (failed(verifyVldsCommon(*this)))
     return failure();
-  if (std::optional<StringRef> mode = getOptionalPostModeAttr(getOperation());
-      mode && !isSupportedPostMode(*mode))
-    return emitOpError("requires mode to be POST_UPDATE or NO_POST_UPDATE");
+  if (Value updatedBase = getUpdatedBase()) {
+    if (updatedBase.getType() != getSource().getType())
+      return emitOpError("requires updated base result to match base type");
+  }
   return success();
 }
-void VldsPostOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable());
-}
-
-LogicalResult VldsPostOp::verify() {
-  if (failed(verifyVldsCommon(*this)))
-    return failure();
-  if (getUpdatedSource().getType() != getSource().getType())
-    return emitOpError("requires updated source result to match source type");
-  return success();
-}
-
 void VldasOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -3992,6 +4670,59 @@ LogicalResult SprclrOp::verify() {
   if (failed(verifyNestedInVecScope(*this, "pto.sprclr")))
     return failure();
   return success();
+}
+
+static LogicalResult verifySprStoreCommon(Operation *op, StringRef opName,
+                                          StringRef spr, Value destination,
+                                          Value offset,
+                                          bool requireImmediateOffset) {
+  if (!isSupportedSprToken(spr))
+    return op->emitOpError("requires spr to be \"AR\"");
+  if (failed(verifyNestedInVecScope(op, opName)))
+    return failure();
+  auto ptrType = dyn_cast<pto::PtrType>(destination.getType());
+  if (!ptrType)
+    return op->emitOpError("requires a pointer-like UB destination");
+  if (classifyMemoryRole(destination.getType()) != MemoryRole::UB)
+    return op->emitOpError("requires a UB-backed destination");
+  auto intType = dyn_cast<IntegerType>(ptrType.getElementType());
+  if (!intType || intType.getWidth() != 32 || intType.isSigned())
+    return op->emitOpError("requires ui32/i32 UB destination element type");
+  if (!offset.getType().isInteger(32))
+    return op->emitOpError("requires i32 offset");
+  if (requireImmediateOffset) {
+    APInt offsetValue;
+    if (!matchPattern(offset, m_ConstantInt(&offsetValue)))
+      return op->emitOpError("requires constant immediate offset");
+    int64_t signedOffset = offsetValue.getSExtValue();
+    if (signedOffset < -128 || signedOffset > 127)
+      return op->emitOpError("requires signed 8-bit immediate offset");
+  }
+  return success();
+}
+
+void SprstiOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(), &getDestinationMutable());
+}
+
+LogicalResult SprstiOp::verify() {
+  return verifySprStoreCommon(getOperation(), "pto.sprsti", getSpr(),
+                              getDestination(), getOffset(),
+                              /*requireImmediateOffset=*/true);
+}
+
+void SprstsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(), &getDestinationMutable());
+}
+
+LogicalResult SprstsOp::verify() {
+  return verifySprStoreCommon(getOperation(), "pto.sprsts", getSpr(),
+                              getDestination(), getOffset(),
+                              /*requireImmediateOffset=*/false);
 }
 
 void VldusOp::getEffects(
@@ -4248,6 +4979,29 @@ LogicalResult PltB32Op::verify() {
   return verifyPredicateLaneCountOp(*this, "b32");
 }
 
+template <typename PltmOp>
+static LogicalResult verifyPredicateLoopBoundOp(PltmOp op,
+                                                StringRef granularity) {
+  if (failed(verifyMaskTypeWithGranularityLike(op, op.getMask().getType(),
+                                               "mask type", granularity)))
+    return failure();
+  if (!op.getLoop().getType().isInteger(16))
+    return op.emitOpError("requires loop operand to be i16");
+  if (!op.getBound().getType().isInteger(32))
+    return op.emitOpError("requires bound operand to be i32");
+  return success();
+}
+
+LogicalResult PltmB8Op::verify() {
+  return verifyPredicateLoopBoundOp(*this, "b8");
+}
+LogicalResult PltmB16Op::verify() {
+  return verifyPredicateLoopBoundOp(*this, "b16");
+}
+LogicalResult PltmB32Op::verify() {
+  return verifyPredicateLoopBoundOp(*this, "b32");
+}
+
 LogicalResult PpackOp::verify() {
   if (failed(verifyMaskTypeLike(*this, getInput().getType(), "input type")) ||
       failed(verifyMaskTypeLike(*this, getResult().getType(), "result type")))
@@ -4407,6 +5161,9 @@ static LogicalResult verifyVecScalarMaskedOpLike(OpTy op) {
     return failure();
   if (failed(verifyMaskTypeLike(op, op.getMask().getType(), "mask type")))
     return failure();
+  if (failed(verifyNonLowPrecisionVRegElementTypeLike(
+          op.getOperation(), op.getInput().getType(), "input type")))
+    return failure();
   return success();
 }
 
@@ -4498,6 +5255,9 @@ static LogicalResult verifyUnaryVecOp(UnaryOp op) {
     return failure();
   if (failed(verifyVRegTypeLike(op, op.getResult().getType(), "result type")))
     return failure();
+  if (failed(verifyNonLowPrecisionVRegElementTypeLike(
+          op.getOperation(), op.getInput().getType(), "operand type")))
+    return failure();
   if (op.getInput().getType() != op.getResult().getType())
     return op.emitOpError("requires matching register vector shape");
   return success();
@@ -4533,6 +5293,9 @@ static LogicalResult verifyBinaryVecOp(BinaryOp op) {
     return failure();
   if (failed(verifyVRegTypeLike(op, op.getResult().getType(), "result type")))
     return failure();
+  if (failed(verifyNonLowPrecisionVRegElementTypeLike(
+          op.getOperation(), op.getLhs().getType(), "lhs type")))
+    return failure();
   if (op.getLhs().getType() != op.getRhs().getType() ||
       op.getLhs().getType() != op.getResult().getType())
     return op.emitOpError("requires matching register vector shapes");
@@ -4546,6 +5309,32 @@ LogicalResult VdivOp::verify() { return verifyBinaryVecOp(*this); }
 LogicalResult VandOp::verify() { return verifyBinaryVecOp(*this); }
 LogicalResult VorOp::verify() { return verifyBinaryVecOp(*this); }
 LogicalResult VxorOp::verify() { return verifyBinaryVecOp(*this); }
+
+template <typename TernaryOp>
+static LogicalResult verifyTernaryVecOp(TernaryOp op) {
+  if (failed(verifyVRegTypeLike(op, op.getAcc().getType(), "acc type")) ||
+      failed(verifyVRegTypeLike(op, op.getLhs().getType(), "lhs type")) ||
+      failed(verifyVRegTypeLike(op, op.getRhs().getType(), "rhs type")) ||
+      failed(verifyMaskTypeLike(op, op.getMask().getType(), "mask type")) ||
+      failed(verifyVRegTypeLike(op, op.getResult().getType(), "result type")))
+    return failure();
+  if (op.getAcc().getType() != op.getLhs().getType() ||
+      op.getAcc().getType() != op.getRhs().getType() ||
+      op.getAcc().getType() != op.getResult().getType()) {
+    return op.emitOpError(
+        "requires acc, lhs, rhs, and result to share one vector type");
+  }
+  return success();
+}
+
+LogicalResult VmaddOp::verify() {
+  if (failed(verifyTernaryVecOp(*this)))
+    return failure();
+  Type elemType = cast<VRegType>(getAcc().getType()).getElementType();
+  if (!elemType.isF16() && !elemType.isBF16() && !elemType.isF32())
+    return emitOpError("requires f16/bf16/f32 vector element type");
+  return success();
+}
 LogicalResult VshlOp::verify() {
   if (failed(verifyBinaryVecOp(*this)))
     return failure();
@@ -4602,6 +5391,63 @@ LogicalResult VcpaddOp::verify() {
   return success();
 }
 
+template <typename HistOp>
+static LogicalResult verifyHistogramOp(HistOp op) {
+  if (failed(verifyVRegTypeLike(op, op.getAcc().getType(), "acc type")) ||
+      failed(verifyVRegTypeLike(op, op.getSource().getType(), "source type")) ||
+      failed(verifyMaskTypeWithGranularityLike(op, op.getMask().getType(),
+                                               "mask type", "b8")) ||
+      failed(verifyVRegTypeLike(op, op.getResult().getType(), "result type")))
+    return failure();
+  auto accType = cast<VRegType>(op.getAcc().getType());
+  auto sourceType = cast<VRegType>(op.getSource().getType());
+  auto resultType = cast<VRegType>(op.getResult().getType());
+  auto accElemType = dyn_cast<IntegerType>(accType.getElementType());
+  auto sourceElemType = dyn_cast<IntegerType>(sourceType.getElementType());
+  if (!accElemType || accElemType.getWidth() != 16 ||
+      accType.getElementCount() != 128)
+    return op.emitOpError("requires acc type to be !pto.vreg<128xi16>");
+  if (!sourceElemType || sourceElemType.getWidth() != 8 ||
+      sourceType.getElementCount() != 256)
+    return op.emitOpError("requires source type to be !pto.vreg<256xi8>");
+  if (resultType != accType)
+    return op.emitOpError("requires result type to match acc type");
+  if (!op.getBin().getType().isInteger(32))
+    return op.emitOpError("requires bin operand to be i32");
+  return success();
+}
+
+LogicalResult Chistv2Op::verify() { return verifyHistogramOp(*this); }
+LogicalResult Dhistv2Op::verify() { return verifyHistogramOp(*this); }
+
+template <typename ExtremaOp>
+static LogicalResult verifyExtremaPredicateOp(ExtremaOp op) {
+  if (failed(verifyVRegTypeLike(op, op.getInput().getType(), "input type")) ||
+      failed(verifyMaskTypeLike(op, op.getMask().getType(), "mask type")) ||
+      failed(verifyVRegTypeLike(op, op.getValue().getType(), "value type")) ||
+      failed(verifyMaskTypeLike(op, op.getPredicate().getType(),
+                                "predicate type")))
+    return failure();
+  if (op.getInput().getType() != op.getValue().getType())
+    return op.emitOpError(
+        "requires input and value result to share one vector type");
+  if (op.getMask().getType() != op.getPredicate().getType())
+    return op.emitOpError(
+        "requires mask and predicate result to share one mask type");
+
+  Type elemType = cast<VRegType>(op.getInput().getType()).getElementType();
+  if (elemType.isF16() || elemType.isF32())
+    return success();
+  auto intType = dyn_cast<IntegerType>(elemType);
+  if (!intType || (intType.getWidth() != 8 && intType.getWidth() != 16 &&
+                   intType.getWidth() != 32))
+    return op.emitOpError("requires i8/i16/i32/f16/f32 vector element type");
+  return success();
+}
+
+LogicalResult VcbmaxOp::verify() { return verifyExtremaPredicateOp(*this); }
+LogicalResult VcbminOp::verify() { return verifyExtremaPredicateOp(*this); }
+
 template <typename SelectOp>
 static LogicalResult verifyLaneSelectOp(SelectOp op) {
   if (failed(verifyVRegTypeLike(op, op.getSrc0().getType(), "src0 type")) ||
@@ -4657,6 +5503,9 @@ LogicalResult VselOp::verify() {
       failed(verifyVRegTypeLike(*this, getSrc1().getType(), "src1 type")) ||
       failed(verifyMaskTypeLike(*this, getMask().getType(), "mask type")) ||
       failed(verifyVRegTypeLike(*this, getResult().getType(), "result type")))
+    return failure();
+  if (failed(verifyNonLowPrecisionVRegElementTypeLike(
+          getOperation(), getSrc0().getType(), "src0 type")))
     return failure();
   if (getSrc0().getType() != getSrc1().getType() ||
       getSrc0().getType() != getResult().getType())
@@ -4845,6 +5694,45 @@ LogicalResult VtrcOp::verify() {
   return success();
 }
 
+LogicalResult VmulscvtOp::verify() {
+  if (failed(verifyVRegTypeLike(*this, getInput().getType(), "input type")) ||
+      failed(verifyMaskTypeLike(*this, getMask().getType(), "mask type")) ||
+      failed(verifyVRegTypeLike(*this, getResult().getType(), "result type")))
+    return failure();
+
+  auto inputType = cast<VRegType>(getInput().getType());
+  auto resultType = cast<VRegType>(getResult().getType());
+  if (!inputType.getElementType().isF32())
+    return emitOpError("requires f32 input vector element type");
+  if (!resultType.getElementType().isF16())
+    return emitOpError("requires f16 result vector element type");
+
+  auto scalarType = getScalar().getType();
+  if (!scalarType.isF32())
+    return emitOpError("requires f32 scalar operand");
+
+  if (failed(verifyMaskTypeWithGranularityLike(*this, getMask().getType(),
+                                               "mask type", "b32")))
+    return failure();
+
+  auto inputBits = getVRegStorageBitWidth(inputType);
+  auto resultBits = getVRegStorageBitWidth(resultType);
+  if (!inputBits || !resultBits || *inputBits != *resultBits)
+    return emitOpError(
+        "requires source and result to preserve total vector storage width");
+
+  auto normalizedRnd = normalizeRoundModeToken(getRnd());
+  if (!normalizedRnd)
+    return emitOpError("rnd must be one of R/A/F/C/Z/O");
+  if (*normalizedRnd != "A")
+    return emitOpError("currently only supports rnd A");
+
+  auto normalizedPart = normalizeEvenOddPartToken(getPart());
+  if (!normalizedPart)
+    return emitOpError("part must be EVEN or ODD");
+  return success();
+}
+
 ParseResult VcvtOp::parse(OpAsmParser &parser, OperationState &result) {
   OpAsmParser::UnresolvedOperand input;
   OpAsmParser::UnresolvedOperand mask;
@@ -4942,8 +5830,11 @@ LogicalResult VcvtOp::verify() {
 
   if (getRndAttr()) {
     StringRef roundMode = *getRnd();
-    if (!normalizeRoundModeToken(roundMode))
-      return emitOpError("rnd must be one of R/A/F/C/Z/O");
+    auto normalizedRoundMode = normalizeRoundModeToken(roundMode);
+    if (!normalizedRoundMode)
+      return emitOpError("rnd must be one of R/A/F/C/Z/O/H");
+    if (!isValidVcvtRoundModeForContract(*normalizedRoundMode, *contract))
+      return emitOpError("rnd attr is not valid for this vcvt type pair");
   }
   if (static_cast<bool>(getRndAttr()) != contract->requiresRnd) {
     return contract->requiresRnd ? emitOpError("requires rnd attr for this vcvt type pair")
@@ -4965,7 +5856,9 @@ LogicalResult VcvtOp::verify() {
     auto normalizedPart = normalizeVcvtPartToken(part);
     if (!normalizedPart)
       return emitOpError("part must be one of EVEN/ODD/P0/P1/P2/P3");
-    auto partFamily = classifyVcvtPartFamily(*inputElemBits, *resultElemBits);
+    std::optional<VcvtPartFamily> partFamily = contract->partFamily;
+    if (!partFamily)
+      partFamily = classifyVcvtPartFamily(*inputElemBits, *resultElemBits);
     if (!partFamily)
       return emitOpError("part attr is not supported for this vcvt width relation");
     if (!isValidVcvtPartForFamily(*normalizedPart, *partFamily)) {
@@ -4973,7 +5866,8 @@ LogicalResult VcvtOp::verify() {
       case VcvtPartFamily::EvenOdd:
         return emitOpError("part must be EVEN or ODD for 8/16 and 16/32 vcvt forms");
       case VcvtPartFamily::Packed4:
-        return emitOpError("part must be P0, P1, P2, or P3 for 8/32 vcvt forms");
+        return emitOpError(
+            "part must be P0, P1, P2, or P3 for packed vcvt forms");
       }
     }
   }
@@ -5323,27 +6217,11 @@ static LogicalResult verifyVstsCommon(StoreOp op) {
 LogicalResult VstsOp::verify() {
   if (failed(verifyVstsCommon(*this)))
     return failure();
-  if (std::optional<StringRef> mode = getOptionalPostModeAttr(getOperation());
-      mode && !isSupportedPostMode(*mode))
-    return emitOpError("requires mode to be POST_UPDATE or NO_POST_UPDATE");
+  if (getUpdatedBase() &&
+      getUpdatedBase().getType() != getDestination().getType())
+    return emitOpError("requires updated base result to match base type");
   return success();
 }
-void VstsPostOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  effects.emplace_back(MemoryEffects::Read::get(), &getValueMutable());
-  effects.emplace_back(MemoryEffects::Write::get(), &getDestinationMutable());
-}
-
-LogicalResult VstsPostOp::verify() {
-  if (failed(verifyVstsCommon(*this)))
-    return failure();
-  if (getUpdatedDestination().getType() != getDestination().getType())
-    return emitOpError(
-        "requires updated destination result to match destination type");
-  return success();
-}
-
 void Vstsx2Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -5484,6 +6362,9 @@ LogicalResult VsstbOp::verify() {
     return emitOpError("requires block_stride to be i16");
   if (!getRepeatStride().getType().isSignlessInteger(16))
     return emitOpError("requires repeat_stride to be i16");
+  if (getUpdatedBase() &&
+      getUpdatedBase().getType() != getDestination().getType())
+    return emitOpError("requires updated base result to match base type");
   return success();
 }
 
@@ -6513,6 +7394,21 @@ void MteL0cL1Op::print(OpAsmPrinter &printer) {
       getLoop3DstStride());
 }
 
+template <typename OpTy>
+static LogicalResult verifyCubeBridgeLoadStart(OpTy op) {
+  auto checkNonNegativeConst = [&](Value value, StringRef name) -> LogicalResult {
+    APInt intValue;
+    if (matchPattern(value, m_ConstantInt(&intValue)) && intValue.isNegative())
+      return op.emitOpError() << name << " must be non-negative";
+    return success();
+  };
+
+  if (failed(checkNonNegativeConst(op.getStartRow(), "start_row")) ||
+      failed(checkNonNegativeConst(op.getStartCol(), "start_col")))
+    return failure();
+  return success();
+}
+
 LogicalResult MteL0cL1Op::verify() {
   if (!isBufferLike(getSource().getType()) ||
       !isBufferLike(getDestination().getType()))
@@ -6533,19 +7429,27 @@ LogicalResult MteL0cL1Op::verify() {
 }
 
 LogicalResult MteL1L0aOp::verify() {
-  return verifyCubeBridgeLoadLikeOp(*this, AddressSpace::LEFT, "LEFT");
+  if (failed(verifyCubeBridgeLoadLikeOp(*this, AddressSpace::LEFT, "LEFT")))
+    return failure();
+  return verifyCubeBridgeLoadStart(*this);
 }
 
 LogicalResult MteL1L0bOp::verify() {
-  return verifyCubeBridgeLoadLikeOp(*this, AddressSpace::RIGHT, "RIGHT");
+  if (failed(verifyCubeBridgeLoadLikeOp(*this, AddressSpace::RIGHT, "RIGHT")))
+    return failure();
+  return verifyCubeBridgeLoadStart(*this);
 }
 
 LogicalResult MteL1L0aMxOp::verify() {
-  return verifyCubeBridgeLoadLikeOp(*this, AddressSpace::LEFT, "LEFT");
+  if (failed(verifyCubeBridgeLoadLikeOp(*this, AddressSpace::LEFT, "LEFT")))
+    return failure();
+  return verifyCubeBridgeLoadStart(*this);
 }
 
 LogicalResult MteL1L0bMxOp::verify() {
-  return verifyCubeBridgeLoadLikeOp(*this, AddressSpace::RIGHT, "RIGHT");
+  if (failed(verifyCubeBridgeLoadLikeOp(*this, AddressSpace::RIGHT, "RIGHT")))
+    return failure();
+  return verifyCubeBridgeLoadStart(*this);
 }
 
 void MteL1L0aOp::getEffects(

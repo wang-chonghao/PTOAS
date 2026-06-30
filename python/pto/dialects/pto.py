@@ -9,6 +9,7 @@
 import importlib
 import importlib.util
 import functools
+import os
 from pathlib import Path
 
 from mlir import ir as _ods_ir
@@ -16,10 +17,44 @@ from mlir import ir as _ods_ir
 from . import _pto_ops_gen as _pto_ops_gen
 
 
+def _candidate_pto_ext_dirs():
+    candidates = []
+    env_roots = (
+        os.environ.get("PTO_PYTHON_BUILD_ROOT"),
+        os.environ.get("PTO_PYTHON_ROOT"),
+        os.environ.get("PTO_INSTALL_DIR"),
+    )
+    for root in env_roots:
+        if not root:
+            continue
+        candidates.append(Path(root) / "mlir" / "_mlir_libs")
+
+    # Fallback to the sibling extension that ships with the current wrapper.
+    candidates.append(Path(__file__).resolve().parent.parent / "_mlir_libs")
+
+    seen = set()
+    ordered = []
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        candidate_text = str(candidate)
+        if candidate_text in seen:
+            continue
+        seen.add(candidate_text)
+        ordered.append(candidate)
+    return ordered
+
+
 def _load_local_pto_ext():
-    lib_dir = Path(__file__).resolve().parent.parent / "_mlir_libs"
-    for suffix in ("*.so", "*.pyd", "*.dll", "*.dylib"):
-        for so_path in lib_dir.glob(f"_pto{suffix}"):
+    candidates = []
+    for lib_dir in _candidate_pto_ext_dirs():
+        for suffix in ("*.so", "*.pyd", "*.dll", "*.dylib"):
+            candidates.extend(lib_dir.glob(f"_pto{suffix}"))
+    if not candidates:
+        raise FileNotFoundError("cannot locate local _pto extension in candidate _mlir_libs directories")
+
+    first_error = None
+    for so_path in candidates:
+        try:
             spec = importlib.util.spec_from_file_location(
                 "mlir._mlir_libs._pto", so_path
             )
@@ -27,12 +62,15 @@ def _load_local_pto_ext():
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 return mod
-    raise ImportError("cannot locate local _pto extension in _mlir_libs")
+        except ImportError as exc:
+            if first_error is None:
+                first_error = exc
+    raise ImportError("failed to load local _pto extension from candidate _mlir_libs directories") from first_error
 
 
 try:
     _pto_mod = _load_local_pto_ext()
-except Exception:
+except FileNotFoundError:
     _pto_mod = importlib.import_module(".._mlir_libs._pto", __package__)
 
 
@@ -47,6 +85,13 @@ def get_op_result_or_value(value):
     return getattr(_pto_ops_gen, "_get_op_result_or_value")(value)
 
 
+def _export_optional_cext_symbol(name):
+    symbol = getattr(_pto_mod, name, None)
+    if symbol is not None:
+        globals()[name] = symbol
+    return symbol
+
+
 _export_generated_symbols()
 
 register_dialect = _pto_mod.register_dialect
@@ -56,7 +101,7 @@ MaskType = _pto_mod.MaskType
 AlignType = _pto_mod.AlignType
 AsyncSessionType = _pto_mod.AsyncSessionType
 AsyncEventType = _pto_mod.AsyncEventType
-PrefetchAsyncContextType = _pto_mod.PrefetchAsyncContextType
+PrefetchAsyncContextType = _export_optional_cext_symbol("PrefetchAsyncContextType")
 HiF8Type = _pto_mod.HiF8Type
 F4E1M2x2Type = _pto_mod.F4E1M2x2Type
 F4E2M1x2Type = _pto_mod.F4E2M1x2Type
@@ -206,7 +251,6 @@ __all__ = [
     "AlignType",
     "AsyncSessionType",
     "AsyncEventType",
-    "PrefetchAsyncContextType",
     "HiF8Type",
     "F4E1M2x2Type",
     "F4E2M1x2Type",
@@ -317,6 +361,9 @@ __all__ = [
     "EVENT_ID6",
     "EVENT_ID7",
 ]
+
+if PrefetchAsyncContextType is not None:
+    __all__.insert(__all__.index("HiF8Type"), "PrefetchAsyncContextType")
 
 # -----------------------------------------------------------------------------
 # Convenience wrappers for high-level sync to allow passing enums directly

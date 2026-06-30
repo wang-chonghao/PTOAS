@@ -16,6 +16,11 @@
 #   3. Builds host executable from main.cpp (no GTest — comparison via compare.py)
 # --------------------------------------------------------------------------
 set(PTO_TILELANG_ST_TESTCASE_DIR ${CMAKE_CURRENT_LIST_DIR})
+if(DEFINED ENV{TILELANG_ST_SIM_LIB_DIR})
+    set(PTO_TILELANG_ST_SIM_LIB_DIR $ENV{TILELANG_ST_SIM_LIB_DIR})
+else()
+    set(PTO_TILELANG_ST_SIM_LIB_DIR ${ASCEND_HOME_PATH}/tools/simulator/${SOC_VERSION}/lib)
+endif()
 
 function(pto_tilelang_st NAME)
     set(options DISABLE_INSERT_SYNC)
@@ -78,7 +83,7 @@ function(pto_tilelang_st NAME)
 
     target_link_directories(${NAME} PUBLIC
         ${ASCEND_HOME_PATH}/lib64
-        ${ASCEND_HOME_PATH}/tools/simulator/${SOC_VERSION}/lib
+        ${PTO_TILELANG_ST_SIM_LIB_DIR}
     )
 
     target_link_libraries(${NAME} PRIVATE
@@ -110,6 +115,9 @@ endfunction()
 # --------------------------------------------------------------------------
 set(ALL_TESTCASES
     tadd
+    tinsert
+    tinsert_acc2vec
+    tinsert_vec
     tsub
     tmul
     tdiv
@@ -194,6 +202,24 @@ set(ALL_TESTCASES
     tfmods
     tcmps
     tmatmul
+    tmatmul_acc
+    tmatmul_bias
+    tmatmul_bias_mx
+    tmatmul_mx
+    tgemv
+    tgemv_mx
+    textract
+    textract_fp
+    textract_v2v
+    fp8_load_test
+    tmov2left
+    tmov2right
+    tmov2bias
+    tmov2scale
+    tmov2vec
+    tmov_fp
+    tstore_acc2gm
+    tload_mat
 )
 
 if((TEST_CASE IN_LIST ALL_TESTCASES) OR (TEST_CASE STREQUAL "all"))

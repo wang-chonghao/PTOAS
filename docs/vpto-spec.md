@@ -775,11 +775,23 @@ subblock_num = subblock_num();
 
 - **syntax:** `pto.store_vfsimt_info %dim_z, %dim_y, %dim_x : i32, i32, i32`
 - **operands:** `i32, i32, i32`
-- **semantics:** Configure the SIMT VF launch descriptor consumed by a subsequent SIMT entry invocation. The three operands are the launch dimensions in `z, y, x` order. Lowering packs them into the `llvm.hivm.store.vfsimt.info` intrinsic payload.
+- **semantics:** Configure the SIMT VF launch descriptor consumed by a subsequent SIMT entry invocation. The three operands are the launch dimensions in `z, y, x` order.
 - **placement:** This op must appear in the outer non-SIMT caller. It must not appear inside a function marked with `pto.simt_entry`.
 
 ```c
 store_vfsimt_info(dim_z, dim_y, dim_x);
+```
+
+#### `pto.simt_launch`
+
+- **syntax:** `pto.simt_launch @body<<<%dim_x, %dim_y, %dim_z>>>(%arg0, ...) : (arg_types...) -> ()`
+- **operands:** `%dim_x`, `%dim_y`, and `%dim_z` are `i32` workitem counts in `x, y, z` launch order. The remaining operands are passed to `@body`.
+- **semantics:** Invoke the SIMT entry `@body` for the workitem space described by `%dim_x * %dim_y * %dim_z`. Workitems in `@body` observe thread coordinates through the SIMT query ops.
+- **placement:** This op must appear in the outer non-SIMT caller. The callee must be marked with `pto.simt_entry` and must return no values.
+
+```mlir
+pto.simt_launch @simt_write<<<%dim_x, %dim_y, %dim_z>>>(%ub_out)
+  : (!pto.ptr<i32, ub>) -> ()
 ```
 
 #### `pto.get_tid_x`
@@ -1181,12 +1193,14 @@ All PTO micro Instruction operations follow standard MLIR syntax. The common pat
 
 ```mlir
 %result = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>
+%result, %updated_base = pto.vlds %source[%offset] {dist = "DIST"} : !pto.ptr<T, ub> -> !pto.vreg<NxT>, !pto.ptr<T, ub>
 ```
 
 **Store (register to memory):**
 
 ```mlir
 pto.vsts %value, %destination[%offset] {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub>
+%updated_base = pto.vsts %value, %destination[%offset] {dist = "DIST"} : !pto.vreg<NxT>, !pto.ptr<T, ub> -> !pto.ptr<T, ub>
 ```
 
 **Dual Load (one load, two results — deinterleave):**
@@ -1370,20 +1384,21 @@ This section provides a categorized overview of all PTO micro Instruction operat
 |---|-------|-------------|-------|---------|
 | 1 | [Pipeline Sync](isa/micro-isa/01-pipeline-sync.md) | Intra-core pipeline synchronization | 5 | `pto.set_flag`, `pto.wait_flag`, `pto.pipe_barrier`, `pto.get_buf`, `pto.rls_buf` |
 | 2 | [DMA Copy Programming](isa/micro-isa/02-dma-copy.md) | Public DMA transfer interface between GM↔UB, UB→UB, and UB→L1 | 4 | `pto.mte_gm_ub`, `pto.mte_ub_gm`, `pto.mte_ub_ub`, `pto.mte_ub_l1` |
-| 3 | [Vector Load/Store](isa/micro-isa/03-vector-load-store.md) | UB↔vreg data movement with various access patterns | ~20 | `pto.vlds`, `pto.vldsx2`, `pto.vgather2`, `pto.vsts`, `pto.vstsx2`, `pto.vscatter`, etc. |
+| 3 | [Vector Load/Store](isa/micro-isa/03-vector-load-store.md) | UB↔vreg data movement with various access patterns | ~23 | `pto.vlds`, `pto.vldsx2`, `pto.vgather2`, `pto.vsts`, `pto.vstsx2`, `pto.vscatter`, `pto.sprclr`, `pto.sprsti`, `pto.sprsts`, etc. |
 | 4 | [Predicate Load/Store](isa/micro-isa/04-predicate-load-store.md) | UB↔mask register movement | 5 | `pto.plds`, `pto.pldi`, `pto.psts`, `pto.psti`, `pto.pstu` |
-| 5 | [Materialization & Predicate Ops](isa/micro-isa/05-materialization-predicate.md) | Scalar broadcast, predicate generation and manipulation | ~17 | `pto.vbr`, `pto.vdup`, `pto.pset_b*`, `pto.pge_b*`, `pto.plt_b*`, `pto.ppack`, `pto.punpack`, `pto.pnot`, `pto.psel`, etc. |
-| 6 | [Unary Vector Ops](isa/micro-isa/06-unary-vector-ops.md) | Single-input element-wise operations | 6 | `pto.vabs`, `pto.vexp`, `pto.vln`, `pto.vsqrt`, `pto.vrelu`, `pto.vnot` |
-| 7 | [Binary Vector Ops](isa/micro-isa/07-binary-vector-ops.md) | Two-input element-wise operations | 13 | `pto.vadd`, `pto.vsub`, `pto.vmul`, `pto.vdiv`, `pto.vmax`, `pto.vmin`, `pto.vand`, `pto.vor`, `pto.vxor`, `pto.vshl`, `pto.vshr`, `pto.vaddc`, `pto.vsubc` |
+| 5 | [Materialization & Predicate Ops](isa/micro-isa/05-materialization-predicate.md) | Scalar broadcast, predicate generation and manipulation | ~20 | `pto.vbr`, `pto.vdup`, `pto.pset_b*`, `pto.pge_b*`, `pto.plt_b*`, `pto.pltm_b*`, `pto.ppack`, `pto.punpack`, `pto.pnot`, `pto.psel`, etc. |
+| 6 | [Unary Vector Ops](isa/micro-isa/06-unary-vector-ops.md) | Single-input element-wise operations | 7 | `pto.vabs`, `pto.vneg`, `pto.vexp`, `pto.vln`, `pto.vsqrt`, `pto.vrelu`, `pto.vnot` |
+| 7 | [Binary Vector Ops](isa/micro-isa/07-binary-vector-ops.md) | Two-input element-wise operations | 14 | `pto.vadd`, `pto.vsub`, `pto.vmul`, `pto.vdiv`, `pto.vmax`, `pto.vmin`, `pto.vmadd`, `pto.vand`, `pto.vor`, `pto.vxor`, `pto.vshl`, `pto.vshr`, `pto.vaddc`, `pto.vsubc` |
 | 8 | [Vec-Scalar Ops](isa/micro-isa/08-vec-scalar-ops.md) | Vector-scalar operations | 9 | `pto.vadds`, `pto.vmuls`, `pto.vmaxs`, `pto.vmins`, `pto.vlrelu`, `pto.vshls`, `pto.vshrs`, `pto.vaddcs`, `pto.vsubcs` |
 | 9 | [Conversion Ops](isa/micro-isa/09-conversion-ops.md) | Type conversion with rounding/saturation control | 4 | `pto.vcvt`, `pto.vtrc`, `pto.vbitcast`, `pto.pbitcast` |
-| 10 | [Reduction Ops](isa/micro-isa/10-reduction-ops.md) | Vector reductions | 7 | `pto.vcadd`, `pto.vcmax`, `pto.vcmin`, `pto.vcgadd`, `pto.vcgmax`, `pto.vcgmin`, `pto.vcpadd` |
+| 10 | [Reduction Ops](isa/micro-isa/10-reduction-ops.md) | Vector reductions | 11 | `pto.vcadd`, `pto.vcmax`, `pto.vcmin`, `pto.vcbmax`, `pto.vcbmin`, `pto.vcgadd`, `pto.vcgmax`, `pto.vcgmin`, `pto.vcpadd`, `pto.chistv2`, `pto.dhistv2` |
 | 11 | [Compare & Select](isa/micro-isa/11-compare-select.md) | Comparison and conditional selection | 4 (+1 not A5) | `pto.vcmp`, `pto.vcmps`, `pto.vsel`, `pto.vselr` (`pto.vselrv2` removed: not A5) |
 | 12 | [Data Rearrangement](isa/micro-isa/12-data-rearrangement.md) | In-register data movement and permutation | 2 (+2 not A5) | `pto.vintlv`, `pto.vdintlv` (`pto.vintlvv2`, `pto.vdintlvv2` removed: not A5) |
-| 13 | [DSA/SFU Ops](isa/micro-isa/13-dsa-sfu-ops.md) | Specialized ops, index generation, and sorting helpers | 10 | `pto.vlrelu`, `pto.vprelu`, `pto.vexpdif`, `pto.vaxpy`, `pto.vmull`, `pto.vmula`, `pto.vci`, `pto.vbitsort`, `pto.vmrgsort4`, `pto.get_vms4_sr` |
+| 13 | [DSA/SFU Ops](isa/micro-isa/13-dsa-sfu-ops.md) | Specialized ops, index generation, and sorting helpers | 11 | `pto.vlrelu`, `pto.vprelu`, `pto.vexpdif`, `pto.vaxpy`, `pto.vmulscvt`, `pto.vmull`, `pto.vmula`, `pto.vci`, `pto.vbitsort`, `pto.vmrgsort4`, `pto.get_vms4_sr` |
 | 14 | [Arith (Shared MLIR Dialect)](isa/micro-isa/14-shared-arith.md) | Full scalar `arith` surface used around PTO ops; the companion page lists categories and representative examples | all scalar ops | `arith.constant`, `arith.addi`, `arith.addf`, `arith.cmpi`, `arith.cmpf`, `arith.select`, `arith.index_cast`, `arith.extsi`, `arith.trunci`, `arith.andi`, `arith.shli`, etc. |
 | 15 | [SCF (Shared MLIR Dialect)](isa/micro-isa/15-shared-scf.md) | Structured loops, branches, and loop-carried state around PTO regions | 5 | `scf.for`, `scf.if`, `scf.while`, `scf.condition`, `scf.yield` |
 | 16 | [Cube Matrix Multiply](isa/micro-isa/16-cube-matmul.md) | GM↔L1 (`l1`/cbuf) staging, L1 (`l1`)↔UB/BT/FB side moves, L1→L0A/L0B loads, L0C (`l0c`) matmul, and FIXPIPE MTE writeback | 19 | `pto.mte_gm_l1`, `pto.mte_l1_ub`, `pto.mte_gm_l1_frac`, `pto.mte_l1_bt`, `pto.mte_l1_fb`, `pto.mte_l1_l0a`, `pto.mte_l1_l0b`, `pto.mte_l1_l0a_mx`, `pto.mte_l1_l0b_mx`, `pto.mad`, `pto.mad_acc`, `pto.mad_bias`, `pto.mad_mx`, `pto.mad_mx_acc`, `pto.mad_mx_bias`, `pto.mte_l0c_l1`, `pto.mte_l0c_gm`, `pto.mte_l0c_ub` |
+| 17 | [SIMT Ops](isa/micro-isa/17-simt.md) | SIMT launch, thread/lane queries, vote/shuffle/redux, scalar memory, atomics, scalar math, conversion, entry synchronization, and state preservation | ~65 | `pto.store_vfsimt_info`, `pto.simt_launch`, `pto.get_tid_x`, `pto.get_laneid`, `pto.vote_*`, `pto.shuffle_*`, `pto.redux_*`, `pto.load`, `pto.store`, `pto.atomic_*`, `pto.convert`, `pto.syncthreads`, `pto.keep`, `pto.resume`, etc. |
 
 ---
 

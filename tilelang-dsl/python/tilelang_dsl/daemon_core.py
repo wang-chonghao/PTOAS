@@ -29,12 +29,15 @@ from .kernel import (
     KernelRegistry,
     VKernelDescriptor,
     select_kernel,
-    AnyType,
 )
 from .types import (
     MemorySpace,
+    ScalarType,
     TileSpecialization,
     TileConfig,
+    ViewConfig,
+    WildcardType,
+    is_integer_dtype,
 )
 import tilelang_dsl as pto
 
@@ -274,9 +277,11 @@ def _import_and_find_descriptors(py_file: Path) -> list[VKernelDescriptor]:
     Returns:
         List of VKernelDescriptor objects
     """
-    template_parent = py_file.parent.parent
-    if str(template_parent) not in sys.path:
-        sys.path.insert(0, str(template_parent))
+    import_roots = (py_file.parent, py_file.parent.parent)
+    for root in reversed(import_roots):
+        root_text = str(root)
+        if root_text not in sys.path:
+            sys.path.insert(0, root_text)
 
     module_name = f"_tl_template_{py_file.stem}"
     spec = importlib.util.spec_from_file_location(module_name, str(py_file))
@@ -313,9 +318,14 @@ def _build_positional_context_attrs(operand_specs: list[dict]) -> dict[str, Any]
     for index, spec in enumerate(operand_specs):
         prefix = f"arg{index}"
         attrs[f"{prefix}_kind"] = spec.get("kind")
-        attrs[f"{prefix}_dtype"] = spec.get("dtype")
+        dtype = spec.get("dtype")
+        if isinstance(dtype, str):
+            dtype = _convert_dtype_str_to_scalar(dtype)
+        attrs[f"{prefix}_dtype"] = dtype
 
         if spec.get("kind") == "scalar":
+            if "value" in spec:
+                attrs[f"{prefix}_value"] = spec["value"]
             continue
 
         shape = spec.get("shape")
@@ -333,10 +343,18 @@ def _build_positional_context_attrs(operand_specs: list[dict]) -> dict[str, Any]
                 attrs[f"{prefix}_valid_shape"] = tuple(valid_shape)
             config = spec.get("config")
             if config is not None:
+                if not isinstance(config, TileConfig):
+                    config = TileConfig.from_mapping(config)
                 attrs[f"{prefix}_config"] = config
 
-        if spec.get("kind") == "view" and "strides" in spec:
-            attrs[f"{prefix}_strides"] = tuple(spec["strides"])
+        if spec.get("kind") == "view":
+            config = spec.get("config")
+            if config is not None:
+                if not isinstance(config, ViewConfig):
+                    config = ViewConfig.from_mapping(config)
+                attrs[f"{prefix}_config"] = config
+            if "strides" in spec:
+                attrs[f"{prefix}_strides"] = tuple(spec["strides"])
 
     return attrs
 
@@ -374,6 +392,11 @@ def _convert_dtype_str_to_scalar(dtype_str: str) -> Any:
         'f16': pto.f16,
         'f32': pto.f32,
         'bf16': pto.bf16,
+        'hif8': pto.hif8,
+        'f8e4m3': pto.f8e4m3,
+        'f8e5m2': pto.f8e5m2,
+        'f4e1m2x2': pto.f4e1m2x2,
+        'f4e2m1x2': pto.f4e2m1x2,
         'i8': pto.i8,
         'si8': pto.si8,
         'i16': pto.i16,
@@ -466,9 +489,18 @@ def _dtype_matches(dtype_sig: Any, dtype_spec: Any) -> bool:
     Returns:
         True if matches
     """
-    # AnyType matches any dtype (wildcard)
-    if dtype_sig == AnyType:
-        return True
+    if isinstance(dtype_sig, WildcardType):
+        if dtype_sig.name == "AnyType":
+            return isinstance(dtype_spec, ScalarType)
+        if dtype_sig.name == "AnyFloat":
+            return isinstance(dtype_spec, ScalarType) and dtype_spec.name in {
+                "f16",
+                "bf16",
+                "f32",
+            }
+        if dtype_sig.name == "AnyInt":
+            return isinstance(dtype_spec, ScalarType) and is_integer_dtype(dtype_spec)
+        return False
     
     # Normal matching logic
     if hasattr(dtype_sig, "name") and hasattr(dtype_spec, "name"):

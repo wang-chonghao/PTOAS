@@ -83,6 +83,11 @@ from .types import (
     bytewidth,
     f16,
     f32,
+    hif8,
+    f8e4m3,
+    f8e5m2,
+    f4e1m2x2,
+    f4e2m1x2,
     i1,
     i8,
     i16,
@@ -92,6 +97,8 @@ from .types import (
     integer_signedness,
     is_float_dtype,
     is_integer_dtype,
+    is_low_precision_dtype,
+    is_storage_only_dtype,
     si8,
     si16,
     si32,
@@ -122,6 +129,11 @@ _DTYPE_SYMBOLS = {
     "f16": f16,
     "bf16": bf16,
     "f32": f32,
+    "hif8": hif8,
+    "f8e4m3": f8e4m3,
+    "f8e5m2": f8e5m2,
+    "f4e1m2x2": f4e1m2x2,
+    "f4e2m1x2": f4e2m1x2,
 }
 _MASK_TYPE_SYMBOLS = {
     "mask_b8": MaskType("b8"),
@@ -204,6 +216,13 @@ _VCVT_ATTR_CONTRACTS: dict[tuple[str, str], tuple[bool, bool, bool]] = {
     ("s32", "s64"): (False, False, True),
     ("s64", "f32"): (True, False, True),
     ("s64", "s32"): (False, True, True),
+    ("f32", "fp8"): (True, True, True),
+    ("f32", "hif8"): (True, True, True),
+    ("f16", "hif8"): (True, True, True),
+    ("bf16", "fp4x2"): (True, False, True),
+    ("fp8", "f32"): (False, False, True),
+    ("hif8", "f32"): (False, False, True),
+    ("fp4x2", "bf16"): (False, False, True),
 }
 
 
@@ -214,6 +233,12 @@ def _classify_vcvt_elem_kind(dtype: ScalarType) -> str | None:
         return "bf16"
     if dtype == f32:
         return "f32"
+    if dtype in {f8e4m3, f8e5m2}:
+        return "fp8"
+    if dtype == hif8:
+        return "hif8"
+    if dtype in {f4e1m2x2, f4e2m1x2}:
+        return "fp4x2"
     if not is_integer_dtype(dtype):
         return None
     width = integer_bitwidth(dtype)
@@ -971,6 +996,7 @@ class _SemanticAnalyzer:
         if param.kind == "mask":
             return SemanticMaskType(granularity=param.dtype.granularity)
         if param.kind == "scalar":
+            self._require_non_low_precision_dtype(param.dtype, "scalar parameter type")
             return SemanticScalarType(dtype=param.dtype)
         raise ValueError(f"unsupported parameter kind {param.kind!r}")
 
@@ -3847,12 +3873,22 @@ class _SemanticAnalyzer:
         lhs: SemanticExpr,
         rhs: SemanticExpr,
         context: str,
+        allow_mixed_low_precision: bool = False,
     ) -> None:
         lhs_dtype = lhs.type.element_dtype
         rhs_dtype = rhs.type.element_dtype
         if lhs_dtype is None or rhs_dtype is None:
             return
         if lhs_dtype != rhs_dtype:
+            if allow_mixed_low_precision:
+                lhs_name = getattr(lhs_dtype, "name", "")
+                rhs_name = getattr(rhs_dtype, "name", "")
+                allowed_mixed_sets = (
+                    {"f8e4m3", "f8e5m2"},
+                    {"f4e1m2x2", "f4e2m1x2"},
+                )
+                if any(lhs_name in dtype_set and rhs_name in dtype_set for dtype_set in allowed_mixed_sets):
+                    return
             raise TypeError(f"{context} requires source/destination pointer element dtypes to match")
 
     def _require_cube_i64_tuple(
@@ -3964,6 +4000,7 @@ class _SemanticAnalyzer:
             lhs,
             rhs,
             f"pto.{name}",
+            allow_mixed_low_precision=True,
         )
         if "bias" in name:
             bias = self._require_pointer_expr(args[3], f"pto.{name} bias", memory_space="bias")
@@ -4024,7 +4061,18 @@ class _SemanticAnalyzer:
             if lhs_dtype != f32 or rhs_dtype != f32 or dst_dtype != f32:
                 raise TypeError(f"pto.{name} tf32_mode requires f32 lhs, rhs, and dst in TileLang DSL v1")
         if not self._is_none_literal_expr(sat_expr):
-            if not (is_float_dtype(lhs_dtype) and is_float_dtype(rhs_dtype) and is_float_dtype(dst_dtype)):
+            def is_mad_sat_compatible_dtype(dtype: ScalarType) -> bool:
+                if is_float_dtype(dtype):
+                    return True
+                if "_mx" not in name:
+                    return False
+                return dtype in {hif8, f8e4m3, f8e5m2, f4e1m2x2, f4e2m1x2}
+
+            if not (
+                is_mad_sat_compatible_dtype(lhs_dtype)
+                and is_mad_sat_compatible_dtype(rhs_dtype)
+                and is_mad_sat_compatible_dtype(dst_dtype)
+            ):
                 raise TypeError(f"pto.{name} sat requires a floating lhs/rhs/dst dtype combination in TileLang DSL v1")
         return SemanticCallExpr(
             namespace="pto",
@@ -4302,11 +4350,22 @@ class _SemanticAnalyzer:
     ) -> SemanticExpr:
         if len(args) != 4:
             raise TypeError(f"pto.{name} expects exactly 4 positional arguments in TileLang DSL v1")
-        allowed_keywords = {"transpose"}
+        allowed_keywords: set[str] = set()
+        supports_transpose = name in {"mte_l1_l0a", "mte_l1_l0b"}
+        if supports_transpose:
+            allowed_keywords.add("transpose")
+        supports_start_position = name in {
+            "mte_l1_l0a",
+            "mte_l1_l0b",
+            "mte_l1_l0a_mx",
+            "mte_l1_l0b_mx",
+        }
+        if supports_start_position:
+            allowed_keywords |= {"start_row", "start_col"}
         unsupported = sorted(set(keywords) - allowed_keywords)
         if unsupported:
             raise TypeError(
-                f"pto.{name} only accepts keyword(s) transpose in TileLang DSL v1; "
+                f"pto.{name} only accepts keyword(s) {', '.join(sorted(allowed_keywords))} in TileLang DSL v1; "
                 f"got unsupported keyword(s): {', '.join(unsupported)}"
             )
         src = self._require_pointer_expr(args[0], f"pto.{name} source", memory_space="mat")
@@ -4315,14 +4374,38 @@ class _SemanticAnalyzer:
         self._require_matching_cube_pointer_element_dtypes(src, dst, f"pto.{name}")
         self._require_i64_like_expr(args[2], f"pto.{name} first dimension")
         self._require_i64_like_expr(args[3], f"pto.{name} second dimension")
-        transpose = self._cube_keyword_or_default(
+        start_row = self._cube_keyword_or_default(
             keywords,
-            "transpose",
-            SemanticLiteralExpr(value=False, type=SemanticScalarType(dtype=i1)),
+            "start_row",
+            SemanticLiteralExpr(value=0, type=SemanticIndexType()),
         )
-        if not isinstance(transpose.type, SemanticScalarType) or transpose.type.dtype != i1:
-            raise TypeError(f"pto.{name} transpose must be an i1/bool value in TileLang DSL v1")
-        return SemanticCallExpr(namespace="pto", name=name, args=args + (transpose,), type=None)
+        start_col = self._cube_keyword_or_default(
+            keywords,
+            "start_col",
+            SemanticLiteralExpr(value=0, type=SemanticIndexType()),
+        )
+        self._require_i64_like_expr(start_row, f"pto.{name} start_row")
+        self._require_i64_like_expr(start_col, f"pto.{name} start_col")
+        if supports_transpose:
+            transpose = self._cube_keyword_or_default(
+                keywords,
+                "transpose",
+                SemanticLiteralExpr(value=False, type=SemanticScalarType(dtype=i1)),
+            )
+            if not isinstance(transpose.type, SemanticScalarType) or transpose.type.dtype != i1:
+                raise TypeError(f"pto.{name} transpose must be an i1/bool value in TileLang DSL v1")
+            return SemanticCallExpr(
+                namespace="pto",
+                name=name,
+                args=args + (start_row, start_col, transpose),
+                type=None,
+            )
+        return SemanticCallExpr(
+            namespace="pto",
+            name=name,
+            args=args + (start_row, start_col),
+            type=None,
+        )
 
     def _analyze_mte_l0c_store(
         self,
@@ -4410,8 +4493,8 @@ class _SemanticAnalyzer:
                     "qf322bf16_pre_scalar", "qs322bf16_pre_vec", "qs322bf16_pre_scalar",
                 },
             )
-            if src.type.element_dtype.name not in {"f32", "i32"}:
-                raise TypeError(f"pto.{name} pre_quant requires f32 or i32 source elements in TileLang DSL v1")
+            if src.type.element_dtype.name not in {"f32", "i32", "si32"}:
+                raise TypeError(f"pto.{name} pre_quant requires f32, i32, or si32 source elements in TileLang DSL v1")
             self._validate_fixpipe_payload(
                 pre_quant_payload,
                 pre_quant_mode,
@@ -4603,6 +4686,8 @@ class _SemanticAnalyzer:
     ) -> None:
         mode_value = self._require_string_expr(mode, f"{context} mode")
         if mode_value in {"f32_f16", "f32_bf16"}:
+            # f32_f16 / f32_bf16 only accept scalar payload per hardware spec.
+            # Vector/scaling payload is NOT supported for these modes.
             self._require_fixpipe_scalar_payload(payload, f"{context} payload")
         elif mode_value.endswith(scalar_required_suffix):
             self._require_fixpipe_scalar_payload(payload, f"{context} payload")
@@ -4641,6 +4726,15 @@ class _SemanticAnalyzer:
             return ("i32", "bf16")
         return (None, None)
 
+    def _fixpipe_pre_quant_src_family_matches(self, src_dtype: ScalarType, src_family: str | None) -> bool:
+        if src_family is None:
+            return True
+        if src_family == "f32":
+            return src_dtype.name == "f32"
+        if src_family == "i32":
+            return src_dtype.name in {"i32", "si32"}
+        return src_dtype.name == src_family
+
     def _fixpipe_pre_quant_dst_family_matches(self, dst_dtype: ScalarType, dst_family: str | None) -> bool:
         if dst_family is None:
             return True
@@ -4666,7 +4760,7 @@ class _SemanticAnalyzer:
     ) -> None:
         mode_value = self._require_string_expr(mode, f"{context} mode")
         expected_src_family, expected_dst_family = self._fixpipe_pre_quant_mode_families(mode_value)
-        if expected_src_family is not None and src_dtype.name != expected_src_family:
+        if not self._fixpipe_pre_quant_src_family_matches(src_dtype, expected_src_family):
             raise TypeError(
                 f"{context} mode {mode_value} requires {expected_src_family} source elements in TileLang DSL v1"
             )
@@ -5135,6 +5229,7 @@ class _SemanticAnalyzer:
         *,
         surface_name: str,
     ) -> SemanticExpr:
+        self._require_non_low_precision_dtype(target_dtype, f"{surface_name} scalar constructor")
         if len(args) != 1:
             raise TypeError(f"{surface_name} expects exactly 1 positional argument in TileLang DSL v1")
 
@@ -5323,6 +5418,7 @@ class _SemanticAnalyzer:
         if len(args) != 1:
             raise TypeError("pto.vreg expects exactly 1 positional argument in TileLang DSL v1")
         dtype = self._require_dtype_symbol(args[0], "pto.vreg element type")
+        self._require_non_storage_only_dtype(dtype, "pto.vreg element type")
         vreg_type = self._vreg_type_for_dtype(dtype)
         return SemanticLiteralExpr(
             value=VRegType(element_dtype=dtype, lanes=vreg_type.lanes),
@@ -5333,6 +5429,7 @@ class _SemanticAnalyzer:
         if len(args) != 2:
             raise TypeError("pto.vector expects exactly 2 positional arguments in TileLang DSL v1")
         dtype = self._require_dtype_symbol(args[0], "pto.vector element type")
+        self._require_non_storage_only_dtype(dtype, "pto.vector element type")
         shape = self._require_vector_shape_expr(args[1], "pto.vector shape")
         return SemanticLiteralExpr(
             value=VectorType(element_dtype=dtype, shape=shape),
@@ -6223,8 +6320,13 @@ class _SemanticAnalyzer:
             raise TypeError(f"pto.{name} expects exactly 2 positional arguments in TileLang DSL")
         src0 = self._require_vreg_expr(args[0], f"pto.{name} src0")
         src1 = self._require_vreg_expr(args[1], f"pto.{name} src1")
-        if src0 != src1:
-            raise TypeError(f"pto.{name} requires src0/src1 vector types to match")
+        if src1.lanes != src0.lanes:
+            raise TypeError(f"pto.{name} requires src0/src1 to have identical lane counts")
+        src1_bits = integer_bitwidth(src1.element_dtype)
+        if src1_bits is None:
+            raise TypeError(f"pto.{name} requires src1 to use integer vector elements")
+        if src1_bits != bytewidth(src0.element_dtype) * 8:
+            raise TypeError(f"pto.{name} requires src1 integer element width to match src0 element width")
         return SemanticCallExpr(namespace="pto", name=name, args=args, type=src0)
 
     def _analyze_carry_op(
@@ -6539,6 +6641,20 @@ class _SemanticAnalyzer:
                 return expr.binding.value
             raise TypeError(f"{context} must be a TileLang scalar dtype symbol in TileLang DSL v1")
         return expr.value
+
+    def _require_non_storage_only_dtype(self, dtype: ScalarType, context: str) -> None:
+        if is_storage_only_dtype(dtype):
+            raise TypeError(
+                f"{context} does not accept storage-only low-precision dtype `{dtype.name}`; "
+                "these dtypes are only supported by storage and ptr surfaces in TileLang DSL v1"
+            )
+
+    def _require_non_low_precision_dtype(self, dtype: ScalarType, context: str) -> None:
+        if is_low_precision_dtype(dtype):
+            raise TypeError(
+                f"{context} does not accept low-precision dtype `{dtype.name}`; "
+                "these dtypes are not scalar element dtypes in TileLang DSL v1"
+            )
 
     def _dtype_symbol_expr(self, dtype: ScalarType) -> SemanticSymbolExpr:
         return SemanticSymbolExpr(
@@ -7181,8 +7297,8 @@ class _SemanticAnalyzer:
         if isinstance(expr.type, SemanticIndexType):
             return
         scalar = self._require_scalar_expr(expr, context)
-        if scalar.dtype != i64:
-            raise TypeError(f"{context} must be an i64 or index value in TileLang DSL")
+        if scalar.dtype not in (i64, i32):
+            raise TypeError(f"{context} must be an i64, i32, or index value in TileLang DSL")
 
     def _require_tail_remaining_expr(self, expr: SemanticExpr, context: str) -> None:
         if isinstance(expr.type, SemanticIndexType):
@@ -7269,15 +7385,12 @@ class _SemanticAnalyzer:
         else:
             dist = self._require_string_expr(expr, "pto.vldsx2 dist")
         legacy_map = {
-            "DINTLV_B8": "DINTLV",
-            "DINTLV_B16": "DINTLV",
-            "DINTLV_B32": "DINTLV",
             "BD": "BDINTLV",
         }
         normalized = legacy_map.get(dist, dist)
-        if normalized not in {"DINTLV", "BDINTLV"}:
+        if normalized not in {"DINTLV", "DINTLV_B8", "DINTLV_B16", "DINTLV_B32", "BDINTLV"}:
             raise TypeError(
-                "pto.vldsx2 dist must be one of \"DINTLV\" or \"BDINTLV\" in TileLang DSL v1"
+                "pto.vldsx2 dist must be one of \"DINTLV\", \"DINTLV_B8\", \"DINTLV_B16\", \"DINTLV_B32\", or \"BDINTLV\" in TileLang DSL v1"
             )
         return SemanticLiteralExpr(value=normalized, type=SemanticMetaType(kind="string"))
 
@@ -7314,6 +7427,8 @@ class _SemanticAnalyzer:
             return "b32"
         if dtype.name in {"f16", "bf16"} or int_bits == 16:
             return "b16"
+        if dtype.name in {"f8e4m3", "f8e5m2", "hif8", "f4e1m2x2", "f4e2m1x2"}:
+            return "b8"
         if int_bits == 8:
             return "b8"
         raise TypeError(f"dtype `{dtype.name}` is not supported by make_mask/vector lowering in TileLang DSL v1")

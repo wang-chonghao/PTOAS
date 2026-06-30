@@ -11,13 +11,27 @@
 import tilelang_dsl as pto
 
 
+def _config_value(config, name):
+    if config is None:
+        return None
+    if isinstance(config, dict):
+        return config.get(name)
+    return getattr(config, name, None)
+
+
+def _matches_layout(value, expected, expected_name):
+    if value is None:
+        return False
+    return value == expected or value == expected_name or str(value).lower().endswith(expected_name)
+
+
 def _supports_basic_rowwise_tcvt(
+    src=None,
+    dst=None,
     src_shape=(),
     src_valid_shape=(),
     dst_shape=(),
     dst_valid_shape=(),
-    src_config=None,
-    dst_config=None,
 ):
     if tuple(src_shape) != tuple(dst_shape):
         return False
@@ -25,15 +39,50 @@ def _supports_basic_rowwise_tcvt(
         return False
     if len(src_shape) != 2 or len(dst_shape) != 2:
         return False
+    if src is None or dst is None:
+        return False
+    src_config = src.config
+    dst_config = dst.config
     if src_config is None or dst_config is None:
         return False
-    if src_config.b_layout != pto.BLayout.ROW_MAJOR:
+    if not _matches_layout(_config_value(src_config, "b_layout"), pto.BLayout.ROW_MAJOR, "row_major"):
         return False
-    if dst_config.b_layout != pto.BLayout.ROW_MAJOR:
+    if not _matches_layout(_config_value(dst_config, "b_layout"), pto.BLayout.ROW_MAJOR, "row_major"):
         return False
-    if src_config.s_layout != pto.SLayout.NONE_BOX:
+    if not _matches_layout(_config_value(src_config, "s_layout"), pto.SLayout.NONE_BOX, "none_box"):
         return False
-    if dst_config.s_layout != pto.SLayout.NONE_BOX:
+    if not _matches_layout(_config_value(dst_config, "s_layout"), pto.SLayout.NONE_BOX, "none_box"):
+        return False
+    return True
+
+
+def _supports_bf16_to_fp4_rowwise_tcvt(
+    src=None,
+    dst=None,
+    src_shape=(),
+    src_valid_shape=(),
+    dst_shape=(),
+    dst_valid_shape=(),
+):
+    if len(src_shape) != 2 or len(dst_shape) != 2:
+        return False
+    if src_shape[0] != dst_shape[0] or src_shape[1] != dst_shape[1] * 2:
+        return False
+    if src_valid_shape[0] != dst_valid_shape[0] or src_valid_shape[1] != dst_valid_shape[1] * 2:
+        return False
+    if src is None or dst is None:
+        return False
+    src_config = src.config
+    dst_config = dst.config
+    if src_config is None or dst_config is None:
+        return False
+    if not _matches_layout(_config_value(src_config, "b_layout"), pto.BLayout.ROW_MAJOR, "row_major"):
+        return False
+    if not _matches_layout(_config_value(dst_config, "b_layout"), pto.BLayout.ROW_MAJOR, "row_major"):
+        return False
+    if not _matches_layout(_config_value(src_config, "s_layout"), pto.SLayout.NONE_BOX, "none_box"):
+        return False
+    if not _matches_layout(_config_value(dst_config, "s_layout"), pto.SLayout.NONE_BOX, "none_box"):
         return False
     return True
 
@@ -1109,4 +1158,191 @@ def template_tcvt_f16_to_si8(src: pto.Tile, dst: pto.Tile):
                 part=pto.VcvtPartMode.EVEN,
             )
             pto.vsts(vec_si8, dst[row, col:], store_mask, dist=pto.VStoreDist.PK_B16)
+    return
+
+
+@pto.vkernel(
+    target="a5",
+    op="pto.tcvt",
+    dtypes=[
+        (pto.f32, pto.f8e4m3),
+        (pto.f32, pto.f8e5m2),
+    ],
+    constraints=[_supports_basic_rowwise_tcvt],
+    advanced=True,
+)
+def template_tcvt_f32_to_fp8(src: pto.Tile, dst: pto.Tile):
+    dst_dtype = dst.element_type
+    valid_rows, valid_cols = dst.valid_shape
+    round_mode = pto.get_op_attr("round_mode", "RINT")
+    rnd = pto.VcvtRoundMode.R
+    if pto.constexpr(round_mode == "ROUND"):
+        rnd = pto.VcvtRoundMode.A
+    elif pto.constexpr(round_mode == "FLOOR"):
+        rnd = pto.VcvtRoundMode.F
+    elif pto.constexpr(round_mode == "CEIL"):
+        rnd = pto.VcvtRoundMode.C
+    elif pto.constexpr(round_mode == "TRUNC"):
+        rnd = pto.VcvtRoundMode.Z
+    elif pto.constexpr(round_mode == "ODD"):
+        rnd = pto.VcvtRoundMode.O
+    lanes_f32 = pto.get_lanes(pto.f32)
+    src_mask = pto.make_mask(pto.f32, pto.PAT.ALL)
+    idx_mask_b8 = pto.pset_b8(pto.PAT.ALL)
+    idx_mask_b16 = pto.pbitcast(idx_mask_b8, pto.mask_b16)
+    v_idx = pto.vci(pto.i8(0), pto.OrderMode.ASC)
+    v_idx_i16 = pto.vbitcast(v_idx, pto.i16)
+    v_idx_i16 = pto.vmuls(v_idx_i16, pto.i16(4), idx_mask_b16)
+    v_idx_ui8 = pto.vbitcast(v_idx_i16, pto.ui8)
+    for row in range(0, valid_rows, 1):
+        for col in range(0, valid_cols, lanes_f32):
+            mask_len = valid_cols - col
+            if mask_len > lanes_f32:
+                mask_len = lanes_f32
+            dst_mask, _ = pto.make_mask(dst_dtype, mask_len)
+            vec = pto.vlds(src[row, col:])
+            converted = pto.vcvt(
+                vec,
+                dst_dtype,
+                src_mask,
+                rnd=rnd,
+                sat=pto.VcvtSatMode.SAT,
+                part=pto.VcvtPartMode.P0,
+            )
+            result = pto.vselr(converted, v_idx_ui8)
+            pto.mem_bar(pto.BarrierType.VST_VST)
+            pto.vsts(result, dst[row, col:], dst_mask, dist=pto.VStoreDist.NORM_B8)
+    return
+
+
+@pto.vkernel(
+    target="a5",
+    op="pto.tcvt",
+    dtypes=[
+        (pto.f32, pto.hif8),
+    ],
+    constraints=[_supports_basic_rowwise_tcvt],
+    advanced=True,
+)
+def template_tcvt_f32_to_hif8(src: pto.Tile, dst: pto.Tile):
+    dst_dtype = dst.element_type
+    valid_rows, valid_cols = dst.valid_shape
+    round_mode = pto.get_op_attr("round_mode", "RINT")
+    rnd = pto.VcvtRoundMode.A
+    if pto.constexpr(round_mode == "ROUND"):
+        rnd = pto.VcvtRoundMode.A
+    lanes_f32 = pto.get_lanes(pto.f32)
+    src_mask = pto.make_mask(pto.f32, pto.PAT.ALL)
+    idx_mask_b8 = pto.pset_b8(pto.PAT.ALL)
+    idx_mask_b16 = pto.pbitcast(idx_mask_b8, pto.mask_b16)
+    v_idx = pto.vci(pto.i8(0), pto.OrderMode.ASC)
+    v_idx_i16 = pto.vbitcast(v_idx, pto.i16)
+    v_idx_i16 = pto.vmuls(v_idx_i16, pto.i16(4), idx_mask_b16)
+    v_idx_ui8 = pto.vbitcast(v_idx_i16, pto.ui8)
+    for row in range(0, valid_rows, 1):
+        for col in range(0, valid_cols, lanes_f32):
+            mask_len = valid_cols - col
+            if mask_len > lanes_f32:
+                mask_len = lanes_f32
+            dst_mask, _ = pto.make_mask(dst_dtype, mask_len)
+            vec = pto.vlds(src[row, col:])
+            converted = pto.vcvt(
+                vec,
+                dst_dtype,
+                src_mask,
+                rnd=rnd,
+                sat=pto.VcvtSatMode.NOSAT,
+                part=pto.VcvtPartMode.P0,
+            )
+            result = pto.vselr(converted, v_idx_ui8)
+            pto.mem_bar(pto.BarrierType.VST_VST)
+            pto.vsts(result, dst[row, col:], dst_mask, dist=pto.VStoreDist.NORM_B8)
+    return
+
+
+@pto.vkernel(
+    target="a5",
+    op="pto.tcvt",
+    dtypes=[
+        (pto.f16, pto.hif8),
+    ],
+    constraints=[_supports_basic_rowwise_tcvt],
+)
+def template_tcvt_f16_to_hif8(src: pto.Tile, dst: pto.Tile):
+    dst_dtype = dst.element_type
+    valid_rows, valid_cols = dst.valid_shape
+    round_mode = pto.get_op_attr("round_mode", "RINT")
+    rnd = pto.VcvtRoundMode.A
+    if pto.constexpr(round_mode == "ROUND"):
+        rnd = pto.VcvtRoundMode.A
+    src_mask = pto.make_mask(pto.f16, pto.PAT.ALL)
+    for row in range(0, valid_rows, 1):
+        remained = valid_cols
+        for col in range(0, valid_cols, pto.get_lanes(pto.f16)):
+            dst_mask, remained = pto.make_mask(pto.f16, remained)
+            vec = pto.vlds(src[row, col:])
+            converted = pto.vcvt(
+                vec,
+                dst_dtype,
+                src_mask,
+                rnd=rnd,
+                sat=pto.VcvtSatMode.NOSAT,
+                part=pto.VcvtPartMode.EVEN,
+            )
+            pto.vsts(converted, dst[row, col:], dst_mask, dist=pto.VStoreDist.PK_B16)
+    return
+
+
+@pto.vkernel(
+    target="a5",
+    op="pto.tcvt",
+    dtypes=[
+        (pto.bf16, pto.f4e1m2x2),
+        (pto.bf16, pto.f4e2m1x2),
+    ],
+    constraints=[_supports_bf16_to_fp4_rowwise_tcvt],
+    advanced=True,
+)
+def template_tcvt_bf16_to_fp4(src: pto.Tile, dst: pto.Tile):
+    dst_dtype = dst.element_type
+    valid_rows, valid_cols = dst.valid_shape
+    round_mode = pto.get_op_attr("round_mode", "RINT")
+    rnd = pto.VcvtRoundMode.R
+    if pto.constexpr(round_mode == "ROUND"):
+        rnd = pto.VcvtRoundMode.A
+    elif pto.constexpr(round_mode == "FLOOR"):
+        rnd = pto.VcvtRoundMode.F
+    elif pto.constexpr(round_mode == "CEIL"):
+        rnd = pto.VcvtRoundMode.C
+    elif pto.constexpr(round_mode == "TRUNC"):
+        rnd = pto.VcvtRoundMode.Z
+    elif pto.constexpr(round_mode == "ODD"):
+        rnd = pto.VcvtRoundMode.O
+    lanes_bf16 = pto.get_lanes(pto.bf16)
+    dst_chunk_cols = lanes_bf16 // 2
+    idx_mask_b8 = pto.pset_b8(pto.PAT.ALL)
+    idx_mask_b16 = pto.pbitcast(idx_mask_b8, pto.mask_b16)
+    v_idx = pto.vci(pto.i8(0), pto.OrderMode.ASC)
+    v_idx_i16 = pto.vbitcast(v_idx, pto.i16)
+    v_idx_i16 = pto.vmuls(v_idx_i16, pto.i16(4), idx_mask_b16)
+    v_idx_ui8 = pto.vbitcast(v_idx_i16, pto.ui8)
+    for row in range(0, valid_rows, 1):
+        remained = valid_cols
+        for col in range(0, valid_cols, dst_chunk_cols):
+            dst_mask, remained = pto.make_mask(dst_dtype, remained)
+            store_len = valid_cols - col
+            if store_len > dst_chunk_cols:
+                store_len = dst_chunk_cols
+            src_mask, _ = pto.make_mask(pto.bf16, store_len * 2)
+            vec = pto.vlds(src[row, col * 2:])
+            converted = pto.vcvt(
+                vec,
+                dst_dtype,
+                src_mask,
+                rnd=rnd,
+                part=pto.VcvtPartMode.P0,
+            )
+            result = pto.vselr(converted, v_idx_ui8)
+            pto.mem_bar(pto.BarrierType.VST_VST)
+            pto.vsts(result, dst[row, col:], dst_mask, dist=pto.VStoreDist.NORM_B8)
     return

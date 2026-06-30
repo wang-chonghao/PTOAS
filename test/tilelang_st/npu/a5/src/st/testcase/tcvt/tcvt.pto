@@ -13,7 +13,7 @@
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // Case 0: f32 -> i32, default RINT
-  func.func @TCVT_f32_to_i32_rint_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  func.func @TCVT_f32_to_i32_rint_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c16   = arith.constant 16   : index
@@ -55,7 +55,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 
   // Case 1: f32 -> i32, explicit ROUND
-  func.func @TCVT_f32_to_i32_round_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  func.func @TCVT_f32_to_i32_round_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c16   = arith.constant 16   : index
@@ -97,7 +97,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 
   // Case 2: i32 -> f32, default RINT
-  func.func @TCVT_i32_to_f32_rint_16x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  func.func @TCVT_i32_to_f32_rint_16x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c16   = arith.constant 16   : index
@@ -139,7 +139,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 
   // Case 3: f32 -> f16, default RINT
-  func.func @TCVT_f32_to_f16_rint_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  func.func @TCVT_f32_to_f16_rint_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c16   = arith.constant 16   : index
@@ -181,7 +181,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 
   // Case 4: f16 -> f32, default RINT
-  func.func @TCVT_f16_to_f32_rint_16x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  func.func @TCVT_f16_to_f32_rint_16x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c16   = arith.constant 16   : index
@@ -222,8 +222,348 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 5: f32 -> f16, default RINT
-  func.func @TCVT_f32_to_f16_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 5: f32 -> f8E4M3FN, default RINT
+  func.func @TCVT_f32_to_f8e4m3_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f8E4M3FN>) attributes {pto.entry, pto.kernel} {
+    %c0    = arith.constant 0    : index
+    %c1    = arith.constant 1    : index
+    %c16   = arith.constant 16   : index
+    %c64   = arith.constant 64   : index
+    %c1024 = arith.constant 1024 : index
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xf32>
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xf8E4M3FN>
+
+    %src_part = pto.partition_view %src_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xf32> -> !pto.partition_tensor_view<1x1x1x16x64xf32>
+    %dst_part = pto.partition_view %dst_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xf8E4M3FN> -> !pto.partition_tensor_view<1x1x1x16x64xf8E4M3FN>
+
+    %src = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64xf32>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64xf8E4M3FN>
+
+    pto.tload ins(%src_part : !pto.partition_tensor_view<1x1x1x16x64xf32>)
+              outs(%src : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tcvt ins(%src : !pto.tile_buf<vec, 16x64xf32>)
+             outs(%dst : !pto.tile_buf<vec, 16x64xf8E4M3FN>)
+
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 16x64xf8E4M3FN>)
+               outs(%dst_part : !pto.partition_tensor_view<1x1x1x16x64xf8E4M3FN>)
+    return
+  }
+
+  // Case 6: f32 -> f8E5M2, default RINT
+  func.func @TCVT_f32_to_f8e5m2_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f8E5M2>) attributes {pto.entry, pto.kernel} {
+    %c0    = arith.constant 0    : index
+    %c1    = arith.constant 1    : index
+    %c16   = arith.constant 16   : index
+    %c64   = arith.constant 64   : index
+    %c1024 = arith.constant 1024 : index
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xf32>
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xf8E5M2>
+
+    %src_part = pto.partition_view %src_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xf32> -> !pto.partition_tensor_view<1x1x1x16x64xf32>
+    %dst_part = pto.partition_view %dst_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xf8E5M2> -> !pto.partition_tensor_view<1x1x1x16x64xf8E5M2>
+
+    %src = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64xf32>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64xf8E5M2>
+
+    pto.tload ins(%src_part : !pto.partition_tensor_view<1x1x1x16x64xf32>)
+              outs(%src : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tcvt ins(%src : !pto.tile_buf<vec, 16x64xf32>)
+             outs(%dst : !pto.tile_buf<vec, 16x64xf8E5M2>)
+
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 16x64xf8E5M2>)
+               outs(%dst_part : !pto.partition_tensor_view<1x1x1x16x64xf8E5M2>)
+    return
+  }
+
+  // Case 7: f32 -> !pto.hif8, default RINT
+  func.func @TCVT_f32_to_hif8_16x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<!pto.hif8>) attributes {pto.entry, pto.kernel} {
+    %c0    = arith.constant 0    : index
+    %c1    = arith.constant 1    : index
+    %c16   = arith.constant 16   : index
+    %c64   = arith.constant 64   : index
+    %c1024 = arith.constant 1024 : index
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xf32>
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64x!pto.hif8>
+
+    %src_part = pto.partition_view %src_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xf32> -> !pto.partition_tensor_view<1x1x1x16x64xf32>
+    %dst_part = pto.partition_view %dst_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64x!pto.hif8> -> !pto.partition_tensor_view<1x1x1x16x64x!pto.hif8>
+
+    %src = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64xf32>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64x!pto.hif8>
+
+    pto.tload ins(%src_part : !pto.partition_tensor_view<1x1x1x16x64xf32>)
+              outs(%src : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tcvt ins(%src : !pto.tile_buf<vec, 16x64xf32>)
+             outs(%dst : !pto.tile_buf<vec, 16x64x!pto.hif8>)
+
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 16x64x!pto.hif8>)
+               outs(%dst_part : !pto.partition_tensor_view<1x1x1x16x64x!pto.hif8>)
+    return
+  }
+
+  // Case 8: f16 -> !pto.hif8, default RINT
+  func.func @TCVT_f16_to_hif8_16x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<!pto.hif8>) attributes {pto.entry, pto.kernel} {
+    %c0    = arith.constant 0    : index
+    %c1    = arith.constant 1    : index
+    %c16   = arith.constant 16   : index
+    %c64   = arith.constant 64   : index
+    %c1024 = arith.constant 1024 : index
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xf16>
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64x!pto.hif8>
+
+    %src_part = pto.partition_view %src_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xf16> -> !pto.partition_tensor_view<1x1x1x16x64xf16>
+    %dst_part = pto.partition_view %dst_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64x!pto.hif8> -> !pto.partition_tensor_view<1x1x1x16x64x!pto.hif8>
+
+    %src = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64xf16>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64x!pto.hif8>
+
+    pto.tload ins(%src_part : !pto.partition_tensor_view<1x1x1x16x64xf16>)
+              outs(%src : !pto.tile_buf<vec, 16x64xf16>)
+
+    pto.tcvt ins(%src : !pto.tile_buf<vec, 16x64xf16>)
+             outs(%dst : !pto.tile_buf<vec, 16x64x!pto.hif8>)
+
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 16x64x!pto.hif8>)
+               outs(%dst_part : !pto.partition_tensor_view<1x1x1x16x64x!pto.hif8>)
+    return
+  }
+
+  // Case 9: bf16 -> !pto.f4E1M2x2, default RINT
+  func.func @TCVT_bf16_to_f4e1m2x2_16x64_to_16x32(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<!pto.f4E1M2x2>) attributes {pto.entry, pto.kernel} {
+    %c0    = arith.constant 0    : index
+    %c1    = arith.constant 1    : index
+    %c16   = arith.constant 16   : index
+    %c32   = arith.constant 32   : index
+    %c64   = arith.constant 64   : index
+    %c512  = arith.constant 512  : index
+    %c1024 = arith.constant 1024 : index
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xbf16>
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c32],
+      strides = [%c512, %c512, %c512, %c32, %c1]
+      : !pto.tensor_view<1x1x1x16x32x!pto.f4E1M2x2>
+
+    %src_part = pto.partition_view %src_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xbf16> -> !pto.partition_tensor_view<1x1x1x16x64xbf16>
+    %dst_part = pto.partition_view %dst_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c32]
+      : !pto.tensor_view<1x1x1x16x32x!pto.f4E1M2x2> -> !pto.partition_tensor_view<1x1x1x16x32x!pto.f4E1M2x2>
+
+    %src = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64xbf16>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x32x!pto.f4E1M2x2>
+
+    pto.tload ins(%src_part : !pto.partition_tensor_view<1x1x1x16x64xbf16>)
+              outs(%src : !pto.tile_buf<vec, 16x64xbf16>)
+
+    pto.tcvt ins(%src : !pto.tile_buf<vec, 16x64xbf16>)
+             outs(%dst : !pto.tile_buf<vec, 16x32x!pto.f4E1M2x2>)
+
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 16x32x!pto.f4E1M2x2>)
+               outs(%dst_part : !pto.partition_tensor_view<1x1x1x16x32x!pto.f4E1M2x2>)
+    return
+  }
+
+  // Case 10: bf16 -> !pto.f4E2M1x2, default RINT
+  func.func @TCVT_bf16_to_f4e2m1x2_16x64_to_16x32(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<!pto.f4E2M1x2>) attributes {pto.entry, pto.kernel} {
+    %c0    = arith.constant 0    : index
+    %c1    = arith.constant 1    : index
+    %c16   = arith.constant 16   : index
+    %c32   = arith.constant 32   : index
+    %c64   = arith.constant 64   : index
+    %c512  = arith.constant 512  : index
+    %c1024 = arith.constant 1024 : index
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xbf16>
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c32],
+      strides = [%c512, %c512, %c512, %c32, %c1]
+      : !pto.tensor_view<1x1x1x16x32x!pto.f4E2M1x2>
+
+    %src_part = pto.partition_view %src_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xbf16> -> !pto.partition_tensor_view<1x1x1x16x64xbf16>
+    %dst_part = pto.partition_view %dst_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c32]
+      : !pto.tensor_view<1x1x1x16x32x!pto.f4E2M1x2> -> !pto.partition_tensor_view<1x1x1x16x32x!pto.f4E2M1x2>
+
+    %src = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x64xbf16>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<vec, 16x32x!pto.f4E2M1x2>
+
+    pto.tload ins(%src_part : !pto.partition_tensor_view<1x1x1x16x64xbf16>)
+              outs(%src : !pto.tile_buf<vec, 16x64xbf16>)
+
+    pto.tcvt ins(%src : !pto.tile_buf<vec, 16x64xbf16>)
+             outs(%dst : !pto.tile_buf<vec, 16x32x!pto.f4E2M1x2>)
+
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 16x32x!pto.f4E2M1x2>)
+               outs(%dst_part : !pto.partition_tensor_view<1x1x1x16x32x!pto.f4E2M1x2>)
+    return
+  }
+
+  // Case 11: f32 -> f8E4M3FN, default RINT
+  func.func @TCVT_f32_to_f8e4m3_4x96(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f8E4M3FN>) attributes {pto.entry, pto.kernel} {
+    %c0   = arith.constant 0   : index
+    %c1   = arith.constant 1   : index
+    %c4   = arith.constant 4   : index
+    %c96  = arith.constant 96  : index
+    %c384 = arith.constant 384 : index
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c1, %c1, %c4, %c96],
+      strides = [%c384, %c384, %c384, %c96, %c1]
+      : !pto.tensor_view<1x1x1x4x96xf32>
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c1, %c1, %c4, %c96],
+      strides = [%c384, %c384, %c384, %c96, %c1]
+      : !pto.tensor_view<1x1x1x4x96xf8E4M3FN>
+
+    %src_part = pto.partition_view %src_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c4, %c96]
+      : !pto.tensor_view<1x1x1x4x96xf32> -> !pto.partition_tensor_view<1x1x1x4x96xf32>
+    %dst_part = pto.partition_view %dst_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c4, %c96]
+      : !pto.tensor_view<1x1x1x4x96xf8E4M3FN> -> !pto.partition_tensor_view<1x1x1x4x96xf8E4M3FN>
+
+    %src = pto.alloc_tile
+      : !pto.tile_buf<vec, 4x96xf32>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<vec, 4x96xf8E4M3FN>
+
+    pto.tload ins(%src_part : !pto.partition_tensor_view<1x1x1x4x96xf32>)
+              outs(%src : !pto.tile_buf<vec, 4x96xf32>)
+
+    pto.tcvt ins(%src : !pto.tile_buf<vec, 4x96xf32>)
+             outs(%dst : !pto.tile_buf<vec, 4x96xf8E4M3FN>)
+
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 4x96xf8E4M3FN>)
+               outs(%dst_part : !pto.partition_tensor_view<1x1x1x4x96xf8E4M3FN>)
+    return
+  }
+
+  // Case 12: f32 -> !pto.hif8, default RINT
+  func.func @TCVT_f32_to_hif8_4x96(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<!pto.hif8>) attributes {pto.entry, pto.kernel} {
+    %c0   = arith.constant 0   : index
+    %c1   = arith.constant 1   : index
+    %c4   = arith.constant 4   : index
+    %c96  = arith.constant 96  : index
+    %c384 = arith.constant 384 : index
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c1, %c1, %c4, %c96],
+      strides = [%c384, %c384, %c384, %c96, %c1]
+      : !pto.tensor_view<1x1x1x4x96xf32>
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c1, %c1, %c4, %c96],
+      strides = [%c384, %c384, %c384, %c96, %c1]
+      : !pto.tensor_view<1x1x1x4x96x!pto.hif8>
+
+    %src_part = pto.partition_view %src_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c4, %c96]
+      : !pto.tensor_view<1x1x1x4x96xf32> -> !pto.partition_tensor_view<1x1x1x4x96xf32>
+    %dst_part = pto.partition_view %dst_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c4, %c96]
+      : !pto.tensor_view<1x1x1x4x96x!pto.hif8> -> !pto.partition_tensor_view<1x1x1x4x96x!pto.hif8>
+
+    %src = pto.alloc_tile
+      : !pto.tile_buf<vec, 4x96xf32>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<vec, 4x96x!pto.hif8>
+
+    pto.tload ins(%src_part : !pto.partition_tensor_view<1x1x1x4x96xf32>)
+              outs(%src : !pto.tile_buf<vec, 4x96xf32>)
+
+    pto.tcvt ins(%src : !pto.tile_buf<vec, 4x96xf32>)
+             outs(%dst : !pto.tile_buf<vec, 4x96x!pto.hif8>)
+
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 4x96x!pto.hif8>)
+               outs(%dst_part : !pto.partition_tensor_view<1x1x1x4x96x!pto.hif8>)
+    return
+  }
+
+  // Case 13: f32 -> f16, default RINT
+  func.func @TCVT_f32_to_f16_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -262,8 +602,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 6: f32 -> f16, default RINT
-  func.func @TCVT_f32_to_f16_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 14: f32 -> f16, default RINT
+  func.func @TCVT_f32_to_f16_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -304,8 +644,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 7: f32 -> f16, default RINT
-  func.func @TCVT_f32_to_f16_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 15: f32 -> f16, default RINT
+  func.func @TCVT_f32_to_f16_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -346,8 +686,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 8: f32 -> f16, default RINT
-  func.func @TCVT_f32_to_f16_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 16: f32 -> f16, default RINT
+  func.func @TCVT_f32_to_f16_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -388,8 +728,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 9: f32 -> f16, default RINT
-  func.func @TCVT_f32_to_f16_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 17: f32 -> f16, default RINT
+  func.func @TCVT_f32_to_f16_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -431,8 +771,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 10: f32 -> f16, default RINT
-  func.func @TCVT_f32_to_f16_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 18: f32 -> f16, default RINT
+  func.func @TCVT_f32_to_f16_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -474,8 +814,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 11: f32 -> f16, default RINT
-  func.func @TCVT_f32_to_f16_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 19: f32 -> f16, default RINT
+  func.func @TCVT_f32_to_f16_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -515,8 +855,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 12: f32 -> bf16, default RINT
-  func.func @TCVT_f32_to_bf16_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes { pto.entry , pto.kernel} {
+  // Case 20: f32 -> bf16, default RINT
+  func.func @TCVT_f32_to_bf16_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -555,8 +895,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 13: f32 -> bf16, default RINT
-  func.func @TCVT_f32_to_bf16_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes { pto.entry , pto.kernel} {
+  // Case 21: f32 -> bf16, default RINT
+  func.func @TCVT_f32_to_bf16_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -597,8 +937,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 14: f32 -> bf16, default RINT
-  func.func @TCVT_f32_to_bf16_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes { pto.entry , pto.kernel} {
+  // Case 22: f32 -> bf16, default RINT
+  func.func @TCVT_f32_to_bf16_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -639,8 +979,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 15: f32 -> bf16, default RINT
-  func.func @TCVT_f32_to_bf16_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes { pto.entry , pto.kernel} {
+  // Case 23: f32 -> bf16, default RINT
+  func.func @TCVT_f32_to_bf16_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -681,8 +1021,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 16: f32 -> bf16, default RINT
-  func.func @TCVT_f32_to_bf16_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes { pto.entry , pto.kernel} {
+  // Case 24: f32 -> bf16, default RINT
+  func.func @TCVT_f32_to_bf16_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -724,8 +1064,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 17: f32 -> bf16, default RINT
-  func.func @TCVT_f32_to_bf16_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes { pto.entry , pto.kernel} {
+  // Case 25: f32 -> bf16, default RINT
+  func.func @TCVT_f32_to_bf16_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -767,8 +1107,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 18: f32 -> bf16, default RINT
-  func.func @TCVT_f32_to_bf16_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes { pto.entry , pto.kernel} {
+  // Case 26: f32 -> bf16, default RINT
+  func.func @TCVT_f32_to_bf16_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<bf16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -808,8 +1148,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 19: f32 -> i16, default RINT
-  func.func @TCVT_f32_to_i16_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 27: f32 -> i16, default RINT
+  func.func @TCVT_f32_to_i16_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -848,8 +1188,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 20: f32 -> i16, default RINT
-  func.func @TCVT_f32_to_i16_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 28: f32 -> i16, default RINT
+  func.func @TCVT_f32_to_i16_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -890,8 +1230,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 21: f32 -> i16, default RINT
-  func.func @TCVT_f32_to_i16_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 29: f32 -> i16, default RINT
+  func.func @TCVT_f32_to_i16_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -932,8 +1272,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 22: f32 -> i16, default RINT
-  func.func @TCVT_f32_to_i16_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 30: f32 -> i16, default RINT
+  func.func @TCVT_f32_to_i16_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -974,8 +1314,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 23: f32 -> i16, default RINT
-  func.func @TCVT_f32_to_i16_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 31: f32 -> i16, default RINT
+  func.func @TCVT_f32_to_i16_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -1017,8 +1357,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 24: f32 -> i16, default RINT
-  func.func @TCVT_f32_to_i16_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 32: f32 -> i16, default RINT
+  func.func @TCVT_f32_to_i16_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -1060,8 +1400,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 25: f32 -> i16, default RINT
-  func.func @TCVT_f32_to_i16_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 33: f32 -> i16, default RINT
+  func.func @TCVT_f32_to_i16_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -1101,8 +1441,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 26: f32 -> i32, default RINT
-  func.func @TCVT_f32_to_i32_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 34: f32 -> i32, default RINT
+  func.func @TCVT_f32_to_i32_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -1141,8 +1481,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 27: f32 -> i32, default RINT
-  func.func @TCVT_f32_to_i32_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 35: f32 -> i32, default RINT
+  func.func @TCVT_f32_to_i32_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -1183,8 +1523,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 28: f32 -> i32, default RINT
-  func.func @TCVT_f32_to_i32_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 36: f32 -> i32, default RINT
+  func.func @TCVT_f32_to_i32_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -1225,8 +1565,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 29: f32 -> i32, default RINT
-  func.func @TCVT_f32_to_i32_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 37: f32 -> i32, default RINT
+  func.func @TCVT_f32_to_i32_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -1267,8 +1607,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 30: f32 -> i32, default RINT
-  func.func @TCVT_f32_to_i32_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 38: f32 -> i32, default RINT
+  func.func @TCVT_f32_to_i32_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -1310,8 +1650,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 31: f32 -> i32, default RINT
-  func.func @TCVT_f32_to_i32_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 39: f32 -> i32, default RINT
+  func.func @TCVT_f32_to_i32_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -1353,8 +1693,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 32: f32 -> i32, default RINT
-  func.func @TCVT_f32_to_i32_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 40: f32 -> i32, default RINT
+  func.func @TCVT_f32_to_i32_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -1394,8 +1734,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 33: f32 -> i64, default RINT
-  func.func @TCVT_f32_to_i64_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 41: f32 -> i64, default RINT
+  func.func @TCVT_f32_to_i64_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -1434,8 +1774,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 34: f32 -> i64, default RINT
-  func.func @TCVT_f32_to_i64_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 42: f32 -> i64, default RINT
+  func.func @TCVT_f32_to_i64_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -1476,8 +1816,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 35: f32 -> i64, default RINT
-  func.func @TCVT_f32_to_i64_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 43: f32 -> i64, default RINT
+  func.func @TCVT_f32_to_i64_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -1518,8 +1858,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 36: f32 -> i64, default RINT
-  func.func @TCVT_f32_to_i64_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 44: f32 -> i64, default RINT
+  func.func @TCVT_f32_to_i64_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -1560,8 +1900,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 37: f32 -> i64, default RINT
-  func.func @TCVT_f32_to_i64_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 45: f32 -> i64, default RINT
+  func.func @TCVT_f32_to_i64_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -1603,8 +1943,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 38: f32 -> i64, default RINT
-  func.func @TCVT_f32_to_i64_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 46: f32 -> i64, default RINT
+  func.func @TCVT_f32_to_i64_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -1646,8 +1986,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 39: f32 -> i64, default RINT
-  func.func @TCVT_f32_to_i64_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 47: f32 -> i64, default RINT
+  func.func @TCVT_f32_to_i64_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -1687,8 +2027,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 40: f32 -> f32, default RINT
-  func.func @TCVT_f32_to_f32_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 48: f32 -> f32, default RINT
+  func.func @TCVT_f32_to_f32_1x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -1727,8 +2067,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 41: f32 -> f32, default RINT
-  func.func @TCVT_f32_to_f32_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 49: f32 -> f32, default RINT
+  func.func @TCVT_f32_to_f32_2x64(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -1769,8 +2109,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 42: f32 -> f32, default RINT
-  func.func @TCVT_f32_to_f32_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 50: f32 -> f32, default RINT
+  func.func @TCVT_f32_to_f32_4x32(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -1811,8 +2151,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 43: f32 -> f32, default RINT
-  func.func @TCVT_f32_to_f32_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 51: f32 -> f32, default RINT
+  func.func @TCVT_f32_to_f32_2x128(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -1853,8 +2193,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 44: f32 -> f32, default RINT
-  func.func @TCVT_f32_to_f32_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 52: f32 -> f32, default RINT
+  func.func @TCVT_f32_to_f32_4x65(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -1896,8 +2236,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 45: f32 -> f32, default RINT
-  func.func @TCVT_f32_to_f32_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 53: f32 -> f32, default RINT
+  func.func @TCVT_f32_to_f32_4x200(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -1939,8 +2279,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 46: f32 -> f32, default RINT
-  func.func @TCVT_f32_to_f32_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 54: f32 -> f32, default RINT
+  func.func @TCVT_f32_to_f32_1x129(%src_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -1980,8 +2320,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 47: f16 -> f32, default RINT
-  func.func @TCVT_f16_to_f32_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 55: f16 -> f32, default RINT
+  func.func @TCVT_f16_to_f32_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -2020,8 +2360,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 48: f16 -> f32, default RINT
-  func.func @TCVT_f16_to_f32_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 56: f16 -> f32, default RINT
+  func.func @TCVT_f16_to_f32_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -2062,8 +2402,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 49: f16 -> f32, default RINT
-  func.func @TCVT_f16_to_f32_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 57: f16 -> f32, default RINT
+  func.func @TCVT_f16_to_f32_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -2104,8 +2444,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 50: f16 -> f32, default RINT
-  func.func @TCVT_f16_to_f32_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 58: f16 -> f32, default RINT
+  func.func @TCVT_f16_to_f32_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -2146,8 +2486,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 51: f16 -> f32, default RINT
-  func.func @TCVT_f16_to_f32_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 59: f16 -> f32, default RINT
+  func.func @TCVT_f16_to_f32_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -2189,8 +2529,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 52: f16 -> f32, default RINT
-  func.func @TCVT_f16_to_f32_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 60: f16 -> f32, default RINT
+  func.func @TCVT_f16_to_f32_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -2232,8 +2572,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 53: f16 -> f32, default RINT
-  func.func @TCVT_f16_to_f32_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 61: f16 -> f32, default RINT
+  func.func @TCVT_f16_to_f32_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -2273,8 +2613,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 54: f16 -> i32, default RINT
-  func.func @TCVT_f16_to_i32_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 62: f16 -> i32, default RINT
+  func.func @TCVT_f16_to_i32_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -2313,8 +2653,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 55: f16 -> i32, default RINT
-  func.func @TCVT_f16_to_i32_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 63: f16 -> i32, default RINT
+  func.func @TCVT_f16_to_i32_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -2355,8 +2695,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 56: f16 -> i32, default RINT
-  func.func @TCVT_f16_to_i32_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 64: f16 -> i32, default RINT
+  func.func @TCVT_f16_to_i32_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -2397,8 +2737,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 57: f16 -> i32, default RINT
-  func.func @TCVT_f16_to_i32_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 65: f16 -> i32, default RINT
+  func.func @TCVT_f16_to_i32_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -2439,8 +2779,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 58: f16 -> i32, default RINT
-  func.func @TCVT_f16_to_i32_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 66: f16 -> i32, default RINT
+  func.func @TCVT_f16_to_i32_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -2482,8 +2822,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 59: f16 -> i32, default RINT
-  func.func @TCVT_f16_to_i32_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 67: f16 -> i32, default RINT
+  func.func @TCVT_f16_to_i32_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -2525,8 +2865,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 60: f16 -> i32, default RINT
-  func.func @TCVT_f16_to_i32_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 68: f16 -> i32, default RINT
+  func.func @TCVT_f16_to_i32_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -2566,8 +2906,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 61: f16 -> i16, default RINT
-  func.func @TCVT_f16_to_i16_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 69: f16 -> i16, default RINT
+  func.func @TCVT_f16_to_i16_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -2606,8 +2946,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 62: f16 -> i16, default RINT
-  func.func @TCVT_f16_to_i16_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 70: f16 -> i16, default RINT
+  func.func @TCVT_f16_to_i16_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -2648,8 +2988,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 63: f16 -> i16, default RINT
-  func.func @TCVT_f16_to_i16_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 71: f16 -> i16, default RINT
+  func.func @TCVT_f16_to_i16_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -2690,8 +3030,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 64: f16 -> i16, default RINT
-  func.func @TCVT_f16_to_i16_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 72: f16 -> i16, default RINT
+  func.func @TCVT_f16_to_i16_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -2732,8 +3072,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 65: f16 -> i16, default RINT
-  func.func @TCVT_f16_to_i16_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 73: f16 -> i16, default RINT
+  func.func @TCVT_f16_to_i16_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -2775,8 +3115,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 66: f16 -> i16, default RINT
-  func.func @TCVT_f16_to_i16_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 74: f16 -> i16, default RINT
+  func.func @TCVT_f16_to_i16_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -2818,8 +3158,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 67: f16 -> i16, default RINT
-  func.func @TCVT_f16_to_i16_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 75: f16 -> i16, default RINT
+  func.func @TCVT_f16_to_i16_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -2859,8 +3199,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 68: f16 -> si8, default RINT
-  func.func @TCVT_f16_to_si8_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes { pto.entry , pto.kernel} {
+  // Case 76: f16 -> si8, default RINT
+  func.func @TCVT_f16_to_si8_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -2899,8 +3239,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 69: f16 -> si8, default RINT
-  func.func @TCVT_f16_to_si8_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes { pto.entry , pto.kernel} {
+  // Case 77: f16 -> si8, default RINT
+  func.func @TCVT_f16_to_si8_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -2941,8 +3281,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 70: f16 -> si8, default RINT
-  func.func @TCVT_f16_to_si8_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes { pto.entry , pto.kernel} {
+  // Case 78: f16 -> si8, default RINT
+  func.func @TCVT_f16_to_si8_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -2983,8 +3323,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 71: f16 -> si8, default RINT
-  func.func @TCVT_f16_to_si8_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes { pto.entry , pto.kernel} {
+  // Case 79: f16 -> si8, default RINT
+  func.func @TCVT_f16_to_si8_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -3025,8 +3365,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 72: f16 -> si8, default RINT
-  func.func @TCVT_f16_to_si8_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes { pto.entry , pto.kernel} {
+  // Case 80: f16 -> si8, default RINT
+  func.func @TCVT_f16_to_si8_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -3068,8 +3408,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 73: f16 -> si8, default RINT
-  func.func @TCVT_f16_to_si8_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes { pto.entry , pto.kernel} {
+  // Case 81: f16 -> si8, default RINT
+  func.func @TCVT_f16_to_si8_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -3111,8 +3451,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 74: f16 -> si8, default RINT
-  func.func @TCVT_f16_to_si8_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes { pto.entry , pto.kernel} {
+  // Case 82: f16 -> si8, default RINT
+  func.func @TCVT_f16_to_si8_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<si8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -3152,8 +3492,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 75: f16 -> ui8, default RINT
-  func.func @TCVT_f16_to_ui8_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 83: f16 -> ui8, default RINT
+  func.func @TCVT_f16_to_ui8_1x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -3192,8 +3532,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 76: f16 -> ui8, default RINT
-  func.func @TCVT_f16_to_ui8_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 84: f16 -> ui8, default RINT
+  func.func @TCVT_f16_to_ui8_2x64(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -3234,8 +3574,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 77: f16 -> ui8, default RINT
-  func.func @TCVT_f16_to_ui8_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 85: f16 -> ui8, default RINT
+  func.func @TCVT_f16_to_ui8_4x32(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -3276,8 +3616,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 78: f16 -> ui8, default RINT
-  func.func @TCVT_f16_to_ui8_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 86: f16 -> ui8, default RINT
+  func.func @TCVT_f16_to_ui8_2x128(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -3318,8 +3658,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 79: f16 -> ui8, default RINT
-  func.func @TCVT_f16_to_ui8_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 87: f16 -> ui8, default RINT
+  func.func @TCVT_f16_to_ui8_4x65(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -3361,8 +3701,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 80: f16 -> ui8, default RINT
-  func.func @TCVT_f16_to_ui8_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 88: f16 -> ui8, default RINT
+  func.func @TCVT_f16_to_ui8_4x200(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -3404,8 +3744,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 81: f16 -> ui8, default RINT
-  func.func @TCVT_f16_to_ui8_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 89: f16 -> ui8, default RINT
+  func.func @TCVT_f16_to_ui8_1x129(%src_ptr: !pto.ptr<f16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -3445,8 +3785,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 82: bf16 -> f32, default RINT
-  func.func @TCVT_bf16_to_f32_1x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 90: bf16 -> f32, default RINT
+  func.func @TCVT_bf16_to_f32_1x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -3485,8 +3825,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 83: bf16 -> f32, default RINT
-  func.func @TCVT_bf16_to_f32_2x64(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 91: bf16 -> f32, default RINT
+  func.func @TCVT_bf16_to_f32_2x64(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -3527,8 +3867,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 84: bf16 -> f32, default RINT
-  func.func @TCVT_bf16_to_f32_4x32(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 92: bf16 -> f32, default RINT
+  func.func @TCVT_bf16_to_f32_4x32(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -3569,8 +3909,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 85: bf16 -> f32, default RINT
-  func.func @TCVT_bf16_to_f32_2x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 93: bf16 -> f32, default RINT
+  func.func @TCVT_bf16_to_f32_2x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -3611,8 +3951,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 86: bf16 -> f32, default RINT
-  func.func @TCVT_bf16_to_f32_4x65(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 94: bf16 -> f32, default RINT
+  func.func @TCVT_bf16_to_f32_4x65(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -3654,8 +3994,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 87: bf16 -> f32, default RINT
-  func.func @TCVT_bf16_to_f32_4x200(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 95: bf16 -> f32, default RINT
+  func.func @TCVT_bf16_to_f32_4x200(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -3697,8 +4037,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 88: bf16 -> f32, default RINT
-  func.func @TCVT_bf16_to_f32_1x129(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 96: bf16 -> f32, default RINT
+  func.func @TCVT_bf16_to_f32_1x129(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -3738,8 +4078,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 89: bf16 -> f16, default RINT
-  func.func @TCVT_bf16_to_f16_1x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 97: bf16 -> f16, default RINT
+  func.func @TCVT_bf16_to_f16_1x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -3778,8 +4118,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 90: bf16 -> f16, default RINT
-  func.func @TCVT_bf16_to_f16_2x64(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 98: bf16 -> f16, default RINT
+  func.func @TCVT_bf16_to_f16_2x64(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -3820,8 +4160,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 91: bf16 -> f16, default RINT
-  func.func @TCVT_bf16_to_f16_4x32(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 99: bf16 -> f16, default RINT
+  func.func @TCVT_bf16_to_f16_4x32(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -3862,8 +4202,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 92: bf16 -> f16, default RINT
-  func.func @TCVT_bf16_to_f16_2x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 100: bf16 -> f16, default RINT
+  func.func @TCVT_bf16_to_f16_2x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -3904,8 +4244,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 93: bf16 -> f16, default RINT
-  func.func @TCVT_bf16_to_f16_4x65(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 101: bf16 -> f16, default RINT
+  func.func @TCVT_bf16_to_f16_4x65(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -3947,8 +4287,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 94: bf16 -> f16, default RINT
-  func.func @TCVT_bf16_to_f16_4x200(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 102: bf16 -> f16, default RINT
+  func.func @TCVT_bf16_to_f16_4x200(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -3990,8 +4330,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 95: bf16 -> f16, default RINT
-  func.func @TCVT_bf16_to_f16_1x129(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 103: bf16 -> f16, default RINT
+  func.func @TCVT_bf16_to_f16_1x129(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -4031,8 +4371,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 96: bf16 -> i32, default RINT
-  func.func @TCVT_bf16_to_i32_1x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 104: bf16 -> i32, default RINT
+  func.func @TCVT_bf16_to_i32_1x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -4071,8 +4411,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 97: bf16 -> i32, default RINT
-  func.func @TCVT_bf16_to_i32_2x64(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 105: bf16 -> i32, default RINT
+  func.func @TCVT_bf16_to_i32_2x64(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -4113,8 +4453,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 98: bf16 -> i32, default RINT
-  func.func @TCVT_bf16_to_i32_4x32(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 106: bf16 -> i32, default RINT
+  func.func @TCVT_bf16_to_i32_4x32(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -4155,8 +4495,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 99: bf16 -> i32, default RINT
-  func.func @TCVT_bf16_to_i32_2x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 107: bf16 -> i32, default RINT
+  func.func @TCVT_bf16_to_i32_2x128(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -4197,8 +4537,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 100: bf16 -> i32, default RINT
-  func.func @TCVT_bf16_to_i32_4x65(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 108: bf16 -> i32, default RINT
+  func.func @TCVT_bf16_to_i32_4x65(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -4240,8 +4580,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 101: bf16 -> i32, default RINT
-  func.func @TCVT_bf16_to_i32_4x200(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 109: bf16 -> i32, default RINT
+  func.func @TCVT_bf16_to_i32_4x200(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -4283,8 +4623,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 102: bf16 -> i32, default RINT
-  func.func @TCVT_bf16_to_i32_1x129(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 110: bf16 -> i32, default RINT
+  func.func @TCVT_bf16_to_i32_1x129(%src_ptr: !pto.ptr<bf16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -4324,8 +4664,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 103: ui8 -> f16, default RINT
-  func.func @TCVT_ui8_to_f16_1x128(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 111: ui8 -> f16, default RINT
+  func.func @TCVT_ui8_to_f16_1x128(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -4364,8 +4704,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 104: ui8 -> f16, default RINT
-  func.func @TCVT_ui8_to_f16_2x64(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 112: ui8 -> f16, default RINT
+  func.func @TCVT_ui8_to_f16_2x64(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -4406,8 +4746,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 105: ui8 -> f16, default RINT
-  func.func @TCVT_ui8_to_f16_4x32(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 113: ui8 -> f16, default RINT
+  func.func @TCVT_ui8_to_f16_4x32(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -4448,8 +4788,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 106: ui8 -> f16, default RINT
-  func.func @TCVT_ui8_to_f16_2x128(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 114: ui8 -> f16, default RINT
+  func.func @TCVT_ui8_to_f16_2x128(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -4490,8 +4830,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 107: ui8 -> f16, default RINT
-  func.func @TCVT_ui8_to_f16_4x65(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 115: ui8 -> f16, default RINT
+  func.func @TCVT_ui8_to_f16_4x65(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -4533,8 +4873,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 108: ui8 -> f16, default RINT
-  func.func @TCVT_ui8_to_f16_4x200(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 116: ui8 -> f16, default RINT
+  func.func @TCVT_ui8_to_f16_4x200(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -4576,8 +4916,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 109: ui8 -> f16, default RINT
-  func.func @TCVT_ui8_to_f16_1x129(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 117: ui8 -> f16, default RINT
+  func.func @TCVT_ui8_to_f16_1x129(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -4617,8 +4957,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 110: ui8 -> ui16, default RINT
-  func.func @TCVT_ui8_to_ui16_1x128(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 118: ui8 -> ui16, default RINT
+  func.func @TCVT_ui8_to_ui16_1x128(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -4657,8 +4997,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 111: ui8 -> ui16, default RINT
-  func.func @TCVT_ui8_to_ui16_2x64(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 119: ui8 -> ui16, default RINT
+  func.func @TCVT_ui8_to_ui16_2x64(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -4699,8 +5039,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 112: ui8 -> ui16, default RINT
-  func.func @TCVT_ui8_to_ui16_4x32(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 120: ui8 -> ui16, default RINT
+  func.func @TCVT_ui8_to_ui16_4x32(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -4741,8 +5081,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 113: ui8 -> ui16, default RINT
-  func.func @TCVT_ui8_to_ui16_2x128(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 121: ui8 -> ui16, default RINT
+  func.func @TCVT_ui8_to_ui16_2x128(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -4783,8 +5123,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 114: ui8 -> ui16, default RINT
-  func.func @TCVT_ui8_to_ui16_4x65(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 122: ui8 -> ui16, default RINT
+  func.func @TCVT_ui8_to_ui16_4x65(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -4826,8 +5166,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 115: ui8 -> ui16, default RINT
-  func.func @TCVT_ui8_to_ui16_4x200(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 123: ui8 -> ui16, default RINT
+  func.func @TCVT_ui8_to_ui16_4x200(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -4869,8 +5209,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 116: ui8 -> ui16, default RINT
-  func.func @TCVT_ui8_to_ui16_1x129(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 124: ui8 -> ui16, default RINT
+  func.func @TCVT_ui8_to_ui16_1x129(%src_ptr: !pto.ptr<ui8>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -4910,8 +5250,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 117: si8 -> f16, default RINT
-  func.func @TCVT_si8_to_f16_1x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 125: si8 -> f16, default RINT
+  func.func @TCVT_si8_to_f16_1x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -4950,8 +5290,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 118: si8 -> f16, default RINT
-  func.func @TCVT_si8_to_f16_2x64(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 126: si8 -> f16, default RINT
+  func.func @TCVT_si8_to_f16_2x64(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -4992,8 +5332,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 119: si8 -> f16, default RINT
-  func.func @TCVT_si8_to_f16_4x32(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 127: si8 -> f16, default RINT
+  func.func @TCVT_si8_to_f16_4x32(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -5034,8 +5374,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 120: si8 -> f16, default RINT
-  func.func @TCVT_si8_to_f16_2x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 128: si8 -> f16, default RINT
+  func.func @TCVT_si8_to_f16_2x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -5076,8 +5416,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 121: si8 -> f16, default RINT
-  func.func @TCVT_si8_to_f16_4x65(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 129: si8 -> f16, default RINT
+  func.func @TCVT_si8_to_f16_4x65(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -5119,8 +5459,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 122: si8 -> f16, default RINT
-  func.func @TCVT_si8_to_f16_4x200(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 130: si8 -> f16, default RINT
+  func.func @TCVT_si8_to_f16_4x200(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -5162,8 +5502,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 123: si8 -> f16, default RINT
-  func.func @TCVT_si8_to_f16_1x129(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 131: si8 -> f16, default RINT
+  func.func @TCVT_si8_to_f16_1x129(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -5203,8 +5543,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 124: si8 -> si16, default RINT
-  func.func @TCVT_si8_to_si16_1x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes { pto.entry , pto.kernel} {
+  // Case 132: si8 -> si16, default RINT
+  func.func @TCVT_si8_to_si16_1x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -5243,8 +5583,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 125: si8 -> si16, default RINT
-  func.func @TCVT_si8_to_si16_2x64(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes { pto.entry , pto.kernel} {
+  // Case 133: si8 -> si16, default RINT
+  func.func @TCVT_si8_to_si16_2x64(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -5285,8 +5625,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 126: si8 -> si16, default RINT
-  func.func @TCVT_si8_to_si16_4x32(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes { pto.entry , pto.kernel} {
+  // Case 134: si8 -> si16, default RINT
+  func.func @TCVT_si8_to_si16_4x32(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -5327,8 +5667,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 127: si8 -> si16, default RINT
-  func.func @TCVT_si8_to_si16_2x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes { pto.entry , pto.kernel} {
+  // Case 135: si8 -> si16, default RINT
+  func.func @TCVT_si8_to_si16_2x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -5369,8 +5709,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 128: si8 -> si16, default RINT
-  func.func @TCVT_si8_to_si16_4x65(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes { pto.entry , pto.kernel} {
+  // Case 136: si8 -> si16, default RINT
+  func.func @TCVT_si8_to_si16_4x65(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -5412,8 +5752,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 129: si8 -> si16, default RINT
-  func.func @TCVT_si8_to_si16_4x200(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes { pto.entry , pto.kernel} {
+  // Case 137: si8 -> si16, default RINT
+  func.func @TCVT_si8_to_si16_4x200(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -5455,8 +5795,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 130: si8 -> si16, default RINT
-  func.func @TCVT_si8_to_si16_1x129(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes { pto.entry , pto.kernel} {
+  // Case 138: si8 -> si16, default RINT
+  func.func @TCVT_si8_to_si16_1x129(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<si16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -5496,8 +5836,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 131: si8 -> i32, default RINT
-  func.func @TCVT_si8_to_i32_1x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 139: si8 -> i32, default RINT
+  func.func @TCVT_si8_to_i32_1x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -5536,8 +5876,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 132: si8 -> i32, default RINT
-  func.func @TCVT_si8_to_i32_2x64(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 140: si8 -> i32, default RINT
+  func.func @TCVT_si8_to_i32_2x64(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -5578,8 +5918,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 133: si8 -> i32, default RINT
-  func.func @TCVT_si8_to_i32_4x32(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 141: si8 -> i32, default RINT
+  func.func @TCVT_si8_to_i32_4x32(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -5620,8 +5960,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 134: si8 -> i32, default RINT
-  func.func @TCVT_si8_to_i32_2x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 142: si8 -> i32, default RINT
+  func.func @TCVT_si8_to_i32_2x128(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -5662,8 +6002,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 135: si8 -> i32, default RINT
-  func.func @TCVT_si8_to_i32_4x65(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 143: si8 -> i32, default RINT
+  func.func @TCVT_si8_to_i32_4x65(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -5705,8 +6045,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 136: si8 -> i32, default RINT
-  func.func @TCVT_si8_to_i32_4x200(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 144: si8 -> i32, default RINT
+  func.func @TCVT_si8_to_i32_4x200(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -5748,8 +6088,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 137: si8 -> i32, default RINT
-  func.func @TCVT_si8_to_i32_1x129(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 145: si8 -> i32, default RINT
+  func.func @TCVT_si8_to_i32_1x129(%src_ptr: !pto.ptr<si8>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -5789,8 +6129,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 138: i16 -> ui8, default RINT
-  func.func @TCVT_i16_to_ui8_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 146: i16 -> ui8, default RINT
+  func.func @TCVT_i16_to_ui8_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -5829,8 +6169,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 139: i16 -> ui8, default RINT
-  func.func @TCVT_i16_to_ui8_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 147: i16 -> ui8, default RINT
+  func.func @TCVT_i16_to_ui8_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -5871,8 +6211,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 140: i16 -> ui8, default RINT
-  func.func @TCVT_i16_to_ui8_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 148: i16 -> ui8, default RINT
+  func.func @TCVT_i16_to_ui8_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -5913,8 +6253,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 141: i16 -> ui8, default RINT
-  func.func @TCVT_i16_to_ui8_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 149: i16 -> ui8, default RINT
+  func.func @TCVT_i16_to_ui8_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -5955,8 +6295,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 142: i16 -> ui8, default RINT
-  func.func @TCVT_i16_to_ui8_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 150: i16 -> ui8, default RINT
+  func.func @TCVT_i16_to_ui8_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -5998,8 +6338,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 143: i16 -> ui8, default RINT
-  func.func @TCVT_i16_to_ui8_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 151: i16 -> ui8, default RINT
+  func.func @TCVT_i16_to_ui8_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -6041,8 +6381,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 144: i16 -> ui8, default RINT
-  func.func @TCVT_i16_to_ui8_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 152: i16 -> ui8, default RINT
+  func.func @TCVT_i16_to_ui8_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -6082,8 +6422,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 145: i16 -> f16, default RINT
-  func.func @TCVT_i16_to_f16_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 153: i16 -> f16, default RINT
+  func.func @TCVT_i16_to_f16_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -6122,8 +6462,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 146: i16 -> f16, default RINT
-  func.func @TCVT_i16_to_f16_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 154: i16 -> f16, default RINT
+  func.func @TCVT_i16_to_f16_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -6164,8 +6504,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 147: i16 -> f16, default RINT
-  func.func @TCVT_i16_to_f16_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 155: i16 -> f16, default RINT
+  func.func @TCVT_i16_to_f16_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -6206,8 +6546,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 148: i16 -> f16, default RINT
-  func.func @TCVT_i16_to_f16_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 156: i16 -> f16, default RINT
+  func.func @TCVT_i16_to_f16_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -6248,8 +6588,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 149: i16 -> f16, default RINT
-  func.func @TCVT_i16_to_f16_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 157: i16 -> f16, default RINT
+  func.func @TCVT_i16_to_f16_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -6291,8 +6631,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 150: i16 -> f16, default RINT
-  func.func @TCVT_i16_to_f16_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 158: i16 -> f16, default RINT
+  func.func @TCVT_i16_to_f16_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -6334,8 +6674,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 151: i16 -> f16, default RINT
-  func.func @TCVT_i16_to_f16_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes { pto.entry , pto.kernel} {
+  // Case 159: i16 -> f16, default RINT
+  func.func @TCVT_i16_to_f16_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -6375,8 +6715,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 152: i16 -> f32, default RINT
-  func.func @TCVT_i16_to_f32_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 160: i16 -> f32, default RINT
+  func.func @TCVT_i16_to_f32_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -6415,8 +6755,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 153: i16 -> f32, default RINT
-  func.func @TCVT_i16_to_f32_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 161: i16 -> f32, default RINT
+  func.func @TCVT_i16_to_f32_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -6457,8 +6797,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 154: i16 -> f32, default RINT
-  func.func @TCVT_i16_to_f32_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 162: i16 -> f32, default RINT
+  func.func @TCVT_i16_to_f32_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -6499,8 +6839,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 155: i16 -> f32, default RINT
-  func.func @TCVT_i16_to_f32_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 163: i16 -> f32, default RINT
+  func.func @TCVT_i16_to_f32_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -6541,8 +6881,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 156: i16 -> f32, default RINT
-  func.func @TCVT_i16_to_f32_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 164: i16 -> f32, default RINT
+  func.func @TCVT_i16_to_f32_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -6584,8 +6924,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 157: i16 -> f32, default RINT
-  func.func @TCVT_i16_to_f32_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 165: i16 -> f32, default RINT
+  func.func @TCVT_i16_to_f32_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -6627,8 +6967,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 158: i16 -> f32, default RINT
-  func.func @TCVT_i16_to_f32_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 166: i16 -> f32, default RINT
+  func.func @TCVT_i16_to_f32_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -6668,8 +7008,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 159: i16 -> ui32, default RINT
-  func.func @TCVT_i16_to_ui32_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes { pto.entry , pto.kernel} {
+  // Case 167: i16 -> ui32, default RINT
+  func.func @TCVT_i16_to_ui32_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -6708,8 +7048,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 160: i16 -> ui32, default RINT
-  func.func @TCVT_i16_to_ui32_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes { pto.entry , pto.kernel} {
+  // Case 168: i16 -> ui32, default RINT
+  func.func @TCVT_i16_to_ui32_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -6750,8 +7090,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 161: i16 -> ui32, default RINT
-  func.func @TCVT_i16_to_ui32_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes { pto.entry , pto.kernel} {
+  // Case 169: i16 -> ui32, default RINT
+  func.func @TCVT_i16_to_ui32_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -6792,8 +7132,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 162: i16 -> ui32, default RINT
-  func.func @TCVT_i16_to_ui32_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes { pto.entry , pto.kernel} {
+  // Case 170: i16 -> ui32, default RINT
+  func.func @TCVT_i16_to_ui32_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -6834,8 +7174,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 163: i16 -> ui32, default RINT
-  func.func @TCVT_i16_to_ui32_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes { pto.entry , pto.kernel} {
+  // Case 171: i16 -> ui32, default RINT
+  func.func @TCVT_i16_to_ui32_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -6877,8 +7217,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 164: i16 -> ui32, default RINT
-  func.func @TCVT_i16_to_ui32_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes { pto.entry , pto.kernel} {
+  // Case 172: i16 -> ui32, default RINT
+  func.func @TCVT_i16_to_ui32_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -6920,8 +7260,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 165: i16 -> ui32, default RINT
-  func.func @TCVT_i16_to_ui32_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes { pto.entry , pto.kernel} {
+  // Case 173: i16 -> ui32, default RINT
+  func.func @TCVT_i16_to_ui32_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<ui32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -6961,8 +7301,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 166: i16 -> i32, default RINT
-  func.func @TCVT_i16_to_i32_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 174: i16 -> i32, default RINT
+  func.func @TCVT_i16_to_i32_1x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -7001,8 +7341,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 167: i16 -> i32, default RINT
-  func.func @TCVT_i16_to_i32_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 175: i16 -> i32, default RINT
+  func.func @TCVT_i16_to_i32_2x64(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -7043,8 +7383,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 168: i16 -> i32, default RINT
-  func.func @TCVT_i16_to_i32_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 176: i16 -> i32, default RINT
+  func.func @TCVT_i16_to_i32_4x32(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -7085,8 +7425,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 169: i16 -> i32, default RINT
-  func.func @TCVT_i16_to_i32_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 177: i16 -> i32, default RINT
+  func.func @TCVT_i16_to_i32_2x128(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -7127,8 +7467,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 170: i16 -> i32, default RINT
-  func.func @TCVT_i16_to_i32_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 178: i16 -> i32, default RINT
+  func.func @TCVT_i16_to_i32_4x65(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -7170,8 +7510,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 171: i16 -> i32, default RINT
-  func.func @TCVT_i16_to_i32_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 179: i16 -> i32, default RINT
+  func.func @TCVT_i16_to_i32_4x200(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -7213,8 +7553,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 172: i16 -> i32, default RINT
-  func.func @TCVT_i16_to_i32_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 180: i16 -> i32, default RINT
+  func.func @TCVT_i16_to_i32_1x129(%src_ptr: !pto.ptr<i16>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -7254,8 +7594,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 173: i32 -> f32, default RINT
-  func.func @TCVT_i32_to_f32_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 181: i32 -> f32, default RINT
+  func.func @TCVT_i32_to_f32_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -7294,8 +7634,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 174: i32 -> f32, default RINT
-  func.func @TCVT_i32_to_f32_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 182: i32 -> f32, default RINT
+  func.func @TCVT_i32_to_f32_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -7336,8 +7676,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 175: i32 -> f32, default RINT
-  func.func @TCVT_i32_to_f32_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 183: i32 -> f32, default RINT
+  func.func @TCVT_i32_to_f32_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -7378,8 +7718,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 176: i32 -> f32, default RINT
-  func.func @TCVT_i32_to_f32_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 184: i32 -> f32, default RINT
+  func.func @TCVT_i32_to_f32_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -7420,8 +7760,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 177: i32 -> f32, default RINT
-  func.func @TCVT_i32_to_f32_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 185: i32 -> f32, default RINT
+  func.func @TCVT_i32_to_f32_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -7463,8 +7803,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 178: i32 -> f32, default RINT
-  func.func @TCVT_i32_to_f32_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 186: i32 -> f32, default RINT
+  func.func @TCVT_i32_to_f32_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -7506,8 +7846,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 179: i32 -> f32, default RINT
-  func.func @TCVT_i32_to_f32_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 187: i32 -> f32, default RINT
+  func.func @TCVT_i32_to_f32_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -7547,8 +7887,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 180: i32 -> i16, default RINT
-  func.func @TCVT_i32_to_i16_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 188: i32 -> i16, default RINT
+  func.func @TCVT_i32_to_i16_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -7587,8 +7927,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 181: i32 -> i16, default RINT
-  func.func @TCVT_i32_to_i16_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 189: i32 -> i16, default RINT
+  func.func @TCVT_i32_to_i16_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -7629,8 +7969,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 182: i32 -> i16, default RINT
-  func.func @TCVT_i32_to_i16_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 190: i32 -> i16, default RINT
+  func.func @TCVT_i32_to_i16_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -7671,8 +8011,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 183: i32 -> i16, default RINT
-  func.func @TCVT_i32_to_i16_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 191: i32 -> i16, default RINT
+  func.func @TCVT_i32_to_i16_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -7713,8 +8053,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 184: i32 -> i16, default RINT
-  func.func @TCVT_i32_to_i16_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 192: i32 -> i16, default RINT
+  func.func @TCVT_i32_to_i16_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -7756,8 +8096,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 185: i32 -> i16, default RINT
-  func.func @TCVT_i32_to_i16_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 193: i32 -> i16, default RINT
+  func.func @TCVT_i32_to_i16_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -7799,8 +8139,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 186: i32 -> i16, default RINT
-  func.func @TCVT_i32_to_i16_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 194: i32 -> i16, default RINT
+  func.func @TCVT_i32_to_i16_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -7840,8 +8180,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 187: i32 -> i64, default RINT
-  func.func @TCVT_i32_to_i64_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 195: i32 -> i64, default RINT
+  func.func @TCVT_i32_to_i64_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -7880,8 +8220,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 188: i32 -> i64, default RINT
-  func.func @TCVT_i32_to_i64_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 196: i32 -> i64, default RINT
+  func.func @TCVT_i32_to_i64_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -7922,8 +8262,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 189: i32 -> i64, default RINT
-  func.func @TCVT_i32_to_i64_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 197: i32 -> i64, default RINT
+  func.func @TCVT_i32_to_i64_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -7964,8 +8304,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 190: i32 -> i64, default RINT
-  func.func @TCVT_i32_to_i64_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 198: i32 -> i64, default RINT
+  func.func @TCVT_i32_to_i64_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -8006,8 +8346,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 191: i32 -> i64, default RINT
-  func.func @TCVT_i32_to_i64_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 199: i32 -> i64, default RINT
+  func.func @TCVT_i32_to_i64_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -8049,8 +8389,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 192: i32 -> i64, default RINT
-  func.func @TCVT_i32_to_i64_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 200: i32 -> i64, default RINT
+  func.func @TCVT_i32_to_i64_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -8092,8 +8432,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 193: i32 -> i64, default RINT
-  func.func @TCVT_i32_to_i64_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes { pto.entry , pto.kernel} {
+  // Case 201: i32 -> i64, default RINT
+  func.func @TCVT_i32_to_i64_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<i64>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -8133,8 +8473,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 194: i32 -> ui8, default RINT
-  func.func @TCVT_i32_to_ui8_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 202: i32 -> ui8, default RINT
+  func.func @TCVT_i32_to_ui8_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -8173,8 +8513,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 195: i32 -> ui8, default RINT
-  func.func @TCVT_i32_to_ui8_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 203: i32 -> ui8, default RINT
+  func.func @TCVT_i32_to_ui8_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -8215,8 +8555,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 196: i32 -> ui8, default RINT
-  func.func @TCVT_i32_to_ui8_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 204: i32 -> ui8, default RINT
+  func.func @TCVT_i32_to_ui8_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -8257,8 +8597,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 197: i32 -> ui8, default RINT
-  func.func @TCVT_i32_to_ui8_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 205: i32 -> ui8, default RINT
+  func.func @TCVT_i32_to_ui8_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -8299,8 +8639,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 198: i32 -> ui8, default RINT
-  func.func @TCVT_i32_to_ui8_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 206: i32 -> ui8, default RINT
+  func.func @TCVT_i32_to_ui8_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -8342,8 +8682,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 199: i32 -> ui8, default RINT
-  func.func @TCVT_i32_to_ui8_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 207: i32 -> ui8, default RINT
+  func.func @TCVT_i32_to_ui8_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -8385,8 +8725,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 200: i32 -> ui8, default RINT
-  func.func @TCVT_i32_to_ui8_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 208: i32 -> ui8, default RINT
+  func.func @TCVT_i32_to_ui8_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -8426,8 +8766,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 201: i32 -> ui16, default RINT
-  func.func @TCVT_i32_to_ui16_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 209: i32 -> ui16, default RINT
+  func.func @TCVT_i32_to_ui16_1x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -8466,8 +8806,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 202: i32 -> ui16, default RINT
-  func.func @TCVT_i32_to_ui16_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 210: i32 -> ui16, default RINT
+  func.func @TCVT_i32_to_ui16_2x64(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -8508,8 +8848,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 203: i32 -> ui16, default RINT
-  func.func @TCVT_i32_to_ui16_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 211: i32 -> ui16, default RINT
+  func.func @TCVT_i32_to_ui16_4x32(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -8550,8 +8890,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 204: i32 -> ui16, default RINT
-  func.func @TCVT_i32_to_ui16_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 212: i32 -> ui16, default RINT
+  func.func @TCVT_i32_to_ui16_2x128(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -8592,8 +8932,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 205: i32 -> ui16, default RINT
-  func.func @TCVT_i32_to_ui16_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 213: i32 -> ui16, default RINT
+  func.func @TCVT_i32_to_ui16_4x65(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -8635,8 +8975,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 206: i32 -> ui16, default RINT
-  func.func @TCVT_i32_to_ui16_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 214: i32 -> ui16, default RINT
+  func.func @TCVT_i32_to_ui16_4x200(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -8678,8 +9018,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 207: i32 -> ui16, default RINT
-  func.func @TCVT_i32_to_ui16_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 215: i32 -> ui16, default RINT
+  func.func @TCVT_i32_to_ui16_1x129(%src_ptr: !pto.ptr<i32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -8719,8 +9059,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 208: ui32 -> i16, default RINT
-  func.func @TCVT_ui32_to_i16_1x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 216: ui32 -> i16, default RINT
+  func.func @TCVT_ui32_to_i16_1x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -8759,8 +9099,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 209: ui32 -> i16, default RINT
-  func.func @TCVT_ui32_to_i16_2x64(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 217: ui32 -> i16, default RINT
+  func.func @TCVT_ui32_to_i16_2x64(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -8801,8 +9141,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 210: ui32 -> i16, default RINT
-  func.func @TCVT_ui32_to_i16_4x32(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 218: ui32 -> i16, default RINT
+  func.func @TCVT_ui32_to_i16_4x32(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -8843,8 +9183,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 211: ui32 -> i16, default RINT
-  func.func @TCVT_ui32_to_i16_2x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 219: ui32 -> i16, default RINT
+  func.func @TCVT_ui32_to_i16_2x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -8885,8 +9225,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 212: ui32 -> i16, default RINT
-  func.func @TCVT_ui32_to_i16_4x65(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 220: ui32 -> i16, default RINT
+  func.func @TCVT_ui32_to_i16_4x65(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -8928,8 +9268,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 213: ui32 -> i16, default RINT
-  func.func @TCVT_ui32_to_i16_4x200(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 221: ui32 -> i16, default RINT
+  func.func @TCVT_ui32_to_i16_4x200(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -8971,8 +9311,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 214: ui32 -> i16, default RINT
-  func.func @TCVT_ui32_to_i16_1x129(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes { pto.entry , pto.kernel} {
+  // Case 222: ui32 -> i16, default RINT
+  func.func @TCVT_ui32_to_i16_1x129(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<i16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -9012,8 +9352,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 215: ui32 -> ui16, default RINT
-  func.func @TCVT_ui32_to_ui16_1x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 223: ui32 -> ui16, default RINT
+  func.func @TCVT_ui32_to_ui16_1x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -9052,8 +9392,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 216: ui32 -> ui16, default RINT
-  func.func @TCVT_ui32_to_ui16_2x64(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 224: ui32 -> ui16, default RINT
+  func.func @TCVT_ui32_to_ui16_2x64(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -9094,8 +9434,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 217: ui32 -> ui16, default RINT
-  func.func @TCVT_ui32_to_ui16_4x32(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 225: ui32 -> ui16, default RINT
+  func.func @TCVT_ui32_to_ui16_4x32(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -9136,8 +9476,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 218: ui32 -> ui16, default RINT
-  func.func @TCVT_ui32_to_ui16_2x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 226: ui32 -> ui16, default RINT
+  func.func @TCVT_ui32_to_ui16_2x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -9178,8 +9518,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 219: ui32 -> ui16, default RINT
-  func.func @TCVT_ui32_to_ui16_4x65(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 227: ui32 -> ui16, default RINT
+  func.func @TCVT_ui32_to_ui16_4x65(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -9221,8 +9561,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 220: ui32 -> ui16, default RINT
-  func.func @TCVT_ui32_to_ui16_4x200(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 228: ui32 -> ui16, default RINT
+  func.func @TCVT_ui32_to_ui16_4x200(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -9264,8 +9604,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 221: ui32 -> ui16, default RINT
-  func.func @TCVT_ui32_to_ui16_1x129(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes { pto.entry , pto.kernel} {
+  // Case 229: ui32 -> ui16, default RINT
+  func.func @TCVT_ui32_to_ui16_1x129(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui16>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -9305,8 +9645,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 222: ui32 -> ui8, default RINT
-  func.func @TCVT_ui32_to_ui8_1x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 230: ui32 -> ui8, default RINT
+  func.func @TCVT_ui32_to_ui8_1x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -9345,8 +9685,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 223: ui32 -> ui8, default RINT
-  func.func @TCVT_ui32_to_ui8_2x64(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 231: ui32 -> ui8, default RINT
+  func.func @TCVT_ui32_to_ui8_2x64(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -9387,8 +9727,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 224: ui32 -> ui8, default RINT
-  func.func @TCVT_ui32_to_ui8_4x32(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 232: ui32 -> ui8, default RINT
+  func.func @TCVT_ui32_to_ui8_4x32(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -9429,8 +9769,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 225: ui32 -> ui8, default RINT
-  func.func @TCVT_ui32_to_ui8_2x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 233: ui32 -> ui8, default RINT
+  func.func @TCVT_ui32_to_ui8_2x128(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -9471,8 +9811,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 226: ui32 -> ui8, default RINT
-  func.func @TCVT_ui32_to_ui8_4x65(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 234: ui32 -> ui8, default RINT
+  func.func @TCVT_ui32_to_ui8_4x65(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -9514,8 +9854,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 227: ui32 -> ui8, default RINT
-  func.func @TCVT_ui32_to_ui8_4x200(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 235: ui32 -> ui8, default RINT
+  func.func @TCVT_ui32_to_ui8_4x200(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -9557,8 +9897,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 228: ui32 -> ui8, default RINT
-  func.func @TCVT_ui32_to_ui8_1x129(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes { pto.entry , pto.kernel} {
+  // Case 236: ui32 -> ui8, default RINT
+  func.func @TCVT_ui32_to_ui8_1x129(%src_ptr: !pto.ptr<ui32>, %dst_ptr: !pto.ptr<ui8>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -9598,8 +9938,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 229: i64 -> f32, default RINT
-  func.func @TCVT_i64_to_f32_1x128(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 237: i64 -> f32, default RINT
+  func.func @TCVT_i64_to_f32_1x128(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -9638,8 +9978,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 230: i64 -> f32, default RINT
-  func.func @TCVT_i64_to_f32_2x64(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 238: i64 -> f32, default RINT
+  func.func @TCVT_i64_to_f32_2x64(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -9680,8 +10020,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 231: i64 -> f32, default RINT
-  func.func @TCVT_i64_to_f32_4x32(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 239: i64 -> f32, default RINT
+  func.func @TCVT_i64_to_f32_4x32(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -9722,8 +10062,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 232: i64 -> f32, default RINT
-  func.func @TCVT_i64_to_f32_2x128(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 240: i64 -> f32, default RINT
+  func.func @TCVT_i64_to_f32_2x128(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -9764,8 +10104,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 233: i64 -> f32, default RINT
-  func.func @TCVT_i64_to_f32_4x65(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 241: i64 -> f32, default RINT
+  func.func @TCVT_i64_to_f32_4x65(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -9807,8 +10147,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 234: i64 -> f32, default RINT
-  func.func @TCVT_i64_to_f32_4x200(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 242: i64 -> f32, default RINT
+  func.func @TCVT_i64_to_f32_4x200(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -9850,8 +10190,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 235: i64 -> f32, default RINT
-  func.func @TCVT_i64_to_f32_1x129(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes { pto.entry , pto.kernel} {
+  // Case 243: i64 -> f32, default RINT
+  func.func @TCVT_i64_to_f32_1x129(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<f32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index
@@ -9891,8 +10231,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 236: i64 -> i32, default RINT
-  func.func @TCVT_i64_to_i32_1x128(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 244: i64 -> i32, default RINT
+  func.func @TCVT_i64_to_i32_1x128(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c128 = arith.constant 128 : index
@@ -9931,8 +10271,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 237: i64 -> i32, default RINT
-  func.func @TCVT_i64_to_i32_2x64(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 245: i64 -> i32, default RINT
+  func.func @TCVT_i64_to_i32_2x64(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -9973,8 +10313,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 238: i64 -> i32, default RINT
-  func.func @TCVT_i64_to_i32_4x32(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 246: i64 -> i32, default RINT
+  func.func @TCVT_i64_to_i32_4x32(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -10015,8 +10355,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 239: i64 -> i32, default RINT
-  func.func @TCVT_i64_to_i32_2x128(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 247: i64 -> i32, default RINT
+  func.func @TCVT_i64_to_i32_2x128(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c2   = arith.constant 2   : index
@@ -10057,8 +10397,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 240: i64 -> i32, default RINT
-  func.func @TCVT_i64_to_i32_4x65(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 248: i64 -> i32, default RINT
+  func.func @TCVT_i64_to_i32_4x65(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c4   = arith.constant 4   : index
@@ -10100,8 +10440,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 241: i64 -> i32, default RINT
-  func.func @TCVT_i64_to_i32_4x200(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 249: i64 -> i32, default RINT
+  func.func @TCVT_i64_to_i32_4x200(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0    = arith.constant 0    : index
     %c1    = arith.constant 1    : index
     %c4    = arith.constant 4    : index
@@ -10143,8 +10483,8 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  // Case 242: i64 -> i32, default RINT
-  func.func @TCVT_i64_to_i32_1x129(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes { pto.entry , pto.kernel} {
+  // Case 250: i64 -> i32, default RINT
+  func.func @TCVT_i64_to_i32_1x129(%src_ptr: !pto.ptr<i64>, %dst_ptr: !pto.ptr<i32>) attributes {pto.entry, pto.kernel} {
     %c0   = arith.constant 0   : index
     %c1   = arith.constant 1   : index
     %c129 = arith.constant 129 : index

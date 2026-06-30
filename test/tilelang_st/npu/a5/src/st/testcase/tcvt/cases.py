@@ -18,6 +18,12 @@ Actual data generation and comparison use `src_dtype` / `dst_dtype`.
 import numpy as np
 from ml_dtypes import bfloat16
 
+F8E4M3 = "f8e4m3"
+F8E5M2 = "f8e5m2"
+HIF8 = "hif8"
+F4E1M2X2 = "f4e1m2x2"
+F4E2M1X2 = "f4e2m1x2"
+
 # 7 shapes (aligning with C++ INSTANTIATE_TCVT)
 SHAPES = [
     (1, 128, 1, 128),
@@ -42,17 +48,50 @@ _DTYPE_NAME = {
     np.uint32: "ui32",
     np.int64: "i64",
     np.uint64: "ui64",
+    F8E4M3: F8E4M3,
+    F8E5M2: F8E5M2,
+    HIF8: HIF8,
+    F4E1M2X2: F4E1M2X2,
+    F4E2M1X2: F4E2M1X2,
 }
+
+_PTO_DTYPE_NAME = {
+    F8E4M3: "f8E4M3FN",
+    F8E5M2: "f8E5M2",
+    HIF8: "!pto.hif8",
+    F4E1M2X2: "!pto.f4E1M2x2",
+    F4E2M1X2: "!pto.f4E2M1x2",
+}
+
+_LOW_PRECISION_DTYPES = frozenset(_PTO_DTYPE_NAME)
+
+
+def dtype_name(dtype):
+    return _DTYPE_NAME.get(dtype, dtype)
+
+
+def pto_dtype_name(dtype):
+    return _PTO_DTYPE_NAME.get(dtype, dtype_name(dtype))
+
+
+def is_low_precision_dtype(dtype):
+    return dtype in _LOW_PRECISION_DTYPES
+
+
+def storage_dtype(dtype):
+    return np.uint8 if is_low_precision_dtype(dtype) else dtype
+
+
+def eps_for_dtype(dtype):
+    eps_map = {np.float32: 1e-6, np.float16: 1e-3, bfloat16: 1e-3}
+    return eps_map.get(dtype, 0.0)
 
 
 def _make_cases(src_dtype, dst_dtype):
     """Generate cases of 7 test shapes for src_dtype -> dst_dtype"""
-    src_name = _DTYPE_NAME.get(src_dtype, src_dtype)
-    dst_name = _DTYPE_NAME.get(dst_dtype, dst_dtype)
-    
-    # eps: f32=1e-6; f16/bf16=1e-3; others=0
-    eps_map = {np.float32: 1e-6, np.float16: 1e-3, bfloat16: 1e-3}
-    eps = eps_map.get(dst_dtype, 0.0)
+    src_name = dtype_name(src_dtype)
+    dst_name = dtype_name(dst_dtype)
+    eps = eps_for_dtype(dst_dtype)
     
     cases = []
     for rows, cols, v_rows, v_cols in SHAPES:
@@ -67,6 +106,49 @@ def _make_cases(src_dtype, dst_dtype):
             "eps": eps,
         })
     return cases
+
+
+def _make_low_precision_cases():
+    """Targeted A5 low-precision tcvt coverage without multiplying all shapes."""
+    shape = (16, 64)
+    lowp_cases = []
+    for src_dtype, dst_dtype in (
+        (np.float32, F8E4M3),
+        (np.float32, F8E5M2),
+        (np.float32, HIF8),
+        (np.float16, HIF8),
+        (bfloat16, F4E1M2X2),
+        (bfloat16, F4E2M1X2),
+    ):
+        case = {
+            "name": f"{dtype_name(src_dtype)}_to_{dtype_name(dst_dtype)}_{shape[0]}x{shape[1]}",
+            "dtype": storage_dtype(dst_dtype),
+            "src_dtype": src_dtype,
+            "dst_dtype": dst_dtype,
+            "shape": shape,
+            "valid_shape": shape,
+            "eps": eps_for_dtype(dst_dtype),
+        }
+        if dst_dtype in (F4E1M2X2, F4E2M1X2):
+            case["name"] = f"{dtype_name(src_dtype)}_to_{dtype_name(dst_dtype)}_16x64_to_16x32"
+            case["dst_shape"] = (16, 32)
+            case["dst_valid_shape"] = (16, 32)
+        lowp_cases.append(case)
+    for src_dtype, dst_dtype in (
+        (np.float32, F8E4M3),
+        (np.float32, HIF8),
+    ):
+        shape = (4, 96)
+        lowp_cases.append({
+            "name": f"{dtype_name(src_dtype)}_to_{dtype_name(dst_dtype)}_{shape[0]}x{shape[1]}",
+            "dtype": storage_dtype(dst_dtype),
+            "src_dtype": src_dtype,
+            "dst_dtype": dst_dtype,
+            "shape": shape,
+            "valid_shape": shape,
+            "eps": eps_for_dtype(dst_dtype),
+        })
+    return lowp_cases
 
 
 CASES = [
@@ -120,6 +202,7 @@ CASES = [
         "round_mode": "RINT",
         "eps": 1e-6,
     },
+    *_make_low_precision_cases(),
     # f32 → f16, bf16, i16, i32, i64, f32
     *_make_cases(np.float32, np.float16),
     *_make_cases(np.float32, bfloat16),

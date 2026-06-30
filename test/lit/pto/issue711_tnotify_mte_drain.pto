@@ -11,8 +11,10 @@
 // signal on the scalar pipe and only does pipe_barrier(PIPE_ALL) *after* the
 // store, so without an MTE drain the signal can overtake an in-flight
 // pto.tload / pto.tstore (local or peer) and the receiver's matching TWAIT
-// returns before the data is visible. The drain should be precise: only MTE
-// pipes that may have prior in-flight work are drained before TNOTIFY.
+// returns before the data is visible. For prior MTE3 stores, the notification
+// also needs a DDR-domain release fence before publishing the signal. The drain
+// should be precise: only MTE pipes that may have prior in-flight work are
+// drained before TNOTIFY, and MTE2-only cases do not emit a DDR fence.
 
 // RUN: ptoas --pto-arch=a3 %s -o - 2>&1 | FileCheck %s
 
@@ -170,12 +172,14 @@ module {
 // CHECK:      TSTORE(
 // CHECK:      pipe_barrier(PIPE_MTE2);
 // CHECK-NEXT: pipe_barrier(PIPE_MTE3);
+// CHECK-NEXT: dsb(DSB_DDR);
 // CHECK-NEXT: pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tnotify_drain_after_tload(
 // CHECK:      pto::comm::NotifyOp{{.*}}= pto::comm::NotifyOp::AtomicAdd;
 // CHECK:      TLOAD(
 // CHECK:      pipe_barrier(PIPE_MTE2);
+// CHECK-NOT:  dsb(
 // CHECK-NEXT: pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tnotify_after_existing_mte2_barrier(

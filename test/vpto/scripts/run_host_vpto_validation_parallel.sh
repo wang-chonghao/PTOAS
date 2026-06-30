@@ -81,8 +81,13 @@ discover_cases() {
     golden.py
     compare.py
   )
+  local onboard_only_prefix="onboard-only/"
 
   if [[ -n "${CASE_NAME}" ]]; then
+    if [[ "${DEVICE:-SIM}" == "SIM" && "${COMPILE_ONLY:-0}" != "1" &&
+          "${CASE_NAME}" == "${onboard_only_prefix}"* ]]; then
+      die "case ${CASE_NAME} is onboard-only and cannot run with DEVICE=SIM"
+    fi
     local requested_dir="${CASES_ROOT}/${CASE_NAME}"
     [[ -d "${requested_dir}" ]] || die "unknown case: ${CASE_NAME}"
     for f in "${required_files[@]}"; do
@@ -105,12 +110,21 @@ discover_cases() {
     [[ "${ok}" -eq 1 ]] || continue
     [[ -f "${dir}/kernel.pto" ]] || continue
     local rel="${dir#${CASES_ROOT}/}"
+    if [[ "${DEVICE:-SIM}" == "SIM" && "${COMPILE_ONLY:-0}" != "1" &&
+          "${rel}" == "${onboard_only_prefix}"* ]]; then
+      continue
+    fi
     if [[ -n "${CASE_PREFIX}" && "${rel}" != "${CASE_PREFIX}"* ]]; then
       continue
     fi
     printf "%s\n" "${rel}"
   done
 }
+
+if [[ "${DEVICE:-SIM}" == "SIM" && "${COMPILE_ONLY:-0}" != "1" &&
+      "${CASE_NAME}" == onboard-only/* ]]; then
+  die "case ${CASE_NAME} is onboard-only and cannot run with DEVICE=SIM"
+fi
 
 readarray -t CASES < <(discover_cases)
 [[ "${#CASES[@]}" -gt 0 ]] || die "no cases found under ${CASES_ROOT}"
@@ -154,6 +168,9 @@ log "CASE_NAME=${CASE_NAME:-<all>}" | tee -a "${RUNNER_LOG}"
 log "CASE_PREFIX=${CASE_PREFIX:-<none>}" | tee -a "${RUNNER_LOG}"
 log "JOBS=${JOBS}" | tee -a "${RUNNER_LOG}"
 log "TOTAL_CASES=${#CASES[@]}" | tee -a "${RUNNER_LOG}"
+if [[ -n "${SIM_LIB_DIR:-}" ]]; then
+  log "SIM_LIB_DIR=${SIM_LIB_DIR}" | tee -a "${RUNNER_LOG}"
+fi
 
 next_index=0
 while [[ "${next_index}" -lt "${#CASES[@]}" || "${#PID_TO_CASE[@]}" -gt 0 ]]; do

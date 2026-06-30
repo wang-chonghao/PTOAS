@@ -9,16 +9,87 @@
 from . import _ops
 
 
+def _row_reduction_tmp_metadata(src):
+    surface_metadata = getattr(src, "surface_metadata", None)
+    if surface_metadata is not None:
+        shape = surface_metadata.get("shape")
+        dtype = surface_metadata.get("dtype")
+        memory_space = surface_metadata.get("memory_space")
+        if shape is not None and dtype is not None and memory_space is not None:
+            return {
+                "shape": shape,
+                "dtype": dtype,
+                "memory_space": memory_space,
+                "valid_shape": surface_metadata.get("valid_shape"),
+            }
+
+    parsed = _ops.parse_tile_type_metadata(_ops.unwrap_surface_value(src).type)
+    if parsed is None:
+        return None
+    return {
+        "shape": parsed["shape_dims"],
+        "dtype": parsed["element_type"],
+        "memory_space": parsed["memory_space"],
+        "valid_shape": parsed["valid_dims"],
+    }
+
+
 def _resolve_row_reduction_tmp(src, tmp):
     if tmp is not None:
         return tmp
-    return _ops.alloc_tile(tile_type=_ops.unwrap_surface_value(src).type)
+    metadata = _row_reduction_tmp_metadata(src)
+    if metadata is None:
+        return _ops.alloc_tile(tile_type=_ops.unwrap_surface_value(src).type)
+    alloc_kwargs = {
+        "shape": list(metadata["shape"]),
+        "dtype": metadata["dtype"],
+        "memory_space": metadata["memory_space"],
+        "blayout": "RowMajor",
+        "slayout": "NoneBox",
+    }
+    if metadata["valid_shape"] is not None:
+        alloc_kwargs["valid_shape"] = list(metadata["valid_shape"])
+    return _ops.alloc_tile(**alloc_kwargs)
 
 
 class _TileNamespace:
-    load = staticmethod(_ops.tload)
-    store = staticmethod(_ops.tstore)
     mov = staticmethod(_ops.tmov)
+    extract = staticmethod(_ops.textract)
+    insert = staticmethod(_ops.tinsert)
+    matmul = staticmethod(_ops.tmatmul)
+    matmul_acc = staticmethod(_ops.tmatmul_acc)
+    matmul_mx = staticmethod(_ops.tmatmul_mx)
+    matmul_mx_acc = staticmethod(_ops.tmatmul_mx_acc)
+    matmul_mx_bias = staticmethod(_ops.tmatmul_mx_bias)
+    gemv_mx = staticmethod(_ops.tgemv_mx)
+    gemv_mx_acc = staticmethod(_ops.tgemv_mx_acc)
+    gemv_mx_bias = staticmethod(_ops.tgemv_mx_bias)
+
+    @staticmethod
+    def load(src, tile, *, offsets=None, sizes=None):
+        if offsets is None and sizes is None and _ops._is_partition_tensor_view(src):
+            return _ops.tload(src, tile)
+        part = _ops._tile_transfer_partition(
+            src,
+            tile,
+            offsets=offsets,
+            sizes=sizes,
+            context="tile.load(...)",
+        )
+        return _ops.tload(part, tile)
+
+    @staticmethod
+    def store(tile, dst, *, offsets=None, sizes=None):
+        if offsets is None and sizes is None and _ops._is_partition_tensor_view(dst):
+            return _ops.tstore(tile, dst)
+        part = _ops._tile_transfer_partition(
+            dst,
+            tile,
+            offsets=offsets,
+            sizes=sizes,
+            context="tile.store(...)",
+        )
+        return _ops.tstore(tile, part)
 
     add = staticmethod(_ops.tadd)
     sub = staticmethod(_ops.tsub)
@@ -80,6 +151,7 @@ class _TileNamespace:
     cmps = staticmethod(_ops.tcmps)
 
     expands = staticmethod(_ops.texpands)
+    reshape = staticmethod(_ops.treshape)
     rowexpand = staticmethod(_ops.trowexpand)
     colexpand = staticmethod(_ops.tcolexpand)
 
@@ -98,6 +170,10 @@ class _TileNamespace:
     colexpandmax = staticmethod(_ops.tcolexpandmax)
     colexpandmin = staticmethod(_ops.tcolexpandmin)
     colexpandexpdif = staticmethod(_ops.tcolexpandexpdif)
+
+    sort32 = staticmethod(_ops.tsort32)
+    mrgsort = staticmethod(_ops.tmrgsort)
+    gather = staticmethod(_ops.tgather)
 
     sel = staticmethod(_ops.tsel)
     sels = staticmethod(_ops.tsels)

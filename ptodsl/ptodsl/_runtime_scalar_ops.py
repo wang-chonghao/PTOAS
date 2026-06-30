@@ -9,16 +9,18 @@
 
 from __future__ import annotations
 
+from ._scalar_adaptation import (
+    classify_runtime_scalar_type,
+    normalize_runtime_binary_operands,
+)
 from ._types import (
     _integer_signedness,
-    _materialize_integer_literal,
     _restore_integer_signedness,
-    _signless_integer_type,
     _strip_integer_signedness,
 )
 
 from mlir.dialects import arith, math
-from mlir.ir import BF16Type, F16Type, F32Type, FloatAttr, IndexType, IntegerType
+from mlir.ir import IndexType, IntegerType
 
 
 _FLOAT_BINARY_OPS = {
@@ -92,109 +94,6 @@ def emit_runtime_min(lhs, rhs):
     raise TypeError(f"unsupported runtime scalar operand category '{kind}'")
 
 
-def normalize_runtime_binary_operands(lhs, rhs):
-    lhs_is_value = _is_mlir_value(lhs)
-    rhs_is_value = _is_mlir_value(rhs)
-
-    if not lhs_is_value and not rhs_is_value:
-        raise TypeError("runtime scalar operators require at least one traced runtime operand")
-
-    if lhs_is_value and rhs_is_value:
-        return _reconcile_typed_operands(lhs, rhs)
-
-    anchor_type = lhs.type if lhs_is_value else rhs.type
-    lhs = lhs if lhs_is_value else _materialize_literal(lhs, anchor_type)
-    rhs = rhs if rhs_is_value else _materialize_literal(rhs, anchor_type)
-    return _reconcile_typed_operands(lhs, rhs)
-
-
-def _reconcile_typed_operands(lhs, rhs):
-    lhs_type = lhs.type
-    rhs_type = rhs.type
-
-    if lhs_type == rhs_type:
-        return lhs, rhs, classify_runtime_scalar_type(lhs_type)
-
-    if IndexType.isinstance(lhs_type) and IntegerType.isinstance(rhs_type):
-        rhs = arith.IndexCastOp(IndexType.get(), _strip_integer_signedness(rhs)).result
-        return lhs, rhs, "index"
-
-    if IntegerType.isinstance(lhs_type) and IndexType.isinstance(rhs_type):
-        lhs = arith.IndexCastOp(IndexType.get(), _strip_integer_signedness(lhs)).result
-        return lhs, rhs, "index"
-
-    if IntegerType.isinstance(lhs_type) and IntegerType.isinstance(rhs_type):
-        lhs_width = IntegerType(lhs_type).width
-        rhs_width = IntegerType(rhs_type).width
-        target_type = lhs_type if lhs_width >= rhs_width else rhs_type
-        lhs = _coerce_runtime_integer_like(lhs, target_type)
-        rhs = _coerce_runtime_integer_like(rhs, target_type)
-        return lhs, rhs, "integer"
-
-    raise TypeError(
-        "runtime scalar operators require matching scalar types or an index/integer pair; "
-        f"got {lhs_type} and {rhs_type}"
-    )
-
-
-def _materialize_literal(value, anchor_type):
-    if isinstance(value, bool):
-        raise TypeError("runtime scalar operators do not accept bool literals")
-
-    kind = classify_runtime_scalar_type(anchor_type)
-    if kind == "float":
-        return arith.ConstantOp(anchor_type, FloatAttr.get(anchor_type, float(value))).result
-    if kind == "index":
-        return arith.ConstantOp(anchor_type, int(value)).result
-
-    if isinstance(value, float):
-        raise TypeError(
-            "runtime scalar operators cannot materialize a floating-point literal "
-            f"against non-floating operand type {anchor_type}"
-        )
-
-    return _materialize_integer_literal(anchor_type, value)
-
-
-def _coerce_runtime_integer_like(raw_value, target_type):
-    if IndexType.isinstance(raw_value.type):
-        signless_target = _signless_integer_type(target_type)
-        adapted = arith.IndexCastOp(signless_target, raw_value).result
-        return _restore_integer_signedness(adapted, target_type)
-
-    source_type = raw_value.type
-    source_width = IntegerType(source_type).width
-    target_width = IntegerType(target_type).width
-    signless_source = _strip_integer_signedness(raw_value)
-    signless_target = _signless_integer_type(target_type)
-
-    if source_width < target_width:
-        source_signedness = _integer_signedness(source_type)
-        if source_signedness == "unsigned":
-            widened = arith.ExtUIOp(signless_target, signless_source).result
-        else:
-            widened = arith.ExtSIOp(signless_target, signless_source).result
-        return _restore_integer_signedness(widened, target_type)
-    if source_width > target_width:
-        truncated = arith.TruncIOp(signless_target, signless_source).result
-        return _restore_integer_signedness(truncated, target_type)
-    return _restore_integer_signedness(signless_source, target_type)
-
-
-def classify_runtime_scalar_type(type_obj):
-    if IndexType.isinstance(type_obj):
-        return "index"
-    if IntegerType.isinstance(type_obj):
-        return "integer"
-    if any(cls.isinstance(type_obj) for cls in (BF16Type, F16Type, F32Type)):
-        return "float"
-    raise TypeError(f"runtime scalar operators only support index/int/float values, got {type_obj}")
-
-
-def _is_mlir_value(value) -> bool:
-    return not isinstance(value, (bool, int, float)) and hasattr(value, "type")
-
-
 def _restore_runtime_integer_result(result, authored_type):
     if IndexType.isinstance(authored_type):
         return result
@@ -262,11 +161,6 @@ def emit_runtime_compare(op_name: str, lhs, rhs):
 def emit_runtime_bitwise_op(op_name: str, lhs, rhs):
     """Lower one authored runtime scalar bitwise operator."""
     lhs, rhs, kind = normalize_runtime_binary_operands(lhs, rhs)
-    if kind != "integer":
-        raise TypeError(
-            f"runtime scalar bitwise operator '{op_name}' expects integer-like operands, got {lhs.type} and {rhs.type}"
-        )
-
     op_cls = {
         "and": arith.AndIOp,
         "or": arith.OrIOp,
@@ -274,6 +168,14 @@ def emit_runtime_bitwise_op(op_name: str, lhs, rhs):
     }.get(op_name)
     if op_cls is None:
         raise TypeError(f"unsupported runtime scalar bitwise operator '{op_name}'")
+
+    if kind == "index":
+        return op_cls(lhs, rhs).result
+
+    if kind != "integer":
+        raise TypeError(
+            f"runtime scalar bitwise operator '{op_name}' expects integer-like operands, got {lhs.type} and {rhs.type}"
+        )
 
     authored_type = lhs.type
     result = op_cls(_strip_integer_signedness(lhs), _strip_integer_signedness(rhs)).result

@@ -24,6 +24,7 @@ Cycle-accurate simulator **popped→retire** latency (cycles). **fp16** uses **a
 | `pto.vsub` | `RV_VSUB` | **7** | **7** | — |
 | `pto.vmul` | `RV_VMUL` | **8** | **8** | — |
 | `pto.vdiv` | `RV_VDIV` | **17** | **22** | — |
+| `pto.vmadd` | `RV_VMADD` | — | — | — |
 
 ---
 
@@ -129,6 +130,26 @@ for (int i = 0; i < N; i++)
 - **inputs:** `%lhs`, `%rhs`, and `%mask` as above.
 - **outputs:** `%result` holds the lane-wise minimum.
 - **constraints and limitations:** Input and result types MUST match.
+
+---
+
+### `pto.vmadd`
+
+- **syntax:** `%result = pto.vmadd %acc, %lhs, %rhs, %mask : !pto.vreg<NxT>, !pto.vreg<NxT>, !pto.vreg<NxT>, !pto.mask<G> -> !pto.vreg<NxT>`
+- **A5 types:** f16, bf16, f32
+
+```c
+for (int i = 0; i < N; i++)
+    dst[i] = src0[i] * acc[i] + src1[i];
+```
+
+- **inputs:** `%acc` is the destination-as-source multiplicand, `%lhs` is the
+  other multiplicand, `%rhs` is the addend, and `%mask` selects active lanes.
+- **outputs:** `%result` holds the multiply-add result.
+- **constraints and limitations:** `%acc`, `%lhs`, `%rhs`, and `%result` MUST
+  have matching vector shapes and element types. This is a direct fused
+  multiply-add semantic and should not be assumed equivalent to separate
+  multiply and add operations for floating-point results.
 
 ---
 

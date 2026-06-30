@@ -26,10 +26,6 @@ using namespace mlir::pto;
 
 namespace {
 
-static bool hasVPTOKernelAttr(Operation *op) {
-  return op->hasAttr("pto.kernel") || op->hasAttr("pto.aicore");
-}
-
 static bool hasKernelKind(ModuleOp module) {
   return module->hasAttr(FunctionKernelKindAttr::name);
 }
@@ -39,10 +35,12 @@ static bool hasKernelKindChildModule(ModuleOp module) {
                       [](ModuleOp child) { return hasKernelKind(child); });
 }
 
+static bool isSectionSplitCandidate(func::FuncOp funcOp);
+
 static bool hasCVSections(ModuleOp module) {
   bool found = false;
   module.walk([&](func::FuncOp funcOp) {
-    if (found || !hasVPTOKernelAttr(funcOp))
+    if (found || !isSectionSplitCandidate(funcOp))
       return WalkResult::advance();
     WalkResult result = funcOp.walk([&](Operation *op) {
       if (isa<SectionCubeOp, SectionVectorOp>(op)) {
@@ -60,7 +58,7 @@ static bool hasCVSections(ModuleOp module) {
 static bool hasSectionKind(ModuleOp module, FunctionKernelKind kind) {
   bool found = false;
   module.walk([&](func::FuncOp funcOp) {
-    if (found || !hasVPTOKernelAttr(funcOp))
+    if (found || !isSectionSplitCandidate(funcOp))
       return WalkResult::advance();
     WalkResult result = funcOp.walk([&](Operation *op) {
       bool matches = kind == FunctionKernelKind::Cube
@@ -104,6 +102,11 @@ static bool hasAnySection(func::FuncOp funcOp) {
   return found;
 }
 
+static bool isSectionSplitCandidate(func::FuncOp funcOp) {
+  return funcOp && !funcOp.isDeclaration() &&
+         (pto::isPTOEntryFunction(funcOp) || hasAnySection(funcOp));
+}
+
 static LogicalResult verifyNoNestedSections(ModuleOp module) {
   LogicalResult status = success();
   module.walk([&](Operation *op) {
@@ -122,10 +125,10 @@ static LogicalResult verifyNoNestedSections(ModuleOp module) {
   return status;
 }
 
-static LogicalResult verifyKernelFunctionsUseSections(ModuleOp module) {
+static LogicalResult verifySectionSplitCandidatesUseSections(ModuleOp module) {
   LogicalResult status = success();
   module.walk([&](func::FuncOp funcOp) {
-    if (failed(status) || !hasVPTOKernelAttr(funcOp))
+    if (failed(status) || !isSectionSplitCandidate(funcOp))
       return WalkResult::advance();
     if (!hasAnySection(funcOp)) {
       status = funcOp.emitOpError(
@@ -141,7 +144,7 @@ static LogicalResult verifyKernelFunctionsUseSections(ModuleOp module) {
 static LogicalResult verifyUniqueSectionKindsPerFunction(ModuleOp module) {
   LogicalResult status = success();
   module.walk([&](func::FuncOp funcOp) {
-    if (failed(status) || !hasVPTOKernelAttr(funcOp))
+    if (failed(status) || !isSectionSplitCandidate(funcOp))
       return WalkResult::advance();
     unsigned cubeCount = 0;
     unsigned vectorCount = 0;
@@ -164,11 +167,11 @@ static LogicalResult verifyUniqueSectionKindsPerFunction(ModuleOp module) {
   return status;
 }
 
-static void eraseKernelFunctionsWithoutSectionKind(ModuleOp module,
-                                                   FunctionKernelKind kind) {
+static void eraseSectionSplitCandidatesWithoutSectionKind(ModuleOp module,
+                                                          FunctionKernelKind kind) {
   SmallVector<func::FuncOp> eraseFuncs;
   module.walk([&](func::FuncOp funcOp) {
-    if (hasVPTOKernelAttr(funcOp) && !hasSectionKind(funcOp, kind))
+    if (isSectionSplitCandidate(funcOp) && !hasSectionKind(funcOp, kind))
       eraseFuncs.push_back(funcOp);
   });
 
@@ -213,7 +216,7 @@ static ModuleOp cloneModuleForKind(ModuleOp source, FunctionKernelKind kind,
   auto cloned = cast<ModuleOp>(source->clone());
   cloned->setAttr(FunctionKernelKindAttr::name,
                   FunctionKernelKindAttr::get(cloned.getContext(), kind));
-  eraseKernelFunctionsWithoutSectionKind(cloned, kind);
+  eraseSectionSplitCandidatesWithoutSectionKind(cloned, kind);
   rewriteSectionsForKind(cloned, kind);
   builder.insert(cloned);
   return cloned;
@@ -226,7 +229,7 @@ static LogicalResult splitCVModule(ModuleOp module) {
     return success();
   if (failed(verifyNoNestedSections(module)))
     return failure();
-  if (failed(verifyKernelFunctionsUseSections(module)))
+  if (failed(verifySectionSplitCandidatesUseSections(module)))
     return failure();
   if (failed(verifyUniqueSectionKindsPerFunction(module)))
     return failure();

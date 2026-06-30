@@ -14,10 +14,18 @@ import sys
 import numpy as np
 
 from cases import CASES
+import cases
 from st_common import result_cmp, style_fail, style_pass, validate_cases
 
 
-_STR_DTYPE_MAP = {"si16": np.int16}
+_STR_DTYPE_MAP = {
+    "si16": np.int16,
+    cases.F8E4M3: np.uint8,
+    cases.F8E5M2: np.uint8,
+    cases.HIF8: np.uint8,
+    cases.F4E1M2X2: np.uint8,
+    cases.F4E2M1X2: np.uint8,
+}
 
 def normalize_dtype(dtype):
     return _STR_DTYPE_MAP.get(dtype, dtype)
@@ -33,8 +41,8 @@ def main():
             continue
 
         case_dir = case["name"]
-        shape = case["shape"]
-        vr, vc = case["valid_shape"]
+        shape = case.get("dst_shape", case["shape"])
+        vr, vc = case.get("dst_valid_shape", case["valid_shape"])
         dst_dtype = case["dst_dtype"]
         dst_dtype = normalize_dtype(dst_dtype)
 

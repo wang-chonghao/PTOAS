@@ -107,6 +107,91 @@ for (int i = 2; i < N; i++)
 
 ---
 
+### `pto.vcbmax`
+
+- **syntax:** `%value, %predicate = pto.vcbmax %input, %mask : !pto.vreg<NxT>, !pto.mask<G> -> !pto.vreg<NxT>, !pto.mask<G>`
+- **A5 types:** i8-i32, f16, f32
+- **semantics:** Find the maximum value and produce a predicate marking every
+  participating lane whose value matches that maximum.
+
+```c
+T mx = max_active(src, mask);
+for (int i = 0; i < N; i++) {
+    value[i] = (i == 0) ? mx : 0;
+    predicate[i] = mask[i] && matches_max(src[i], mx);
+}
+```
+
+- **inputs:** `%input` is the source vector and `%mask` selects participating
+  lanes.
+- **outputs:** `%value[0]` holds the maximum and remaining value elements are
+  zero-filled. `%predicate` marks all active lanes matching the maximum.
+- **constraints and limitations:** If all lanes are inactive, `%predicate` is
+  all zero. Floating-point inactive lanes are treated as `-INF`; integer
+  inactive lanes are treated as the literal minimum value. For floating-point
+  `+0/-0`, the value result follows the target maximum rule while predicate
+  matching marks both zero signs as matching locations.
+
+---
+
+### `pto.vcbmin`
+
+- **syntax:** `%value, %predicate = pto.vcbmin %input, %mask : !pto.vreg<NxT>, !pto.mask<G> -> !pto.vreg<NxT>, !pto.mask<G>`
+- **A5 types:** i8-i32, f16, f32
+- **semantics:** Find the minimum value and produce a predicate marking every
+  participating lane whose value matches that minimum.
+
+```c
+T mn = min_active(src, mask);
+for (int i = 0; i < N; i++) {
+    value[i] = (i == 0) ? mn : 0;
+    predicate[i] = mask[i] && matches_min(src[i], mn);
+}
+```
+
+- **inputs:** `%input` is the source vector and `%mask` selects participating
+  lanes.
+- **outputs:** `%value[0]` holds the minimum and remaining value elements are
+  zero-filled. `%predicate` marks all active lanes matching the minimum.
+- **constraints and limitations:** If all lanes are inactive, `%predicate` is
+  all zero. Floating-point inactive lanes are treated as `+INF`; integer
+  inactive lanes are treated as the literal maximum value. Floating-point NaN
+  handling follows the target instruction semantics.
+
+---
+
+## Histogram Reductions
+
+### `pto.chistv2`
+
+- **syntax:** `%result = pto.chistv2 %acc, %source, %mask, %bin : !pto.vreg<128xui16>, !pto.vreg<256xui8>, !pto.mask<b8>, i32 -> !pto.vreg<128xui16>`
+- **semantics:** Cumulative histogram update over unsigned 8-bit source lanes.
+  `%acc` provides the incoming 16-bit bin accumulators and `%result` contains
+  the updated accumulators.
+- **inputs:** `%source` provides 256 unsigned 8-bit samples, `%mask` selects
+  active source lanes, and `%bin` is the target bin/control operand passed to
+  the A5 histogram instruction.
+- **constraints and limitations:** `%acc` and `%result` are fixed to
+  `!pto.vreg<128xui16>`, `%source` is fixed to `!pto.vreg<256xui8>`, and the
+  mask granularity is fixed to `b8`.
+
+---
+
+### `pto.dhistv2`
+
+- **syntax:** `%result = pto.dhistv2 %acc, %source, %mask, %bin : !pto.vreg<128xui16>, !pto.vreg<256xui8>, !pto.mask<b8>, i32 -> !pto.vreg<128xui16>`
+- **semantics:** Distribution histogram update over unsigned 8-bit source
+  lanes. `%acc` provides the incoming 16-bit bin accumulators and `%result`
+  contains the updated accumulators.
+- **inputs:** `%source` provides 256 unsigned 8-bit samples, `%mask` selects
+  active source lanes, and `%bin` is the target bin/control operand passed to
+  the A5 histogram instruction.
+- **constraints and limitations:** `%acc` and `%result` are fixed to
+  `!pto.vreg<128xui16>`, `%source` is fixed to `!pto.vreg<256xui8>`, and the
+  mask granularity is fixed to `b8`.
+
+---
+
 ## Per-VLane (Group) Reductions
 
 The vector register is organized as **8 VLanes** of 32 bytes each. Group reductions operate within each VLane independently.

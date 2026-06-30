@@ -31,6 +31,39 @@
 | `pto.bf16` | Brain float 16 | 16 |
 | `pto.f32` | Single precision float | 32 |
 
+### Low-Precision Types
+
+TileLang DSL v1 exposes low-precision element dtypes for storage and data
+movement surfaces. `f8e4m3` and `f8e5m2` are also supported as VPTO vreg and
+builtin-vector element types because the lower-level VPTO `!pto.vreg` verifier
+accepts MLIR FP8 element types.
+
+| DSL Type | Description | Storage Width |
+|----------|-------------|---------------|
+| `pto.hif8` | HiFloat8 format | 8 |
+| `pto.f8e4m3` | 8-bit float E4M3FN | 8 |
+| `pto.f8e5m2` | 8-bit float E5M2 | 8 |
+| `pto.f4e1m2x2` | Packed 4-bit float E1M2 pair | 8 |
+| `pto.f4e2m1x2` | Packed 4-bit float E2M1 pair | 8 |
+
+All of these dtypes may appear as `Tile`, `TensorView`,
+`PartitionTensorView`, and `pto.ptr(...)` element types. The lowered PTO IR
+preserves the target low-precision element type:
+
+```python
+src: pto.TensorView  # selected with dtypes=[(pto.f8e4m3, ...)]
+scratch = pto.Tile((8, 32), pto.hif8, pto.MemorySpace.UB)
+packed = pto.Tile((8, 32), pto.f4e2m1x2, pto.MemorySpace.UB)
+src_ptr = pto.ptr(pto.f8e4m3, pto.MemorySpace.UB)
+vec_ty = pto.vreg(pto.f8e4m3)  # !pto.vreg<256xf8E4M3FN>
+```
+
+Low-precision dtypes are not scalar element dtypes in DSL v1. For example,
+`pto.hif8(1.0)` and scalar parameter annotations such as `value: pto.f8e4m3`
+are rejected. `hif8` and packed FP4 types are also not accepted by
+`pto.vreg(...)` or `pto.vector(...)`; keep them on storage/ptr surfaces until
+an explicit conversion or reinterpret path is available.
+
 Python literals are automatically typed:
 - `bool` → `pto.i1`
 - `int` → Context-dependent (typically `pto.i32` or `pto.i64`)
@@ -150,7 +183,8 @@ lanes1 = pto.elements_per_vreg(pto.f32)  # 64
 ```
 
 Current TileLang DSL v1 vector lowering supports the 8/16/32-bit integer
-families (`i*`, `si*`, `ui*`) plus `f16`, `bf16`, and `f32` element types.
+families (`i*`, `si*`, `ui*`), `f16`, `bf16`, `f32`, and the MLIR FP8 dtypes
+`f8e4m3`/`f8e5m2`. `hif8` and packed FP4 types remain storage/ptr-only.
 
 ### Builtin Vector Type
 
@@ -326,6 +360,30 @@ TileLang uses three public buffer-facing type names in kernel signatures:
 | `pto.PartitionTensorView` | Logical GM partition (slice) descriptor, corresponding to `!pto.partition_tensor_view<...>` |
 | `pto.Tile` | Tile buffer value for hardware-resident staged compute/storage buffers |
 
+### View Layout Metadata
+
+TileLang DSL exposes a view-only config/query surface for matcher constraints:
+
+- `pto.ViewLayout`
+- `pto.ViewConfig`
+- `view.config.layout`
+
+Supported `ViewLayout` values:
+
+| Enum Value | Meaning |
+|------------|---------|
+| `pto.ViewLayout.ND` | ND-style view layout |
+| `pto.ViewLayout.DN` | DN-style view layout |
+| `pto.ViewLayout.NZ` | NZ-style view layout |
+| `pto.ViewLayout.MX_A_ZZ` | MX A-side scale layout |
+| `pto.ViewLayout.MX_B_NN` | MX B-side scale layout |
+
+Notes:
+- This is a view-only config surface; it is separate from `TileConfig`.
+- `layout` is optional. If the query carries no explicit layout metadata, then
+  `view.config.layout` is `None`.
+- This surface is primarily intended for template selection constraints.
+
 ### TensorView Types
 
 TensorView types represent multi-dimensional (up to 5D) views into tensors residing in Global Memory (GM). They are used as kernel parameters for describing GM data and support slicing operations to create logical partitions for DMA load/store operations.
@@ -363,7 +421,26 @@ Important notes:
 | `shape` | `tuple[int, ...]` | Tensor dimensions (supports up to 5 dimensions, right-aligned to 5D in PTO ISA) |
 | `element_type` | `Type` | Element data type (for example `pto.f32`, `pto.f16`) |
 | `strides` | `tuple[int, ...]` | Stride in elements for each dimension |
-| `offset` | `pto.i64` | Byte offset from base pointer (internal) |
+| `config` | `ViewConfig` | Optional view metadata surface used by matcher constraints |
+
+Current constraint-time `TensorView.config` query:
+
+```python
+@pto.vkernel(
+    target="a5",
+    op="pto.tload",
+    dtypes=[(pto.f32, pto.f32)],
+    constraints=[lambda src: src.config.layout == pto.ViewLayout.NZ],
+)
+def template_tload_nz(src: pto.TensorView, dst: pto.Tile):
+    return None
+```
+
+Rules:
+- `TensorView.config.layout` may be `None`
+- absent layout metadata must not be treated as implicit `ND`
+- use this surface for constraint-time layout selection and matcher dispatch,
+  not as a general runtime layout-computation API inside arbitrary kernel code
 
 #### Padding Mode Enum
 
@@ -448,7 +525,10 @@ Important notes:
 | `shape` | `tuple[int, ...]` | Partition dimensions |
 | `element_type` | `Type` | Element data type inherited from source tensor view |
 | `strides` | `tuple[int, ...]` | Stride in elements for each dimension |
-| `offset` | `pto.i64` | Byte offset from the base tensor pointer (internal) |
+| `config` | `ViewConfig` | Optional view metadata surface used by matcher constraints |
+
+`PartitionTensorView.config.layout` follows the same contract as
+`TensorView.config.layout`, including the same constraint-time usage model.
 
 ### Tile Types
 

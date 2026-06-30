@@ -73,7 +73,9 @@ def generate(output_dir: Path) -> None:
     c_hif8 = np.zeros((M, N), dtype=np.float32)
     c_fp8 = np.zeros((M, N), dtype=np.float32)
 
-    golden_hif8 = (a_unit @ b_unit).astype(np.float32) * np.float32(128.0)
+    # In hif8 MAD mode, the A5 simulator maps the 0x40/0xC0 test codes to
+    # products scaled by 256.
+    golden_hif8 = (a_unit @ b_unit).astype(np.float32) * np.float32(256.0)
     a_fp8 = fp8_e4m3_to_f32(a_logical)
     b_fp8 = fp8_e4m3_to_f32(b_logical)
     golden_fp8 = (a_fp8 @ b_fp8).astype(np.float32)

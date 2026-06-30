@@ -101,6 +101,53 @@ scalar.store(value, tile[row, col])
 scalar.store(value, ptr, offset)
 ```
 
+### Scalar value adaptation
+
+`scalar.store` adapts the authored `value` to the destination element type.
+Use this for normal scalar stores instead of manually materializing constants
+with a particular MLIR type.
+
+The adaptation rules are intentionally narrow:
+
+| Destination element type | Accepted values |
+|--------------------------|-----------------|
+| `index` | Python `int`, runtime `index`, runtime integer |
+| Integer types | Python `int`, runtime integer, runtime `index` |
+| Floating-point types | Python `int`/`float`, runtime float of the same format or a different width |
+
+Integer and `index` values are converted with `index_cast` where needed.
+Integer width changes use the destination type's signedness. Floating-point
+width changes use `extf` or `truncf`.
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.value_adaptation","symbol":"scalar_ops_value_adaptation_probe","compile":{}} -->
+```python
+int_ptr = int_tile.as_ptr()
+row = pto.const(0, dtype=pto.index)
+wide_count = pto.const(4, dtype=pto.i64)
+
+scalar.store(row, int_ptr + 0)          # runtime index -> i32 destination
+scalar.store(wide_count, int_ptr + 1)   # i64 -> i32 destination
+scalar.store(3, int_ptr + 2)            # Python int -> i32 destination
+
+half_value = scalar.load(f16_tile[0, 0])
+scalar.store(1.0, f32_tile[0, 0])       # Python float -> f32 destination
+scalar.store(half_value, f32_tile[0, 1]) # f16 -> f32 destination
+```
+
+The following conversions are not implicit:
+
+- Python `bool` is not accepted as a normal integer or index value.
+- A Python `float` literal is rejected for `index` and integer destinations.
+- Runtime floating-point values are rejected for `index` and integer
+  destinations.
+- Runtime `index` and integer values are rejected for floating-point
+  destinations.
+- `f16` and `bf16` are different formats even though both are 16-bit; PTODSL
+  does not silently reinterpret one as the other.
+
+Use an explicit conversion operation when you need a semantic numeric
+conversion, or a bitcast operation when you need bit reinterpretation.
+
 ---
 
 ### Typical SIMT usage
@@ -116,10 +163,10 @@ def blend_output_rows(
     o_next_tile: pto.Tile,
     row_start: pto.i32, row_stop: pto.i32, valid_dim: pto.i32,
 ):
-    with pto.for_(row_start, row_stop, step=1) as row:
+    for row in range(row_start, row_stop, 1):
         alpha = scalar.load(alpha_tile[row, 0])
         beta = scalar.load(beta_tile[row, 0])
-        with pto.for_(0, valid_dim, step=1) as col:
+        for col in range(0, valid_dim, 1):
             o_prev = scalar.load(o_prev_tile[row, col])
             pv_val = scalar.load(pv_tile[row, col])
             o_next = alpha * o_prev + beta * pv_val
@@ -166,9 +213,31 @@ step = (N + BLOCK - 1) // BLOCK               # Python int arithmetic (trace-tim
 
 When both operands are PTO scalars (loaded from device memory or produced by another device-side op), `+`, `-`, `*`, `/` produce device-side arithmetic instructions. When one operand is a Python scalar (trace-time constant), the tracer embeds it as an immediate.
 
+Runtime scalar binary operators materialize Python literals against the other
+operand's type. `index` mixed with an integer runtime scalar stays in the
+`index` domain. Integer mixed with integer uses the wider integer type. Float
+operators require floating-point operands; Python float literals are not
+accepted in runtime `index` or integer expressions.
+
+### Bitwise operators
+
+PTO integer scalars support Python bitwise operators `&`, `|`, and `^`. Runtime `index` values, such as loop induction variables produced by `pto.for_` or by AST-rewritten `for range(...)` loops, also support these operators for low-bit masks and parity checks.
+
+The common use case is double-buffering or flag-slot selection:
+
+- `i & 1` selects an alternating slot from a runtime loop index.
+- The result of an `index` bitwise expression remains index-like, so it can be passed to APIs that accept runtime index values, such as dynamic synchronization `event_id`.
+
+For fixed-width bit manipulation where the exact integer width matters, cast to an explicit integer type first and keep the expression in that integer domain.
+
 ### Math functions: `scalar.*`
 
 Non-trivial scalar math functions live under the top-level `scalar` namespace (imported as `from ptodsl import scalar`). They are intentionally separate from the `pto.*` namespace:
+
+Use the `scalar.*` helpers for device-side runtime math. Python built-ins such
+as `max(...)`, `min(...)`, and `abs(...)` run at trace time and are only
+correct for plain Python values. When the operands are PTO runtime scalars,
+write `scalar.max(a, b)`, `scalar.min(a, b)`, and `scalar.abs(x)` explicitly.
 
 #### `scalar.max(a: ScalarType, b: ScalarType) -> ScalarType`
 
@@ -280,6 +349,11 @@ ptr = pto.addptr(base_ptr, 1024)
 
 The `+` shorthand on pointers also counts in elements, not bytes.
 
+Pointer offsets are index-like. They accept Python `int`, runtime `index`, and
+runtime integer scalar values. Runtime integer offsets are converted to
+`index` before pointer arithmetic. Python `bool`, Python `float`, and runtime
+floating-point values are rejected.
+
 ---
 
 #### `pto.castptr(address: Index, ptr_type: Type) -> PtrType`
@@ -367,13 +441,13 @@ This is the standard stride for chunking column loops in SIMD kernels:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.chunk_loop","symbol":"scalar_ops_chunk_loop_probe","compile":{"BLOCK":128}} -->
 ```python
 VEC = pto.elements_per_vreg(pto.f32)
-with pto.for_(0, cols, step=VEC) as c:
+for c in range(0, cols, VEC):
     ...
 ```
 
 ## 6.6 Per-element tile traversal in @pto.simt
 
-`@pto.simt` kernels are the natural home for per-element scalar work. A typical pattern uses nested `pto.for_` loops to walk over a tile row by row, column by column:
+`@pto.simt` kernels are the natural home for per-element scalar work. A typical pattern uses nested Python `for range(...)` loops to walk over a tile row by row, column by column; the default AST rewrite lowers them to runtime loops:
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"scalar_ops.simt_scale","symbol":"scalar_ops_simt_scale_probe","compile":{"BLOCK":8}} -->
 ```python
@@ -385,8 +459,8 @@ def elementwise_scale(
     rows: pto.i32,
     cols: pto.i32,
 ):
-    with pto.for_(0, rows, step=1) as r:
-        with pto.for_(0, cols, step=1) as c:
+    for r in range(0, rows, 1):
+        for c in range(0, cols, 1):
             val = scalar.load(src_tile[r, c])
             scaled = val * scale
             scalar.store(scaled, dst_tile[r, c])
@@ -408,10 +482,10 @@ def blend_with_per_row_coeffs(
     rows: pto.i32,
     cols: pto.i32,
 ):
-    with pto.for_(0, rows, step=1) as r:
+    for r in range(0, rows, 1):
         alpha = scalar.load(alpha_tile[r, 0])   # read once per row
         beta = scalar.load(beta_tile[r, 0])     # read once per row
-        with pto.for_(0, cols, step=1) as c:
+        for c in range(0, cols, 1):
             o_prev = scalar.load(o_prev_tile[r, c])
             pv_val = scalar.load(pv_tile[r, c])
             o_next = alpha * o_prev + beta * pv_val

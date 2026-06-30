@@ -1,6 +1,6 @@
 # 4. Type System and Buffer Management
 
-This chapter covers every type you can use in a PTODSL kernel, plus the operations for managing buffers in global memory (GM) and on-chip Unified Buffer (UB).
+This chapter covers every type you can use in a PTODSL kernel, plus the operations for allocating, managing, and reinterpreting buffers in global memory (GM) and on-chip Unified Buffer (UB).
 
 ## 4.1 Scalar types
 
@@ -25,7 +25,7 @@ This chapter covers every type you can use in a PTODSL kernel, plus the operatio
 | `pto.bf16` | Brain float 16 | 16 |
 | `pto.f32` | Single-precision float | 32 |
 
-Python literals are automatically typed by the tracer: `bool` → `pto.i1`, `int` → context-dependent (typically `pto.i32` or `pto.i64`), `float` → `pto.f32`.
+Python literals are typed by the tracer in contexts that accept them: `bool` → `pto.i1`, `int` → context-dependent (typically `pto.i32`, `pto.i64`, or `index`), `float` → a floating-point type. This does not mean every literal is accepted everywhere; for example, float literals are rejected in index-like and integer-only contexts.
 
 For explicit typing, use type constructors:
 
@@ -36,9 +36,11 @@ y = pto.ui16(7)
 z: pto.i32 = 1024
 ```
 
-### Low-precision types (storage only)
+### Low-precision types
 
-The following types are **storage-only**: they may only appear as element types when constructing `Tile`, `TensorView`, and `PartitionTensorView` values for storage and data movement. They **cannot** be used to construct scalars, vectors, pointers, or `tensor_spec(...)` ABI contracts. Use them to reduce memory bandwidth; convert to a compute-capable type before arithmetic.
+The following low-precision types may appear as element types for device storage and vector memory movement: `Tile`, `TensorView`, `PartitionTensorView`, `pto.ptr(...)`, and `pto.vreg_type(...)`. Use them to reduce memory bandwidth; convert to a compute-capable type before arithmetic unless the operation explicitly supports that low-precision format.
+
+Low-precision `VRegType` values are valid intermediate payloads, but they are not generic vector-arithmetic types. In practice, use them on explicit memory/conversion paths such as `vlds`, `vsts`, `vcvt`, `vmulscvt`, and `vpack`, then convert to a compute-capable type before feeding the value to generic vector compute ops.
 
 | DSL Type | Description |
 |----------|-------------|
@@ -48,15 +50,17 @@ The following types are **storage-only**: they may only appear as element types 
 | `pto.f8e4m3` | 8-bit float (E4M3) |
 | `pto.f8e5m2` | 8-bit float (E5M2) |
 
-These types can be used when constructing on-chip tiles and view descriptors:
+These types can be used when constructing on-chip tiles, view descriptors, UB pointers, and vector register types:
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.low_precision_types","symbol":"type_system_low_precision_types_probe","compile":{}} -->
 ```python
 lp_tile = pto.alloc_tile(shape=[128, 64], dtype=pto.f8e4m3)
 fp4_tile = pto.alloc_tile(shape=[64, 32], dtype=pto.f4e2m1x2)
+lp_ptr = pto.castptr(pto.const(0, dtype=pto.ui64), pto.ptr(pto.f8e4m3, "ub"))
+lp_vreg_ty = pto.vreg_type(256, pto.f8e4m3)
 ```
 
-Constructing a scalar, vector, pointer, or host tensor ABI contract with a low-precision type is **not supported** — `pto.f8e4m3(1.0)`, `pto.vreg_type(64, pto.f8e4m3)`, `pto.ptr(pto.f8e4m3)`, and `pto.tensor_spec(rank=2, dtype=pto.f8e4m3)` will raise an error. Load data as the storage type, then convert to a compute-capable type before arithmetic.
+Constructing scalar eager values or host tensor ABI contracts with a low-precision type is **not supported** — `pto.f8e4m3(1.0)` and `pto.tensor_spec(rank=2, dtype=pto.f8e4m3)` will raise an error.
 
 ### Integer literal guidance
 
@@ -183,7 +187,7 @@ def kernel(
     rows: pto.i32,
     cols: pto.i32,
     *,
-    BLOCK: pto.constexpr = 128,
+    BLOCK: pto.const_expr = 128,
 ):
     tv = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
     return
@@ -245,6 +249,11 @@ For packed types (`pto.f4e1m2x2`, `pto.f4e2m1x2`), `shape` dimensions refer to t
 | `memory_space` | `MemorySpace` | Where the tile lives (UB, LEFT, RIGHT, ACC, BIAS) |
 | `valid_shape` | `tuple[int, ...]` | Logical data region, ≤ `shape` in each dimension |
 
+`valid_shape` is mutable. PTODSL uses this to describe runtime tails without
+changing the physical tile allocation. A common pattern is to allocate one
+full-size tile per block shape, then update `tile.valid_shape = [...]` before
+each sub-kernel or Tile Op call so the live region matches the current tail.
+
 ### Tile methods
 
 | Method | Description |
@@ -263,4 +272,61 @@ meta_tile.valid_shape = [pto.const(1), pto.const(2)]
 tail_tile.valid_shape = [rows]
 
 meta_ptr = meta_tile.as_ptr()
+```
+
+When the live region is compile-time known, direct Python integers and
+`pto.const(...)` both work. When the live region depends on runtime metadata,
+assign PTO scalar values directly with `tile.valid_shape = [rows, cols]`.
+
+## 4.8 Tile Reinterpretation
+
+`pto.tile.reshape` reinterprets a tile buffer with a new shape or layout without any data movement. It is a zero-cost buffer reinterpretation on the Unified Buffer: the underlying bytes are unchanged and PTODSL returns a new tile handle with the requested result type metadata. No destination tile allocation is needed; the result is returned directly.
+
+#### `pto.tile.reshape(src: Tile, *, shape: tuple[int, ...], dtype: DType | None = None, blayout: str | None = None) -> Tile`
+
+**Description**: Returns a reinterpreted tile handle for `src` with the given `shape`, element type, and buffer layout. The total byte size of the new shape must equal the total byte size of `src`. This is a buffer reinterpretation only — no data is copied or moved.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `src` | `Tile` | Source tile to reinterpret |
+| `shape` | `tuple[int, ...]` | Target shape. `numel(shape) × elem_size` must equal the total bytes of `src` |
+| `dtype` | `DType` or `None` | Target element type (default: `None` — keep the source dtype) |
+| `blayout` | `str` or `None` | Target buffer layout, e.g. `"RowMajor"` or `"ColMajor"` (default: `None` — PTODSL authors a row-major result layout) |
+
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| `dst` | `Tile` | A tile that reinterprets `src`'s buffer with the new shape, dtype, and layout |
+
+**Constraints**:
+
+- **Total byte size must match**: `numel(shape) × sizeof(dst_elem) == numel(src.shape) × sizeof(src_elem)`.
+- **No boxed/non-boxed conversion**: cannot reshape between non-boxed layouts and boxed layouts. The layout family must stay the same.
+- **Memory space is preserved**: the returned tile shares the same memory space as `src` (typically UB).
+- **Result valid-shape metadata is not remapped from `src`**: the current PTODSL surface does not preserve or infer a reshaped logical `valid_shape`. If later code depends on `tile.valid_shape`, treat the reshape result as carrying only the result type's own valid-dim metadata.
+- **Hardware mapping**: executes on the **Vector pipeline** (`PIPE_V`).
+
+**Example** — reshape a 2D tile into 1D to avoid layout constraints during element-wise processing:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.tile_reshape","symbol":"type_system_tile_reshape_probe","compile":{"BR":8,"BC":64}} -->
+```python
+# Allocate source tile (2D, row-major)
+tile_2d = pto.alloc_tile(shape=[BR, BC], dtype=pto.f32)
+
+# Reinterpret 2D → 1D (zero-cost, no data movement)
+tile_1d = pto.tile.reshape(tile_2d, shape=[BR * BC])
+```
+
+**Example** — reinterpret a row-reduced tile `[BR, 1]` as a column-major tile for broadcast loads:
+
+<!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"type_system.tile_reshape","symbol":"type_system_tile_reshape_probe","compile":{"BR":8,"BC":64}} -->
+```python
+# Source: row-reduced tile authored with a column-major physical layout
+reduce_tile = pto.alloc_tile(shape=[BR, 1], dtype=pto.f32, valid_shape=[BR, 1], blayout="ColMajor")
+
+# Reinterpret as ColMajor layout (same shape, different layout)
+reduce_col = pto.tile.reshape(reduce_tile, shape=[BR, 1], blayout="ColMajor")
 ```

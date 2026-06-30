@@ -17,6 +17,14 @@ extern "C" __global__ AICORE void TCVT_f32_to_i32_round_16x64(__gm__ float *src,
 extern "C" __global__ AICORE void TCVT_i32_to_f32_rint_16x64(__gm__ int32_t *src, __gm__ float *dst);
 extern "C" __global__ AICORE void TCVT_f32_to_f16_rint_16x64(__gm__ float *src, __gm__ uint16_t *dst);
 extern "C" __global__ AICORE void TCVT_f16_to_f32_rint_16x64(__gm__ uint16_t *src, __gm__ float *dst);
+extern "C" __global__ AICORE void TCVT_f32_to_f8e4m3_16x64(__gm__ float *src, __gm__ float8_e4m3_t *dst);
+extern "C" __global__ AICORE void TCVT_f32_to_f8e5m2_16x64(__gm__ float *src, __gm__ float8_e5m2_t *dst);
+extern "C" __global__ AICORE void TCVT_f32_to_hif8_16x64(__gm__ float *src, __gm__ hifloat8_t *dst);
+extern "C" __global__ AICORE void TCVT_f16_to_hif8_16x64(__gm__ uint16_t *src, __gm__ hifloat8_t *dst);
+extern "C" __global__ AICORE void TCVT_bf16_to_f4e1m2x2_16x64_to_16x32(__gm__ uint16_t *src, __gm__ float4_e1m2x2_t *dst);
+extern "C" __global__ AICORE void TCVT_bf16_to_f4e2m1x2_16x64_to_16x32(__gm__ uint16_t *src, __gm__ float4_e2m1x2_t *dst);
+extern "C" __global__ AICORE void TCVT_f32_to_f8e4m3_4x96(__gm__ float *src, __gm__ float8_e4m3_t *dst);
+extern "C" __global__ AICORE void TCVT_f32_to_hif8_4x96(__gm__ float *src, __gm__ hifloat8_t *dst);
 extern "C" __global__ AICORE void TCVT_f32_to_f16_1x128(__gm__ float *src, __gm__ uint16_t *dst);
 extern "C" __global__ AICORE void TCVT_f32_to_f16_2x64(__gm__ float *src, __gm__ uint16_t *dst);
 extern "C" __global__ AICORE void TCVT_f32_to_f16_4x32(__gm__ float *src, __gm__ uint16_t *dst);
@@ -274,6 +282,38 @@ void LaunchTCVT_f32_to_f16_rint_16x64(void *src, void *dst, void *stream) {
 
 void LaunchTCVT_f16_to_f32_rint_16x64(void *src, void *dst, void *stream) {
     TCVT_f16_to_f32_rint_16x64<<<1, nullptr, stream>>>((__gm__ uint16_t *)src, (__gm__ float *)dst);
+}
+
+void LaunchTCVT_f32_to_f8e4m3_16x64(void *src, void *dst, void *stream) {
+    TCVT_f32_to_f8e4m3_16x64<<<1, nullptr, stream>>>((__gm__ float *)src, (__gm__ float8_e4m3_t *)dst);
+}
+
+void LaunchTCVT_f32_to_f8e5m2_16x64(void *src, void *dst, void *stream) {
+    TCVT_f32_to_f8e5m2_16x64<<<1, nullptr, stream>>>((__gm__ float *)src, (__gm__ float8_e5m2_t *)dst);
+}
+
+void LaunchTCVT_f32_to_hif8_16x64(void *src, void *dst, void *stream) {
+    TCVT_f32_to_hif8_16x64<<<1, nullptr, stream>>>((__gm__ float *)src, (__gm__ hifloat8_t *)dst);
+}
+
+void LaunchTCVT_f16_to_hif8_16x64(void *src, void *dst, void *stream) {
+    TCVT_f16_to_hif8_16x64<<<1, nullptr, stream>>>((__gm__ uint16_t *)src, (__gm__ hifloat8_t *)dst);
+}
+
+void LaunchTCVT_bf16_to_f4e1m2x2_16x64_to_16x32(void *src, void *dst, void *stream) {
+    TCVT_bf16_to_f4e1m2x2_16x64_to_16x32<<<1, nullptr, stream>>>((__gm__ uint16_t *)src, (__gm__ float4_e1m2x2_t *)dst);
+}
+
+void LaunchTCVT_bf16_to_f4e2m1x2_16x64_to_16x32(void *src, void *dst, void *stream) {
+    TCVT_bf16_to_f4e2m1x2_16x64_to_16x32<<<1, nullptr, stream>>>((__gm__ uint16_t *)src, (__gm__ float4_e2m1x2_t *)dst);
+}
+
+void LaunchTCVT_f32_to_f8e4m3_4x96(void *src, void *dst, void *stream) {
+    TCVT_f32_to_f8e4m3_4x96<<<1, nullptr, stream>>>((__gm__ float *)src, (__gm__ float8_e4m3_t *)dst);
+}
+
+void LaunchTCVT_f32_to_hif8_4x96(void *src, void *dst, void *stream) {
+    TCVT_f32_to_hif8_4x96<<<1, nullptr, stream>>>((__gm__ float *)src, (__gm__ hifloat8_t *)dst);
 }
 
 void LaunchTCVT_f32_to_f16_1x128(void *src, void *dst, void *stream) {

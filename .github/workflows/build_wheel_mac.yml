@@ -29,15 +29,18 @@ env:
 
 jobs:
   build_wheel:
-    # Wheel publication is paused, but this job still builds and uploads the
-    # packaged ptoas binary distribution.
-    name: Build ptoas-bin (macOS ${{ matrix.arch }})
+    # Non-release runs keep a single-Python matrix for faster gates;
+    # release/nightly runs fan out to publish the full wheel set plus binary artifacts.
+    name: Build ptoas-bin (macOS ${{ matrix.arch }}, py${{ matrix.python }})
     runs-on: ${{ matrix.arch == 'x86_64' && 'macos-15-intel' || 'macos-26' }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11"]
+        python: ${{ fromJson((github.event_name == 'release' || github.event_name == 'schedule') && '["3.10","3.11","3.12"]' || '["3.11"]') }}
         arch: ["x86_64", "aarch64"]
+        exclude:
+          - python: "3.10"
+            arch: "x86_64"
 
     steps:
       - name: Checkout repository
@@ -161,7 +164,7 @@ jobs:
           pip install . --no-build-isolation
 
       - name: Create Python wheel
-        if: false
+        if: github.event_name == 'release' || github.event_name == 'schedule'
         run: |
           export PTO_WHEEL_DIST_DIR=$PTO_SOURCE_DIR/build/wheel-dist
           export PTOAS_PYTHON_PACKAGE_VERSION="${PTOAS_VERSION}"
@@ -181,7 +184,7 @@ jobs:
           fi
 
       - name: Repair wheel with delocate
-        if: false
+        if: github.event_name == 'release' || github.event_name == 'schedule'
         run: |
           set -euo pipefail
           export PTO_WHEEL_DIST_DIR=$PTO_SOURCE_DIR/build/wheel-dist
@@ -257,7 +260,7 @@ jobs:
           ls -lh "$PTO_WHEELHOUSE"
 
       - name: Test wheel installation
-        if: false
+        if: github.event_name == 'release' || github.event_name == 'schedule'
         run: |
           pip install $GITHUB_WORKSPACE/wheelhouse/ptoas*.whl
           export DYLD_LIBRARY_PATH=$LLVM_BUILD_DIR/lib:$PTO_INSTALL_DIR/lib:${DYLD_LIBRARY_PATH}
@@ -268,32 +271,27 @@ jobs:
           export DYLD_LIBRARY_PATH=$LLVM_BUILD_DIR/lib:$PTO_INSTALL_DIR/lib:${DYLD_LIBRARY_PATH}
           bash $PTO_SOURCE_DIR/docker/test_ptoas_cli.sh
 
-      - name: Copy wheel to workspace
-        if: false
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/wheelhouse
-          if ! compgen -G "$GITHUB_WORKSPACE/wheelhouse/ptoas*.whl" >/dev/null; then
-            cp $PTO_SOURCE_DIR/build/wheel-dist/ptoas*.whl $GITHUB_WORKSPACE/wheelhouse/
-          fi
-
       - name: Upload wheel artifact
-        if: false
+        if: github.event_name == 'release' || github.event_name == 'schedule'
         uses: actions/upload-artifact@v4
         with:
           name: ptoas-wheel-macos-py${{ matrix.python }}-${{ matrix.arch }}
           path: wheelhouse/*.whl
 
       - name: Collect ptoas binary and dependencies
+        if: matrix.python == '3.11'
         run: |
           bash "$PTO_SOURCE_DIR/docker/collect_ptoas_dist_mac.sh" "$GITHUB_WORKSPACE/ptoas-dist"
 
       - name: Archive ptoas binary artifact
+        if: matrix.python == '3.11'
         run: |
           chmod +x "$GITHUB_WORKSPACE/ptoas-dist/ptoas" "$GITHUB_WORKSPACE/ptoas-dist/bin/ptoas"
           tar -czf "$GITHUB_WORKSPACE/ptoas-bin-macos-${{ matrix.arch }}.tar.gz" \
             -C "$GITHUB_WORKSPACE/ptoas-dist" .
 
       - name: Smoke test archived ptoas binary artifact
+        if: matrix.python == '3.11'
         run: |
           TEST_DIR="$RUNNER_TEMP/ptoas-dist-smoke-${{ matrix.arch }}"
           rm -rf "$TEST_DIR"
@@ -311,7 +309,7 @@ jobs:
             >/dev/null
 
       - name: Smoke test wheel imports after collecting artifacts
-        if: false
+        if: (github.event_name == 'release' || github.event_name == 'schedule') && matrix.python == '3.11'
         run: |
           # Test the copied wheel artifact from an isolated env with no build-tree
           # paths, so post-collect/release regressions (e.g. ARM cs_invalid_page)
@@ -347,15 +345,15 @@ jobs:
           fi
 
       - name: Upload ptoas binary artifact
+        if: matrix.python == '3.11'
         uses: actions/upload-artifact@v4
         with:
           name: ptoas-bin-macos-${{ matrix.arch }}
           path: ptoas-bin-macos-${{ matrix.arch }}.tar.gz
 
   upload_release_assets:
-    # Disabled together with build_wheel because wheel publication is paused.
-    if: false
     name: Upload release assets
+    if: github.event_name == 'release' || github.event_name == 'schedule'
     needs: build_wheel
     runs-on: ubuntu-latest
 

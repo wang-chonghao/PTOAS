@@ -334,6 +334,25 @@ def HiF8Type : TypeDef<PTO_Dialect, "HiF8", [
   let summary = "Ascend A5 HiFloat8 (8-bit, 1 byte per element).";
 }
 
+// ---- !pto.f8E8M0 ---- Corresponding type name: float8_e8m0_t (1 byte)
+def F8E8M0Type : TypeDef<PTO_Dialect, "F8E8M0", [
+    MemRefElementTypeInterface,
+    DeclareTypeInterfaceMethods<DataLayoutTypeInterface,
+      ["getTypeSizeInBits", "getABIAlignment", "getPreferredAlignment"]>
+]> {
+  let mnemonic = "f8E8M0";
+  let summary = "Ascend A5 MX exponent/scale payload (8-bit E8M0, 1 byte per element).";
+}
+
+// ---- !pto.hif8x2 ---- Corresponding type name: hifloat8x2_t (2 bytes)
+def HiF8x2Type : TypeDef<PTO_Dialect, "HiF8x2", [
+    DeclareTypeInterfaceMethods<DataLayoutTypeInterface,
+      ["getTypeSizeInBits", "getABIAlignment", "getPreferredAlignment"]>
+]> {
+  let mnemonic = "hif8x2";
+  let summary = "Packed pair of Ascend A5 HiFloat8 values (2 bytes).";
+}
+
 // ---- !pto.f4E1M2x2 ---- Corresponding type name: float4_e1m2x2_t (1 byte = 2 FP4 packed)
 def F4E1M2x2Type : TypeDef<PTO_Dialect, "F4E1M2x2", [
     MemRefElementTypeInterface,

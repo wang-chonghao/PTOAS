@@ -48,6 +48,130 @@ LogicalResult validateVPTOEmissionIR(ModuleOp module,
 
 namespace detail {
 
+static Operation *getFirstNonConstantLikeOp(Block *block) {
+  if (!block)
+    return nullptr;
+  for (Operation &op : *block) {
+    if (!op.hasTrait<OpTrait::ConstantLike>())
+      return &op;
+  }
+  return nullptr;
+}
+
+static bool isOpInRange(Operation *op, Operation *first, Operation *last) {
+  for (Operation *cur = first; cur; cur = cur->getNextNode()) {
+    if (cur == op)
+      return true;
+    if (cur == last)
+      return false;
+  }
+  return false;
+}
+
+static constexpr int64_t kSimtKeepResumeSlotLimit = 123;
+
+static std::optional<unsigned> getSimtKeepResumeRegisterCount(Type type) {
+  if (auto intType = dyn_cast<IntegerType>(type)) {
+    if (intType.getWidth() <= 32)
+      return 1;
+    if (intType.getWidth() == 64)
+      return 2;
+    return std::nullopt;
+  }
+  if (type.isF16() || type.isBF16() || type.isF32())
+    return 1;
+  return std::nullopt;
+}
+
+template <typename OpT>
+static Type getSimtKeepResumeValueType(OpT op);
+
+template <>
+Type getSimtKeepResumeValueType(KeepOp op) {
+  return op.getPayload().getType();
+}
+
+template <>
+Type getSimtKeepResumeValueType(ResumeOp op) {
+  return op.getResult().getType();
+}
+
+template <typename OpT>
+static LogicalResult verifySimtKeepResumeSlotRange(OpT op) {
+  std::optional<unsigned> registerCount =
+      getSimtKeepResumeRegisterCount(getSimtKeepResumeValueType(op));
+  if (!registerCount)
+    return success();
+  int64_t slot = op.getSlot();
+  if (slot < 0 || slot >= kSimtKeepResumeSlotLimit)
+    return op.emitOpError()
+           << "requires slot in range [0, "
+           << (kSimtKeepResumeSlotLimit - 1) << "]";
+  if (*registerCount == 2) {
+    if ((slot % 2) != 0)
+      return op.emitOpError()
+             << "requires an even slot for 64-bit keep/resume values";
+    if (slot + 1 >= kSimtKeepResumeSlotLimit)
+      return op.emitOpError()
+             << "requires slot in range [0, "
+             << (kSimtKeepResumeSlotLimit - 2)
+             << "] for 64-bit keep/resume values";
+  }
+  return success();
+}
+
+template <typename OpT>
+static bool overlapsEarlierSimtKeepResumeSlotUse(OpT op,
+                                                 SmallVectorImpl<int64_t> &used) {
+  std::optional<unsigned> registerCount =
+      getSimtKeepResumeRegisterCount(getSimtKeepResumeValueType(op));
+  if (!registerCount)
+    return false;
+  int64_t slot = op.getSlot();
+  for (int64_t word = slot; word < slot + *registerCount; ++word) {
+    if (llvm::is_contained(used, word))
+      return true;
+  }
+  for (int64_t word = slot; word < slot + *registerCount; ++word)
+    used.push_back(word);
+  return false;
+}
+
+static LogicalResult verifyUniqueResumeGroupSlots(ResumeOp current,
+                                                  Operation *first) {
+  SmallVector<int64_t, 4> slots;
+  for (Operation *cur = first; cur; cur = cur->getNextNode()) {
+    auto resume = dyn_cast<ResumeOp>(cur);
+    if (!resume)
+      break;
+    if (overlapsEarlierSimtKeepResumeSlotUse(resume, slots) &&
+        resume.getOperation() == current.getOperation())
+      return current.emitOpError()
+             << "duplicates an earlier slot " << resume.getSlot()
+             << " in the SIMT resume prologue group";
+  }
+  return success();
+}
+
+static LogicalResult verifyUniqueKeepGroupSlots(KeepOp current,
+                                                Operation *first,
+                                                Operation *last) {
+  SmallVector<int64_t, 4> slots;
+  for (Operation *cur = first; cur; cur = cur->getNextNode()) {
+    auto keep = dyn_cast<KeepOp>(cur);
+    if (!keep)
+      break;
+    if (overlapsEarlierSimtKeepResumeSlotUse(keep, slots) &&
+        keep.getOperation() == current.getOperation())
+      return current.emitOpError()
+             << "duplicates an earlier slot " << keep.getSlot()
+             << " in the SIMT keep epilogue group";
+    if (cur == last)
+      break;
+  }
+  return success();
+}
+
 constexpr llvm::StringLiteral kAIVectorScopeAttrName =
     "llvm.loop.aivector_scope";
 
@@ -199,8 +323,8 @@ public:
             CopyCbufToUbufOp, CopyUbufToCbufOp>(op))
       return VPTOBufferAddressFamily::Copy;
 
-    if (isa<VldsPostOp, VstsPostOp, VldasOp, VldusOp, PstuOp, VstusOp, VsturOp,
-            MadOp, MadMxOp, CopyGmToCbufOp, LoadCbufToCaOp,
+    if (isa<VldasOp, VldusOp, PstuOp, VstusOp, VsturOp, MadOp, MadMxOp,
+            CopyGmToCbufOp, LoadCbufToCaOp,
             LoadCbufToCbOp, CopyMatrixCcToGmOp>(op))
       return VPTOBufferAddressFamily::PtrOnly;
 
@@ -323,8 +447,6 @@ private:
     Value value;
     if (auto vsts = dyn_cast<VstsOp>(op))
       value = vsts.getValue();
-    else if (auto vstsPost = dyn_cast<VstsPostOp>(op))
-      value = vstsPost.getValue();
     else
       return std::nullopt;
 
@@ -450,8 +572,7 @@ private:
 
   template <typename OpTy>
   static LogicalResult validateValueMaskVectorConsumer(OpTy op) {
-    if constexpr (std::is_same_v<OpTy, VstsOp> ||
-                  std::is_same_v<OpTy, VstsPostOp>) {
+    if constexpr (std::is_same_v<OpTy, VstsOp>) {
       if (std::optional<VPTOMaskGranularity> expected =
               inferVstsMaskGranularityOverride(op.getOperation())) {
         auto actual =
@@ -487,10 +608,6 @@ private:
 
     if (auto vsts = dyn_cast<VstsOp>(op)) {
       emitForStore(vsts);
-      return;
-    }
-    if (auto vstsPost = dyn_cast<VstsPostOp>(op)) {
-      emitForStore(vstsPost);
       return;
     }
   }
@@ -672,8 +789,8 @@ private:
             [](auto concreteOp) {
               return validateInputMaskVectorConsumer(concreteOp);
             })
-        .Case<VaddOp, VsubOp, VmulOp, VdivOp, VmaxOp, VminOp, VandOp, VorOp,
-              VxorOp, VshlOp, VshrOp>([](auto concreteOp) {
+        .Case<VaddOp, VsubOp, VmulOp, VdivOp, VmaxOp, VminOp, VandOp,
+              VorOp, VxorOp, VshlOp, VshrOp>([](auto concreteOp) {
           return validateBinaryMaskVectorConsumer(concreteOp);
         })
         .Case<VaddcOp, VsubcOp, VaddcsOp, VsubcsOp>([](auto concreteOp) {
@@ -711,7 +828,7 @@ private:
         .Case<Vgather2BcOp, VsldbOp>([](auto concreteOp) {
           return validateResultMaskVectorConsumer(concreteOp);
         })
-        .Case<VstsOp, VstsPostOp, VsstbOp>([](auto concreteOp) {
+        .Case<VstsOp, VsstbOp>([](auto concreteOp) {
           return validateValueMaskVectorConsumer(concreteOp);
         })
         .Case<Vstsx2Op>([](Vstsx2Op concreteOp) {
@@ -733,6 +850,43 @@ private:
 
   LogicalResult validateAuthoringFunctionSurface() {
     for (func::FuncOp func : helper.getFunctions()) {
+      auto validatePositiveI32FuncAttr =
+          [&](StringRef attrName, int64_t upperBound,
+              StringRef description) -> LogicalResult {
+        Attribute attr = func->getAttr(attrName);
+        if (!attr)
+          return success();
+
+        auto intAttr = dyn_cast<IntegerAttr>(attr);
+        if (!intAttr || !intAttr.getType().isSignlessInteger(32))
+          return func.emitError()
+                 << "'" << attrName
+                 << "' must be a signless i32 integer attribute";
+
+        if (intAttr.getInt() <= 0)
+          return func.emitError()
+                 << "'" << attrName << "' must be a positive integer, got "
+                 << intAttr.getInt();
+
+        if (intAttr.getInt() > upperBound)
+          return func.emitError()
+                 << "'" << attrName << "' must be in range [1, "
+                 << upperBound << "] for " << description;
+
+        if (!func->hasAttr(pto::kPTOSimtEntryAttrName))
+          return func.emitError()
+                 << "'" << attrName << "' is only allowed on functions marked '"
+                 << pto::kPTOSimtEntryAttrName << "'";
+
+        return success();
+      };
+
+      if (failed(validatePositiveI32FuncAttr(pto::kPTOSimtMaxThreadsAttrName,
+                                             2048, "SIMT max threads")) ||
+          failed(validatePositiveI32FuncAttr(pto::kPTOSimtMaxRegistersAttrName,
+                                             128, "SIMT max registers")))
+        return failure();
+
       if (!func->hasAttr(pto::kPTOSimtEntryAttrName))
         continue;
 
@@ -747,6 +901,89 @@ private:
       if (walkResult.wasInterrupted())
         return failure();
     }
+
+    WalkResult keepResumeWalk = helper.getModule().walk([&](Operation *op) {
+      if (!isa<KeepOp, ResumeOp, SyncthreadsOp>(op))
+        return WalkResult::advance();
+      func::FuncOp func = op->getParentOfType<func::FuncOp>();
+      if (!func || !func->hasAttr(pto::kPTOSimtEntryAttrName)) {
+        op->emitOpError()
+            << "must appear inside a function marked with '"
+            << pto::kPTOSimtEntryAttrName << "'";
+        return WalkResult::interrupt();
+      }
+      Block *block = op->getBlock();
+      if (auto resume = dyn_cast<ResumeOp>(op)) {
+        if (failed(verifySimtKeepResumeSlotRange(resume)))
+          return WalkResult::interrupt();
+        Operation *first = getFirstNonConstantLikeOp(block);
+        if (!first || !isa<ResumeOp>(first)) {
+          op->emitOpError()
+              << "must be in the contiguous SIMT resume prologue group after "
+                 "constant-like operations";
+          return WalkResult::interrupt();
+        }
+        bool found = false;
+        for (Operation *cur = first; cur; cur = cur->getNextNode()) {
+          if (!isa<ResumeOp>(cur))
+            break;
+          if (cur == op) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          op->emitOpError()
+              << "must be in the contiguous SIMT resume prologue group after "
+                 "constant-like operations";
+          return WalkResult::interrupt();
+        }
+        if (failed(verifyUniqueResumeGroupSlots(resume, first)))
+          return WalkResult::interrupt();
+      }
+      if (auto keep = dyn_cast<KeepOp>(op)) {
+        if (failed(verifySimtKeepResumeSlotRange(keep)))
+          return WalkResult::interrupt();
+        Operation *terminator = block ? block->getTerminator() : nullptr;
+        if (!terminator || !isa<func::ReturnOp>(terminator)) {
+          op->emitOpError()
+              << "must be placed in the SIMT epilogue before func.return";
+          return WalkResult::interrupt();
+        }
+
+        Operation *cur = terminator->getPrevNode();
+        while (cur && isa<SyncthreadsOp>(cur))
+          cur = cur->getPrevNode();
+        Operation *lastKeep = cur;
+        if (!lastKeep || !isa<KeepOp>(lastKeep)) {
+          op->emitOpError()
+              << "must be placed in the SIMT epilogue before func.return; "
+                 "only 'pto.syncthreads' may appear between the final "
+                 "'pto.keep' group and func.return";
+          return WalkResult::interrupt();
+        }
+
+        Operation *firstKeep = lastKeep;
+        while (Operation *prev = firstKeep->getPrevNode()) {
+          if (!isa<KeepOp>(prev))
+            break;
+          firstKeep = prev;
+        }
+        if (!isOpInRange(op, firstKeep, lastKeep)) {
+          op->emitOpError()
+              << "must be in the contiguous SIMT keep epilogue group "
+                 "immediately before optional 'pto.syncthreads' and "
+                 "func.return";
+          return WalkResult::interrupt();
+        }
+        if (failed(verifyUniqueKeepGroupSlots(keep, firstKeep, lastKeep))) {
+          return WalkResult::interrupt();
+        }
+      }
+      return WalkResult::advance();
+    });
+    if (keepResumeWalk.wasInterrupted())
+      return failure();
     return success();
   }
 

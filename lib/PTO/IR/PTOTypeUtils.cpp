@@ -24,15 +24,22 @@ bool mlir::pto::isPTOFloat8Type(Type t) {
 
 bool mlir::pto::isPTOHiFloat8Type(Type t) { return isa<HiF8Type>(t); }
 
+bool mlir::pto::isPTOF8E8M0Type(Type t) { return isa<F8E8M0Type>(t); }
+
+bool mlir::pto::isPTOHiFloat8x2Type(Type t) { return isa<HiF8x2Type>(t); }
+
 bool mlir::pto::isPTOFloat4PackedType(Type t) {
   return isa<F4E1M2x2Type, F4E2M1x2Type>(t);
 }
 
 bool mlir::pto::isPTOLowPrecisionType(Type t) {
-  return isPTOFloat8Type(t) || isPTOHiFloat8Type(t) || isPTOFloat4PackedType(t);
+  return isPTOFloat8Type(t) || isPTOHiFloat8Type(t) || isPTOF8E8M0Type(t) ||
+         isPTOHiFloat8x2Type(t) || isPTOFloat4PackedType(t);
 }
 
 unsigned mlir::pto::getPTOStorageElemBitWidth(Type t) {
+  if (isPTOHiFloat8x2Type(t))
+    return 16;
   if (isPTOLowPrecisionType(t))
     return kBitsPerByte;
   if (auto floatTy = dyn_cast<FloatType>(t))

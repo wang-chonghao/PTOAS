@@ -70,6 +70,7 @@ private:
   // --- 内存/Alias 分析 ---
   void UpdateKernelArgMemInfo();
   LogicalResult UpdateAllocTileOpMemInfo(pto::AllocTileOp op);
+  LogicalResult UpdateDeclareGlobalOpMemInfo(pto::DeclareGlobalOp op);
   LogicalResult UpdateDeclareTileMemRefOpMemInfo(pto::DeclareTileMemRefOp op);
   LogicalResult UpdatePointerCastOpMemInfo(pto::PointerCastOp op);
   LogicalResult UpdateMemrefAllocOpMemInfo(memref::AllocOp op);
@@ -92,6 +93,7 @@ private:
   void UpdateMacroOpInfo(Operation *op);
   void MakeMacroCompound(Operation *op, PipelineType pipe, ValueRange defValues,
                          ValueRange useValues, int macroPhaseId);
+  void UpdatePTODSLSubkernelCallInfo(func::CallOp callOp);
  
   // --- 辅助函数 ---
   

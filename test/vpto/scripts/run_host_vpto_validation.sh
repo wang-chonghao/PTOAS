@@ -111,9 +111,14 @@ discover_cases() {
     golden.py
     compare.py
   )
+  local onboard_only_prefix="onboard-only/"
 
   if [[ -n "${CASE_NAME}" ]]; then
     [[ "${CASE_NAME}" != /* ]] || die "CASE_NAME must be relative to CASES_ROOT: ${CASE_NAME}"
+    if [[ "${DEVICE}" == "SIM" && "${COMPILE_ONLY}" != "1" &&
+          "${CASE_NAME}" == "${onboard_only_prefix}"* ]]; then
+      die "case ${CASE_NAME} is onboard-only and cannot run with DEVICE=SIM"
+    fi
     local requested_dir="${CASES_ROOT}/${CASE_NAME}"
     [[ -d "${requested_dir}" ]] || die "unknown case: ${CASE_NAME}"
     for f in "${required_files[@]}"; do
@@ -136,9 +141,18 @@ discover_cases() {
     [[ "${ok}" -eq 1 ]] || continue
     [[ -f "${dir}/kernel.pto" ]] || continue
     local rel="${dir#${CASES_ROOT}/}"
+    if [[ "${DEVICE}" == "SIM" && "${COMPILE_ONLY}" != "1" &&
+          "${rel}" == "${onboard_only_prefix}"* ]]; then
+      continue
+    fi
     printf "%s\n" "${rel}"
   done
 }
+
+if [[ "${DEVICE}" == "SIM" && "${COMPILE_ONLY}" != "1" &&
+      "${CASE_NAME}" == onboard-only/* ]]; then
+  die "case ${CASE_NAME} is onboard-only and cannot run with DEVICE=SIM"
+fi
 
 readarray -t CASES < <(discover_cases)
 [[ "${#CASES[@]}" -gt 0 ]] || die "no cases found under ${CASES_ROOT}"
@@ -241,6 +255,7 @@ build_one_impl() {
   local launch_obj="${out_dir}/launch.o"
   local kernel_fatobj="${out_dir}/kernel.fatobj.o"
   local kernel_so="${out_dir}/lib${case_token}_kernel.so"
+  local -a ptoas_args=()
 
   [[ -f "${case_dir}/main.cpp" ]] || die "missing main.cpp for ${case_name}"
   [[ -f "${case_dir}/launch.cpp" ]] || die "missing launch.cpp for ${case_name}"
@@ -249,8 +264,14 @@ build_one_impl() {
   [[ -f "${case_dir}/kernel.pto" ]] ||
     die "missing kernel.pto for ${case_name}"
 
+  if [[ -f "${case_dir}/ptoas.flags" ]]; then
+    read -r -a ptoas_args < "${case_dir}/ptoas.flags"
+  else
+    read -r -a ptoas_args <<< "${PTOAS_FLAGS}"
+  fi
+
   log "[$case_name] step 1/4: emit kernel fatobj"
-  "${PTOAS_BIN}" ${PTOAS_FLAGS} \
+  "${PTOAS_BIN}" "${ptoas_args[@]}" \
     "${case_dir}/kernel.pto" -o "${kernel_fatobj}"
 
   log "[$case_name] step 2/4: build launch object"

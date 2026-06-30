@@ -9,11 +9,15 @@
 #ifndef MLIR_DIALECT_PTO_TRANSFORMS_VPTOLLVMEMITTER_H
 #define MLIR_DIALECT_PTO_TRANSFORMS_VPTOLLVMEMITTER_H
 
+#include "PTO/Support/CANNVersion.h"
+
 #include <memory>
 #include <string>
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LLVM.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
 
 namespace mlir {
 class ModuleOp;
@@ -34,14 +38,34 @@ struct VPTOEmissionOptions {
   std::string aicoreArch;
   std::string defaultTargetCPU;
   std::string defaultTargetFeatures;
+  CANNVersion cannVersion = CANNVersion{9, 0, 0, 1};
 };
 
 struct EmittedLLVMModule {
+  void reset() {
+    module.reset();
+    context.reset();
+  }
+
   std::unique_ptr<llvm::LLVMContext> context;
   std::unique_ptr<llvm::Module> module;
 };
 
+LogicalResult lowerVPTOModuleToLLVMIRText(
+    ModuleOp module, const VPTOEmissionOptions &options, std::string &output,
+    llvm::raw_ostream &diagOS);
+
 LogicalResult lowerVPTOModuleToLLVMModules(
+    ModuleOp module, const VPTOEmissionOptions &options,
+    EmittedLLVMModule &cubeModule, EmittedLLVMModule &vectorModule,
+    llvm::raw_ostream &diagOS);
+
+LogicalResult lowerVPTOModuleToLLVMModulesBeta1(
+    ModuleOp module, const VPTOEmissionOptions &options,
+    EmittedLLVMModule &cubeModule, EmittedLLVMModule &vectorModule,
+    llvm::raw_ostream &diagOS);
+
+LogicalResult lowerVPTOModuleToLLVMModulesCANN900(
     ModuleOp module, const VPTOEmissionOptions &options,
     EmittedLLVMModule &cubeModule, EmittedLLVMModule &vectorModule,
     llvm::raw_ostream &diagOS);

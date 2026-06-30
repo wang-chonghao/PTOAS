@@ -17,6 +17,8 @@ Environment variables (all optional):
                                (default: /llvm-workspace/llvm-project/build-shared)
   PTO_BUILD_DIR                Path to PTOAS build dir (default: <repo>/build)
   PTO_INSTALL_DIR              Install prefix (default: <repo>/install)
+  CMAKE_C_COMPILER             Optional C compiler passed through to CMake
+  CMAKE_CXX_COMPILER           Optional C++ compiler passed through to CMake
   PTOAS_PYTHON_PACKAGE_VERSION Wheel version override
 """
 from __future__ import annotations
@@ -92,6 +94,10 @@ def build_sdist(sdist_directory, config_settings=None):
     )
 
 
+def _should_use_linux_hardening_cache() -> bool:
+    return sys.platform.startswith("linux")
+
+
 def _cmake_configure_and_build():
     """CMake configure + Ninja build + install."""
     _BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,12 +120,17 @@ def _cmake_configure_and_build():
         f"-DCMAKE_INSTALL_PREFIX={_PTO_INSTALL_DIR}",
     ]
 
+    for compiler_var in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER"):
+        compiler = os.environ.get(compiler_var, "").strip()
+        if compiler:
+            cmake_cmd.append(f"-D{compiler_var}={compiler}")
+
     release_version = os.environ.get("PTOAS_RELEASE_VERSION_OVERRIDE", "")
     if release_version:
         cmake_cmd.append(f"-DPTOAS_RELEASE_VERSION_OVERRIDE={release_version}")
 
     hardening_cache = _REPO / "cmake" / "LinuxHardeningCache.cmake"
-    if hardening_cache.exists():
+    if _should_use_linux_hardening_cache() and hardening_cache.exists():
         cmake_cmd.insert(1, f"-C{hardening_cache}")
 
     subprocess.check_call(cmake_cmd)
@@ -136,6 +147,10 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
         "PTO_INSTALL_DIR": str(_PTO_INSTALL_DIR),
         "LLVM_BUILD_DIR": str(_LLVM_BUILD_DIR),
         "PTO_WHEEL_DIST_DIR": str(_WHEEL_DIST_DIR),
+        # Keep wheel packaging on the same interpreter pip used to invoke the
+        # backend. This avoids drifting to a different `python3` on PATH in
+        # conda/self-hosted CI environments.
+        "PYTHON": sys.executable,
     })
     subprocess.check_call(
         ["bash", str(_REPO / "docker" / "create_wheel.sh")],

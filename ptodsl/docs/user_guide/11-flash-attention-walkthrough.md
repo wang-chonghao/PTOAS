@@ -8,7 +8,7 @@ The sketch computes **online-softmax flash attention** for one `(batch, head)` s
 
 ```
 flash_attention(...)           L0  user-facing wrapper
-  └─ @pto.jit(mode="explicit") flash_attention_kernel
+  └─ @pto.jit(entry=True, mode="explicit") flash_attention_kernel
        ├─ Tile Ops                 tile.load / tile.store at the GM↔UB boundary
        ├─ explicit orchestration   mte_load / pipe_barrier / pointer sequencing
        ├─ @pto.cube               qk_matmul / pv_matmul
@@ -59,11 +59,11 @@ This is plain Python — no PTO types, no IR. It handles ergonomic runtime conce
 
 The wrapper knows nothing about tiles, UB, or pipelines. It is the boundary between the user's tensor world and the PTO device world.
 
-## 11.3 Top-level `@pto.jit(mode="explicit")` kernel entry
+## 11.3 Top-level `@pto.jit(entry=True, mode="explicit")` kernel entry
 
 <!-- ptodsl-doc-test: {"mode":"compile","symbol":"flash_attention_kernel","compile":{"BLOCK_Q":128,"BLOCK_KV":128,"CAUSAL":false,"NUM_STAGES":2}} -->
 ```python
-@pto.jit(target="a5", mode="explicit")
+@pto.jit(target="a5", entry=True, mode="explicit")
 def flash_attention_kernel(
     Q_ptr: pto.ptr(pto.f32, "gm"),
     K_ptr: pto.ptr(pto.f32, "gm"),
@@ -75,16 +75,16 @@ def flash_attention_kernel(
     heads: pto.i32,
     dim: pto.i32,
     *,
-    BLOCK_Q: pto.constexpr = 128,
-    BLOCK_KV: pto.constexpr = 128,
-    CAUSAL: pto.constexpr = False,
-    NUM_STAGES: pto.constexpr = 2,
+    BLOCK_Q: pto.const_expr = 128,
+    BLOCK_KV: pto.const_expr = 128,
+    CAUSAL: pto.const_expr = False,
+    NUM_STAGES: pto.const_expr = 2,
 ):
     # Walkthrough body omitted in this signature overview.
     return
 ```
 
-The `@pto.jit(mode="explicit")` decorator marks the compile + launch boundary. Inputs and outputs arrive as explicit GM pointers plus runtime shape metadata; keyword-only `constexpr` parameters (`BLOCK_Q`, `BLOCK_KV`, `CAUSAL`) are baked at compile time.
+The `@pto.jit(entry=True, mode="explicit")` decorator marks the compile + launch boundary. Inputs and outputs arrive as explicit GM pointers plus runtime shape metadata; keyword-only `const_expr` parameters (`BLOCK_Q`, `BLOCK_KV`, `CAUSAL`) are baked at compile time.
 
 ### 11.3.1 TensorView construction
 
@@ -214,22 +214,10 @@ beta_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, o
 
 The walkthrough keeps Q/K/V/P on the MAT path so the cube sub-kernels consume the same tile objects that the top-level kernel owns. Runtime tails still live in `valid_shape`; the physical tile shapes stay static.
 
-**UB-resident state and scratch tiles** — the online-softmax state plus intermediate outputs:
-
-```python
-o_prev_tile = pto.alloc_tile(shape=[Br, D], dtype=pto.f32, valid_shape=[full_br, dim])
-o_next_tile = pto.alloc_tile(shape=[Br, D], dtype=pto.f32, valid_shape=[full_br, dim])
-m_prev_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-m_next_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-l_prev_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-l_next_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-
-s_tile = pto.alloc_tile(shape=[Br, Bc], dtype=pto.f32, valid_shape=[full_br, full_bc])
-p_tile = pto.alloc_tile(shape=[Br, Bc], dtype=pto.f32, valid_shape=[full_br, full_bc])
-pv_tile = pto.alloc_tile(shape=[Br, D], dtype=pto.f32, valid_shape=[full_br, dim])
-alpha_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-beta_tile = pto.alloc_tile(shape=[Br, 1], dtype=pto.f32, valid_shape=[full_br, one], blayout="ColMajor")
-```
+**UB-resident state and scratch tiles** — among the allocations above, the
+online-softmax state lives in `o_prev_tile` / `o_next_tile`, `m_prev_tile` /
+`m_next_tile`, `l_prev_tile` / `l_next_tile`, plus the scratch tiles
+`s_tile`, `p_tile`, `pv_tile`, `alpha_tile`, and `beta_tile`.
 
 The online-softmax algorithm requires **ping-pong state tiles**: `m_prev`/`m_next`, `l_prev`/`l_next`, `o_prev`/`o_next`. After each KV block, `next` becomes `prev` for the following iteration.
 
@@ -270,7 +258,7 @@ row-major padded physical width just to satisfy row-byte alignment.
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.l1_loop_body","symbol":"flash_attention_l1_loop_body_probe","compile":{"BLOCK_Q":128,"BLOCK_KV":128,"HEAD_DIM":128,"CAUSAL":false,"NUM_STAGES":2}} -->
 ```python
-with pto.for_(0, q_blocks, step=1) as qi:
+for qi in range(0, q_blocks, 1):
     q_rows = _block_valid_extent(seq_q, qi, Br)
     q_part = pto.partition_view(q_head, offsets=[0, qi * Br, 0, 0],
                                 sizes=[1, q_rows, 1, dim])
@@ -296,14 +284,10 @@ with pto.for_(0, q_blocks, step=1) as qi:
     l_prev_tile.fill(0.0)
     o_prev_tile.fill(0.0)
 
-    kv_loop = pto.for_(0, kv_blocks, step=1).carry(
-        m=m_prev_tile, l=l_prev_tile, o=o_prev_tile,
-    )
-    with kv_loop:
-        kj = kv_loop.iv
-        m_cur = kv_loop.m
-        l_cur = kv_loop.l
-        o_cur = kv_loop.o
+    m_cur = m_prev_tile
+    l_cur = l_prev_tile
+    o_cur = o_prev_tile
+    for kj in range(0, kv_blocks, 1):
         kv_rows = _block_valid_extent(seq_k, kj, Bc)
         k_part = pto.partition_view(k_head,
                     offsets=[0, kj * Bc, 0, 0], sizes=[1, kv_rows, 1, dim])
@@ -332,10 +316,11 @@ with pto.for_(0, q_blocks, step=1) as qi:
             meta_ptr,
         )
 
-        kv_loop.update(m=m_next_tile, l=l_next_tile, o=o_next_tile)
+        m_cur = m_next_tile
+        l_cur = l_next_tile
+        o_cur = o_next_tile
 
-    o_final_tile = kv_loop.final("o")
-    pto.tile.store(o_final_tile, o_part)
+    pto.tile.store(o_cur, o_part)
 ```
 
 Key points:
@@ -343,7 +328,7 @@ Key points:
 - **Static physical shape, dynamic valid extent**: `alloc_tile(shape=...)` stays constexpr. Tail handling is expressed by updating `valid_shape` before each block load and sub-kernel call.
 - **`tile.load` at the kernel entry boundary**: Q is loaded once per Q block using a tile op into the MAT-backed bridge tile `q_mat`. The compiler auto-inserts the necessary `set_flag`/`wait_flag` pairs.
 - **State initialization**: `fill(float("-inf"))` and `fill(0.0)` initialize the online-softmax accumulators before the first KV block.
-- **Carry state**: the inner `kv_loop` carries three ping-pong tiles (`m`, `l`, `o`) across iterations using `.carry(...)` / `.update(...)` / `.final(...)`. After each KV block, the loop updates the carried values to the `_next` tiles. After the loop, `.final("o")` extracts the final output accumulator.
+- **Carry state**: the inner Python loop carries three ping-pong tiles (`m_cur`, `l_cur`, `o_cur`) across iterations. After each KV block, assignments to the `_next` tiles become loop-carried state after AST rewrite. After the loop, `o_cur` is the final output accumulator.
 - **`tile.store` at the kernel entry boundary**: writes the final result for this Q block back to GM.
 
 ## 11.4 Explicit orchestration
@@ -460,7 +445,14 @@ Each `pipe_barrier(Pipe.ALL)` between phases is explicit in the orchestration bo
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.qk_cube_helper","symbol":"flash_attention_qk_cube_helper_probe","compile":{"BLOCK_Q":16,"BLOCK_KV":16}} -->
 ```python
 @pto.cube
-def qk_matmul(q_mat, k_mat, q_l0a, k_l0b, s_acc, s_tile):
+def qk_matmul(
+    q_mat: pto.Tile,
+    k_mat: pto.Tile,
+    q_l0a: pto.Tile,
+    k_l0b: pto.Tile,
+    s_acc: pto.Tile,
+    s_tile: pto.Tile,
+):
     m = q_mat.valid_shape[0]
     k = q_mat.valid_shape[1]
     n = k_mat.valid_shape[0]
@@ -485,7 +477,14 @@ The cube kernel does not allocate scratch — the caller (top-level kernel) owns
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.pv_cube_helper","symbol":"flash_attention_pv_cube_helper_probe","compile":{"BLOCK_Q":16,"BLOCK_KV":16}} -->
 ```python
 @pto.cube
-def pv_matmul(p_mat, v_mat, p_l0a, v_l0b, pv_acc, pv_tile):
+def pv_matmul(
+    p_mat: pto.Tile,
+    v_mat: pto.Tile,
+    p_l0a: pto.Tile,
+    v_l0b: pto.Tile,
+    pv_acc: pto.Tile,
+    pv_tile: pto.Tile,
+):
     m = p_mat.valid_shape[0]
     k = p_mat.valid_shape[1]
     n = v_mat.valid_shape[1]
@@ -503,19 +502,25 @@ Structurally identical to `qk_matmul`, but without transposition and with differ
 ```python
 @pto.simd
 def online_softmax_rows(
-    s_tile, p_tile,
-    m_prev_tile, l_prev_tile,
-    m_next_tile, l_next_tile,
-    alpha_tile, beta_tile,
-    row_start, row_stop, valid_cols,
+    s_tile: pto.Tile,
+    p_tile: pto.Tile,
+    m_prev_tile: pto.Tile,
+    l_prev_tile: pto.Tile,
+    m_next_tile: pto.Tile,
+    l_next_tile: pto.Tile,
+    alpha_tile: pto.Tile,
+    beta_tile: pto.Tile,
+    row_start: pto.i32,
+    row_stop: pto.i32,
+    valid_cols: pto.i32,
 ):
 ```
 
-The simd kernel iterates over rows with `pto.for_`, processing one row per iteration:
+The simd kernel iterates over rows with Python `for range(...)`, and AST rewrite lowers the loop to runtime IR:
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.online_softmax_loop","symbol":"flash_attention_online_softmax_loop_probe","compile":{"BLOCK":16}} -->
 ```python
-with pto.for_(row_start, row_stop, step=1) as row:
+for row in range(row_start, row_stop, 1):
     col_mask = pto.make_mask(pto.f32, valid_cols)
 
     s_row   = pto.vlds(s_tile[row, 0:])
@@ -578,7 +583,11 @@ This implements the online-softmax update from the Flash Attention paper:
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.simt_materialize","symbol":"flash_attention_simt_materialize_probe","compile":{}} -->
 ```python
 @pto.simt
-def materialize_tile_bounds(meta_ptr, valid_rows, valid_cols):
+def materialize_tile_bounds(
+    meta_ptr: pto.ptr(pto.i32, pto.MemorySpace.UB),
+    valid_rows: pto.i32,
+    valid_cols: pto.i32,
+):
     scalar.store(0, meta_ptr + 0)
     scalar.store(valid_rows, meta_ptr + 1)
     scalar.store(valid_cols, meta_ptr + 2)
@@ -591,13 +600,21 @@ Three scalar stores write the loop bounds into the metadata buffer. `meta_ptr` i
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.simt_blend","symbol":"flash_attention_simt_blend_probe","compile":{"BLOCK":8}} -->
 ```python
 @pto.simt
-def blend_output_rows(o_prev_tile, pv_tile, alpha_tile, beta_tile,
-                      o_next_tile, row_start, row_stop, valid_dim):
-    with pto.for_(row_start, row_stop, step=1) as row:
+def blend_output_rows(
+    o_prev_tile: pto.Tile,
+    pv_tile: pto.Tile,
+    alpha_tile: pto.Tile,
+    beta_tile: pto.Tile,
+    o_next_tile: pto.Tile,
+    row_start: pto.i32,
+    row_stop: pto.i32,
+    valid_dim: pto.i32,
+):
+    for row in range(row_start, row_stop, 1):
         alpha = scalar.load(alpha_tile[row, 0])
         beta  = scalar.load(beta_tile[row, 0])
 
-        with pto.for_(0, valid_dim, step=1) as col:
+        for col in range(0, valid_dim, 1):
             o_prev = scalar.load(o_prev_tile[row, col])
             pv_val = scalar.load(pv_tile[row, col])
             o_next = alpha * o_prev + beta * pv_val
@@ -610,7 +627,12 @@ This is a scalar element-wise blend over the tile domain:
 O_next[row, col] = alpha[row] * O_prev[row, col] + beta[row] * PV[row, col]
 ```
 
-The SIMT kernel walks the tile element by element with nested `pto.for_` loops. Each iteration loads two scalars (`o_prev` and `pv_val`), computes the weighted sum, and stores the result. The `alpha`/`beta` coefficients are per-row (loaded once per row), while the blend is per-element.
+The SIMT kernel walks the tile element by element with nested Python
+`for range(...)` loops. Under the default AST rewrite path these become
+device-side runtime loops. Each iteration loads two scalars (`o_prev` and
+`pv_val`), computes the weighted sum, and stores the result. The `alpha` /
+`beta` coefficients are per-row (loaded once per row), while the blend is
+per-element.
 
 **Why SIMT instead of SIMD?** The intent is to contrast with `online_softmax_rows`: softmax is dominated by row-wise vector reductions and exponentials — natural SIMD work. The final blend is a simple linear combination with per-row coefficients — expressing it as explicit scalar work-items makes the per-element access pattern explicit and leaves the compiler free to vectorize or fuse as it sees fit.
 
@@ -654,7 +676,7 @@ After all KV blocks: the top-level kernel issues `tile.store(o_final_tile, o_par
 
 ## 11.9 Design patterns in this sketch
 
-**Ping-pong state for online accumulators**: `m_prev`/`m_next`, `l_prev`/`l_next`, `o_prev`/`o_next` make the state transition explicit. After each KV block, the caller swaps the ping-pong pair (via `kv_loop.update(...)`) rather than aliasing in place.
+**Ping-pong state for online accumulators**: `m_prev`/`m_next`, `l_prev`/`l_next`, `o_prev`/`o_next` make the state transition explicit. After each KV block, the caller swaps the ping-pong pair by assigning the `_next` tiles to the loop-carried Python variables rather than aliasing in place.
 
 **Scratch reuse**: `rhs_l0b` serves both `K` (in `qk_matmul`) and `V` (in `pv_matmul`). `pv_acc_tile` reuses the accumulator from QK^T. The caller (top-level kernel) allocates once; the explicit-mode body passes them to both cube sub-kernels.
 
@@ -662,4 +684,4 @@ After all KV blocks: the top-level kernel issues `tile.store(o_final_tile, o_par
 
 **No vreg across sub-kernel boundaries**: vector registers are local to each `@pto.simd` kernel. Data crosses sub-kernel boundaries through UB tiles — the boundary contract is enforced by the type system.
 
-**Invocation flexibility**: This sketch uses the explicit `@pto.jit(mode="explicit")` path for full micro-instruction control. The same named sub-kernels can also be reused from `@pto.jit(mode="auto")` when the body stays within the auto-mode contract, or written inline as context managers (`with pto.simd():`, etc.). See Chapter 3 for details.
+**Invocation flexibility**: This sketch uses the explicit `@pto.jit(entry=True, mode="explicit")` path for full micro-instruction control. The same named sub-kernels can also be reused from `@pto.jit(mode="auto")` when the body stays within the auto-mode contract, or written inline as context managers (`with pto.simd():`, etc.). The orchestration logic could be extracted into `@pto.jit(entry=False)` kernel modules for reuse across multiple entry kernels. See Chapter 3 for details.

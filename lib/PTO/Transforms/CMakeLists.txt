@@ -12,7 +12,21 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 add_mlir_dialect_library(PTOTransforms
+  TileFusion/FusionAnalysis.cpp
+  TileFusion/FusionOpSemantics.cpp
+  TileFusion/PTOPreFusionAnalysis.cpp
+  TileFusion/PTOPrintPreFusionAnalysis.cpp
+  TileFusion/PTOFusionPlan.cpp
+  TileFusion/PTOOpScheduling.cpp
+  TileFusion/PTOMarkLastUse.cpp
+  TileFusion/PTOFusionRegionGen.cpp
+  TileFusion/PTOLowLevelLoopFusion.cpp
+  TileFusion/PTOFusionPredicateElision.cpp
+  TileFusion/PTOFusionLoadStoreElision.cpp
+  TileFusion/PTOFlattenFusionRegion.cpp
   VPTOLLVMEmitter.cpp
+  VPTOCANN900LLVMEmitter.cpp
+  VPTOLLVMEmitterDispatcher.cpp
   VPTOLLVMEmitterHelper.cpp
   VPTOPtrNormalize.cpp
   VPTOPtrCastCleanup.cpp
@@ -20,13 +34,9 @@ add_mlir_dialect_library(PTOTransforms
   PTOVPTOPtrBoundary.cpp
   VPTOBufferMaterialization.cpp
   PTOValidateVPTOIR.cpp
+  PTOUnrollSIMTForPass.cpp
   PTOInferVPTOVecScope.cpp
 
-  TileFusion/FusionAnalysis.cpp
-  TileFusion/FusionOpSemantics.cpp
-  TileFusion/PTOFusionPlan.cpp
-  TileFusion/PTOOpScheduling.cpp
-  TileFusion/PTOMarkLastUse.cpp
   InsertSync/PTOInsertSync.cpp
   PTOInjectBarrierAllSync.cpp
   InsertSync/InsertSyncDebug.cpp
@@ -46,6 +56,7 @@ add_mlir_dialect_library(PTOTransforms
   PTORemoveRedundantBarrier.cpp
   InferPTOLayout.cpp
   PTOA5NormalizeTMovPass.cpp
+  PTOCanonicalizeIR.cpp
   PTOMaterializeTileHandles.cpp
   BufferizableOpInterfaceImpl.cpp
   ConvertToPTOOp.cpp
@@ -56,6 +67,7 @@ add_mlir_dialect_library(PTOTransforms
   PTOResolveReservedBuffersPass.cpp
   SlotAffineAnalysis.cpp
   PTOWrapFunctionsInSectionsPass.cpp
+  PTONormalizeUncoveredTileSections.cpp
   VPTONormalizeContainer.cpp
   VPTOSplitCVModule.cpp
   InsertSync/PTOIRTranslator.cpp
@@ -82,6 +94,7 @@ add_mlir_dialect_library(PTOTransforms
   GraphSyncSolver/SyncSolverCodeGen.cpp
   LoweringSyncToPipe.cpp
   PTOVerifyTFreePass.cpp
+  PTOVerifySubkernelPipeContractPass.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/PTO

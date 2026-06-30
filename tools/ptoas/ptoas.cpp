@@ -6,11 +6,11 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
+#include "ptoas.h"
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/VPTOLLVMEmitter.h"
 #include "PTO/Transforms/Passes.h"
 #include "PTO/Transforms/BufferizableOpInterfaceImpl.h"
-#include "VPTOFatobjEmission.h"
 #include "VPTOHostStubEmission.h"
 #include "TilelangDaemon.h"
 #include "PTO/Transforms/CppPostprocess.h"
@@ -29,7 +29,9 @@
 #include <cstring>
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Target/Cpp/CppEmitter.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -90,8 +92,45 @@ using StringRefVector =
 
 int main(int argc, char **argv);
 
-static void printPTOASVersion(llvm::raw_ostream &os) {
-  os << "ptoas " << PTOAS_RELEASE_VERSION << "\n";
+void mlir::pto::registerPTOASDialects(DialectRegistry &registry) {
+  registry.insert<mlir::func::FuncDialect>();
+  registry.insert<mlir::tensor::TensorDialect>();
+  registry.insert<mlir::arith::ArithDialect>();
+  registry.insert<mlir::memref::MemRefDialect>();
+  registry.insert<mlir::affine::AffineDialect>();
+  registry.insert<mlir::cf::ControlFlowDialect>();
+  registry.insert<mlir::bufferization::BufferizationDialect>();
+  registry.insert<mlir::scf::SCFDialect>();
+  registry.insert<mlir::math::MathDialect>();
+
+  registry.insert<mlir::pto::PTODialect>();
+  arith::registerBufferizableOpInterfaceExternalModels(registry);
+  tensor::registerBufferizableOpInterfaceExternalModels(registry);
+  pto::registerBufferizableOpInterfaceExternalModels(registry);
+
+  registry.insert<emitc::EmitCDialect>();
+  registry.insert<mlir::LLVM::LLVMDialect>();
+}
+
+void mlir::pto::registerPTOASPassesAndCLOptions() {
+  mlir::registerAllPasses();
+  mlir::pto::registerPTOPasses();
+  mlir::pto::registerPTOViewToMemrefPass();
+  mlir::pto::registerPTOInlineLibCall();
+  mlir::pto::registerFoldTileBufIntrinsics();
+  mlir::pto::registerExpandTileOp();
+  mlir::registerPassManagerCLOptions();
+}
+
+void mlir::pto::loadPTOASDialects(MLIRContext &context) {
+  context.getOrLoadDialect<emitc::EmitCDialect>();
+  context.getOrLoadDialect<mlir::pto::PTODialect>();
+  context.getOrLoadDialect<func::FuncDialect>();
+  context.getOrLoadDialect<arith::ArithDialect>();
+  context.getOrLoadDialect<math::MathDialect>();
+  context.getOrLoadDialect<memref::MemRefDialect>();
+  context.getOrLoadDialect<affine::AffineDialect>();
+  context.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
 }
 
 static std::string getParentDir(llvm::StringRef path) {
@@ -274,15 +313,6 @@ static LogicalResult reorderEmitCFunctions(ModuleOp module) {
 // --------------------------------------------------------------------------
 // Command Line Options
 // --------------------------------------------------------------------------
-static llvm::cl::opt<std::string> inputFilename(llvm::cl::Positional,
-                                                llvm::cl::desc("<input file>"),
-                                                llvm::cl::init("-"));
-
-static llvm::cl::opt<std::string> outputFilename("o",
-                                                 llvm::cl::desc("Output filename"),
-                                                 llvm::cl::value_desc("filename"),
-                                                 llvm::cl::init("-"));
-
 static llvm::cl::opt<bool> enableInsertSync("enable-insert-sync",
                                             llvm::cl::desc("Enable automatic synchronization insertion pass"),
                                             llvm::cl::init(false));
@@ -394,8 +424,15 @@ static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
 
 static llvm::cl::opt<bool> enableOpFusion(
     "enable-op-fusion",
-    llvm::cl::desc("Enable frontend tile fusion on the A5 EmitC mainline "
-                   "(requires --pto-arch=a5 and --pto-level=level2|level3)"),
+    llvm::cl::desc("Enable A5 tile fusion on level2/level3. EmitC uses "
+                   "last-use annotation; VPTO uses fusion-region lifecycle."),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableShapeInference(
+    "enable-shape-inference",
+    llvm::cl::desc("Enable shape inference (ShapeConstraintSolver) for A5 tile "
+                  "fusion. Off by default: falls back to static/direct-bound "
+                  "iteration-domain inference."),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> disableInferLayout(
@@ -408,12 +445,12 @@ static llvm::cl::opt<bool> emitAddPtrTrace(
     llvm::cl::desc("Emit addptr trace comments in generated C++ output"),
     llvm::cl::init(false));
 
-static llvm::cl::opt<bool> emitMlirIR(
+llvm::cl::opt<bool> mlir::pto::emitMlirIR(
     "emit-pto-ir",
     llvm::cl::desc("Emit PTO IR after lowering instead of C++"),
     llvm::cl::init(false));
 
-static llvm::cl::opt<std::string> ptoTargetArch(
+llvm::cl::opt<std::string> mlir::pto::ptoTargetArch(
     "pto-arch",
     llvm::cl::desc("Target Ascend architecture for codegen: a3 or a5 (default: a3)"),
     llvm::cl::value_desc("a3|a5"),
@@ -425,14 +462,19 @@ static llvm::cl::opt<std::string> ptoBuildLevel(
     llvm::cl::value_desc("level1|level2|level3"),
     llvm::cl::init("level2"));
 
-static llvm::cl::opt<std::string> ptoBackend(
+llvm::cl::opt<std::string> mlir::pto::ptoBackend(
     "pto-backend",
     llvm::cl::desc("Final PTOAS backend: emitc or vpto (default: emitc)"),
     llvm::cl::value_desc("emitc|vpto"), llvm::cl::init("emitc"));
 
-static llvm::cl::opt<bool> emitVPTO(
+llvm::cl::opt<bool> mlir::pto::emitVPTO(
     "emit-vpto",
     llvm::cl::desc("Write final post-pass VPTO IR to -o"),
+    llvm::cl::init(false));
+
+llvm::cl::opt<bool> mlir::pto::emitVPTOLLVMDialect(
+    "emit-vpto-llvm-ir",
+    llvm::cl::desc("Write translated VPTO LLVM IR to -o"),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> vptoPrintIR(
@@ -451,26 +493,26 @@ static llvm::cl::opt<bool> dumpVPTOIR(
     llvm::cl::desc("Print post-pass VPTO backend IR to stderr"),
     llvm::cl::init(false));
 
-static llvm::cl::opt<bool> ptoPrintSeamIR(
+llvm::cl::opt<bool> mlir::pto::ptoPrintSeamIR(
     "pto-print-seam-ir",
     llvm::cl::desc("Print shared pre-backend seam IR to stderr"),
     llvm::cl::init(false));
 
-static llvm::cl::opt<std::string> ptoSeamIRFile(
+llvm::cl::opt<std::string> mlir::pto::ptoSeamIRFile(
     "pto-seam-ir-file",
     llvm::cl::desc("Write shared pre-backend seam IR to a file"),
     llvm::cl::value_desc("path"),
     llvm::cl::init(""));
 
+llvm::cl::opt<std::string> mlir::pto::cannOutputVersion(
+    "cann-output-version",
+    llvm::cl::desc("Override the CANN version used for lowering and public ABI output selection; examples: 9.0.0, 9.0.0-beta.1"),
+    llvm::cl::value_desc("version"), llvm::cl::init(""));
+
 enum class PTOBuildLevel {
   Level1,
   Level2,
   Level3,
-};
-
-enum class PTOBackend {
-  EmitC,
-  VPTO,
 };
 
 static PTOBuildLevel defaultBuildLevel() {
@@ -518,21 +560,6 @@ static bool parseAutoSyncTailHint(llvm::StringRef hintStr, std::string &normaliz
   return false;
 }
 
-static bool parseBackend(llvm::StringRef backendStr, PTOBackend &out) {
-  std::string s = backendStr.str();
-  for (char &c : s)
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  if (s == "emitc") {
-    out = PTOBackend::EmitC;
-    return true;
-  }
-  if (s == "vpto") {
-    out = PTOBackend::VPTO;
-    return true;
-  }
-  return false;
-}
-
 static LogicalResult emitSharedPreBackendSeamIR(ModuleOp module,
                                                 llvm::StringRef outputPath) {
   if (outputPath.empty())
@@ -565,17 +592,6 @@ static bool hasUnexpandedTileOps(ModuleOp module) {
     if (found)
       return;
     if (isa<pto::OpPipeInterface>(op))
-      found = true;
-  });
-  return found;
-}
-
-static bool hasTilelangInlineHelpers(ModuleOp module) {
-  bool found = false;
-  module.walk([&](func::FuncOp func) {
-    if (found)
-      return;
-    if (func->hasAttr("pto.tilelang.inline_proc"))
       found = true;
   });
   return found;
@@ -1118,6 +1134,64 @@ static void rewriteEventIdArrayMarkers(std::string &cpp) {
   rewriteMarkerCallsToSubscripts(cpp, kEventIdMarkerRewrites);
 }
 
+static bool isPreprocessorDirectiveLine(llvm::StringRef trimmedLine) {
+  return trimmedLine.starts_with("#");
+}
+
+// Nested emitc.verbatim ops inside emitc.for / emitc.if regions currently
+// pick up an extra trailing semicolon from EmitC C++ emission, which produces
+// invalid lines such as `#if defined(__DAV_VEC__);` and `set_mask_norm();;`.
+// Trim only those malformed suffixes here so bisheng can compile the emitted
+// source until the upstream printer behavior is fixed.
+static void rewriteMalformedVerbatimSemicolons(std::string &cpp) {
+  if (cpp.empty())
+    return;
+
+  llvm::StringRef input(cpp);
+  std::string rewritten;
+  rewritten.reserve(cpp.size());
+
+  bool prevWasPreprocessorDirective = false;
+  size_t offset = 0;
+  while (offset < input.size()) {
+    size_t newlinePos = input.find('\n', offset);
+    bool hasNewline = newlinePos != llvm::StringRef::npos;
+    llvm::StringRef line =
+        hasNewline ? input.slice(offset, newlinePos) : input.drop_front(offset);
+    std::string current(line.str());
+    llvm::StringRef trimmed = llvm::StringRef(current).trim();
+
+    if (trimmed == ";" && prevWasPreprocessorDirective) {
+      // `#endif ...` in nested verbatim blocks currently materializes as the
+      // directive line followed by a standalone `;` on the next line.
+      prevWasPreprocessorDirective = false;
+    } else {
+      if (isPreprocessorDirectiveLine(trimmed) && trimmed.ends_with(";")) {
+        size_t semicolonPos = current.find_last_of(';');
+        if (semicolonPos != std::string::npos)
+          current.erase(semicolonPos, 1);
+      } else if (!trimmed.empty() && !trimmed.starts_with("//") &&
+                 !trimmed.starts_with("/*") && trimmed.ends_with(";;")) {
+        size_t semicolonPos = current.find_last_of(';');
+        if (semicolonPos != std::string::npos)
+          current.erase(semicolonPos, 1);
+      }
+
+      rewritten.append(current);
+      if (hasNewline)
+        rewritten.push_back('\n');
+      prevWasPreprocessorDirective =
+          isPreprocessorDirectiveLine(llvm::StringRef(current).trim());
+    }
+
+    if (!hasNewline)
+      break;
+    offset = newlinePos + 1;
+  }
+
+  cpp.swap(rewritten);
+}
+
 static bool rewriteAddPtrTraceMarkers(std::string &cpp, bool showTrace) {
   size_t searchPos = 0;
   bool changed = false;
@@ -1454,6 +1528,9 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
 
 static void prepareVPTOForEmission(PassManager &pm) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      pto::createPTOUnrollSIMTForPass());
+  kernelModulePM.addPass(createSCCPPass());
   kernelModulePM.addPass(createCanonicalizerPass());
   kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addPass(pto::createVPTOPtrNormalizePass());
@@ -1469,89 +1546,102 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(pto::createPTOValidateVPTOEmissionIRPass());
 }
 
-static void lowerPTOToVPTOBackend(PassManager &pm, int argc, char **argv) {
-  // TileOp Expand path:
-  //   1. ExpandTileOp: instantiate TileLang DSL templates, replace tile ops
-  //      with func.call to template functions (tile_buf params)
-  //   2. InlineLibCall: inline template function bodies
-  //   3. FoldTileBufIntrinsics: fold tile_buf_addr / tile_valid_rows /
-  //      tile_valid_cols to concrete memref/constant values
+static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module, int argc,
+                                  char **argv) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
+  auto moduleArchAttr =
+      module->getAttrOfType<mlir::StringAttr>("pto.target_arch");
+  const bool enableA5VPTOPostLoweringFusionLifecycle =
+      enableOpFusion && moduleArchAttr && moduleArchAttr.getValue() == "a5";
+
   pto::ExpandTileOpOptions expandOpts = resolveExpandTileOpOptions(argc, argv);
   kernelModulePM.addPass(pto::createExpandTileOpPass(expandOpts));
 
   kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
-      pto::createFoldTileBufIntrinsicsPass());
-  // FoldTileBufIntrinsics materializes many constant branch conditions.
-  // Clean them up immediately on the TileOp expansion path before the
-  // authoring-stage VPTO verifier and let the existing CSE passes remove the
-  // resulting dead values later in the pipeline.
+      pto::createFoldTileBufIntrinsicsPass("shape-only"));
+  if (enableA5VPTOPostLoweringFusionLifecycle) {
+    kernelModulePM.addPass(pto::createPTOLowLevelLoopFusionPass());
+    kernelModulePM.addPass(mlir::createCanonicalizerPass());
+    kernelModulePM.addPass(mlir::createCSEPass());
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        pto::createPTOFusionPredicateElisionPass());
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        pto::createPTOFusionLoadStoreElisionPass());
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        pto::createPTOFlattenFusionRegionPass());
+    kernelModulePM.addPass(mlir::createCSEPass());
+  }
+  kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+      pto::createFoldTileBufIntrinsicsPass("addr-only"));
   kernelModulePM.addPass(mlir::createSCCPPass());
   kernelModulePM.addPass(mlir::createCanonicalizerPass());
 }
 
-static void inlineTilelangHelpersOnVPTOInput(PassManager &pm) {
-  auto &kernelModulePM = pm.nest<ModuleOp>();
-  kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
-  kernelModulePM.addPass(mlir::createSCCPPass());
-  kernelModulePM.addPass(mlir::createCanonicalizerPass());
-}
-
-static pto::VPTOEmissionOptions buildVPTOEmissionOptions() {
+static pto::VPTOEmissionOptions
+buildVPTOEmissionOptions(const pto::CANNVersion &cannVersion) {
   pto::VPTOEmissionOptions options;
   options.dumpVPTOIR = false;
   options.targetTriple = "hiipu64-hisilicon-cce";
+  options.cannVersion = cannVersion;
   return options;
 }
 
-static int emitVPTOBackendResult(ModuleOp module,
-                                 llvm::ToolOutputFile &outputFile) {
+static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
+                                 bool emitHostStub,
+                                 const pto::CANNVersion &cannVersion) {
   if (emitVPTO) {
-    module.print(outputFile.os());
-    outputFile.os() << "\n";
-    outputFile.keep();
+    result.kind = PTOASCompileResultKind::Text;
+    llvm::raw_string_ostream os(result.textOutput);
+    module.print(os);
+    os << "\n";
+    os.flush();
     return 0;
   }
 
-  pto::VPTOEmissionOptions options = buildVPTOEmissionOptions();
-  std::string stubSource;
-  if (failed(pto::emitVPTOHostStubSource(module, stubSource, llvm::errs()))) {
-    llvm::errs() << "Error: Failed to emit VPTO host stub source.\n";
-    return 1;
+  if (emitVPTOLLVMDialect) {
+    result.kind = PTOASCompileResultKind::Text;
+    pto::VPTOEmissionOptions options = buildVPTOEmissionOptions(cannVersion);
+    if (failed(pto::lowerVPTOModuleToLLVMIRText(
+            module, options, result.textOutput, llvm::errs()))) {
+      llvm::errs() << "Error: Failed to lower VPTO to LLVM IR.\n";
+      return 1;
+    }
+    return 0;
   }
 
-  pto::EmittedLLVMModule cubeModule;
-  pto::EmittedLLVMModule vectorModule;
+  pto::VPTOEmissionOptions options = buildVPTOEmissionOptions(cannVersion);
+  std::string stubSource;
+  if (emitHostStub) {
+    if (failed(pto::emitVPTOHostStubSource(module, stubSource, llvm::errs()))) {
+      llvm::errs() << "Error: Failed to emit VPTO host stub source.\n";
+      return 1;
+    }
+  }
+
   if (failed(
-          pto::lowerVPTOModuleToLLVMModules(module, options, cubeModule,
-                                            vectorModule, llvm::errs()))) {
+          pto::lowerVPTOModuleToLLVMModules(module, options,
+                                            result.vptoCubeModule,
+                                            result.vptoVectorModule,
+                                            llvm::errs()))) {
     llvm::errs() << "Error: Failed to lower VPTO to LLVM modules.\n";
     return 1;
   }
 
-  if (failed(pto::emitVPTOFatobj(cubeModule.module.get(),
-                                 vectorModule.module.get(), stubSource,
-                                 outputFile, llvm::errs()))) {
-    llvm::errs() << "Error: Failed to emit VPTO fatobj.\n";
-    return 1;
-  }
-  outputFile.keep();
+  result.vptoStubSource = std::move(stubSource);
+  result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
 }
 
 static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
                                             int argc, char **argv,
-                                            bool hasTileOpsToExpand,
-                                            bool hasTilelangHelpers) {
+                                            bool hasTileOpsToExpand) {
   PassManager pm(module->getContext());
   pm.enableVerifier();
   pm.addPass(pto::createVPTOSplitCVModulePass());
   pm.addPass(pto::createVPTONormalizeContainerPass());
-  if (!hasTileOpsToExpand && hasTilelangHelpers)
-    inlineTilelangHelpersOnVPTOInput(pm);
   if (hasTileOpsToExpand)
-    lowerPTOToVPTOBackend(pm, argc, argv);
+    lowerPTOToVPTOBackend(pm, module.get(), argc, argv);
   prepareVPTOForEmission(pm);
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -1563,151 +1653,21 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   return success();
 }
 
-int main(int argc, char **argv) {
-  DialectRegistry registry;
-  registry.insert<mlir::func::FuncDialect>();
-  registry.insert<mlir::tensor::TensorDialect>();
-  registry.insert<mlir::arith::ArithDialect>();
-  registry.insert<mlir::memref::MemRefDialect>();
-  registry.insert<mlir::affine::AffineDialect>();
-  registry.insert<mlir::cf::ControlFlowDialect>();
-  registry.insert<mlir::bufferization::BufferizationDialect>();
-  registry.insert<mlir::scf::SCFDialect>();
-  registry.insert<mlir::math::MathDialect>();
-
-  registry.insert<mlir::pto::PTODialect>();
-  arith::registerBufferizableOpInterfaceExternalModels(registry);
-  tensor::registerBufferizableOpInterfaceExternalModels(registry);
-  pto::registerBufferizableOpInterfaceExternalModels(registry);
-
-  registry.insert<emitc::EmitCDialect>();
-  registry.insert<mlir::LLVM::LLVMDialect>();
-  mlir::registerAllPasses();
-  ::registerPTOPasses();
-  mlir::pto::registerPTOViewToMemrefPass();
-  ::registerPTOInlineLibCall();
-  ::registerFoldTileBufIntrinsics();
-  ::registerExpandTileOp();
-  mlir::registerPassManagerCLOptions();
-
-  llvm::cl::SetVersionPrinter(printPTOASVersion);
-
-  bool cliArchSpecified = false;
-  for (int i = 1; i < argc; ++i) {
-    llvm::StringRef arg(argv[i]);
-    if (arg == "--pto-arch" || arg.starts_with("--pto-arch="))
-      cliArchSpecified = true;
-  }
-
-  // Parse command line options
-  llvm::cl::ParseCommandLineOptions(argc, argv, "PTO Assembler (ptoas)\n");
-
-  PTOBackend effectiveBackend = PTOBackend::EmitC;
-  if (!parseBackend(ptoBackend, effectiveBackend)) {
-    llvm::errs() << "Error: invalid --pto-backend='" << ptoBackend
-                 << "'. Expected 'emitc' or 'vpto'.\n";
-    return 1;
-  }
+int mlir::pto::compilePTOASModule(
+    OwningOpRef<ModuleOp> &module, PTOASContext &context,
+    PTOBackend effectiveBackend, PTOASCompileResult &result,
+    bool emitVPTOHostStub) {
+  result.reset();
+  llvm::StringRef arch = context.getArch();
+  int argc = context.getArgc();
+  char **argv = context.getArgv();
 
   if (effectiveBackend != PTOBackend::VPTO &&
-      (emitVPTO || ptoPrintSeamIR || !ptoSeamIRFile.empty())) {
+      (emitVPTO || emitVPTOLLVMDialect || ptoPrintSeamIR ||
+       !ptoSeamIRFile.empty())) {
     llvm::errs() << "Error: VPTO-specific flags require "
-                    "--pto-backend=vpto.\n";
+                    "--pto-backend=vpto or pto.backend = \"vpto\".\n";
     return 1;
-  }
-
-  // Read whole input first (so we can auto-detect .ptobc by magic).
-  auto fileOrErr = llvm::MemoryBuffer::getFileOrSTDIN(inputFilename);
-  if (!fileOrErr) {
-    llvm::errs() << "Error: Could not open input file: "
-                 << fileOrErr.getError().message() << "\n";
-    return 1;
-  }
-
-  MLIRContext context(registry);
-  // Be tolerant: ptobc decode may materialize ops from dialects that aren't
-  // explicitly registered/loaded in this tool yet.
-  context.allowUnregisteredDialects(true);
-
-  context.getOrLoadDialect<emitc::EmitCDialect>();
-  context.getOrLoadDialect<mlir::pto::PTODialect>();
-  context.getOrLoadDialect<func::FuncDialect>();
-  context.getOrLoadDialect<arith::ArithDialect>();
-  context.getOrLoadDialect<math::MathDialect>();
-  context.getOrLoadDialect<memref::MemRefDialect>();
-  context.getOrLoadDialect<affine::AffineDialect>();
-  context.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
-
-  OwningOpRef<ModuleOp> module;
-  llvm::StringRef buf = (*fileOrErr)->getBuffer();
-  const bool isPTOBC = (buf.size() >= 6 && std::memcmp(buf.data(), "PTOBC\0", 6) == 0);
-
-  auto normalizeArch = [](llvm::StringRef archValue) {
-    std::string normalized = archValue.str();
-    for (char &c : normalized)
-      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return normalized;
-  };
-  auto detectTextualModuleArch = [&](llvm::StringRef text) -> std::optional<std::string> {
-    StringRefVector matches;
-    llvm::Regex archRegex(
-        R"ptoarch("?(pto\.target_arch)"?[[:space:]]*=[[:space:]]*"([[:alpha:][:digit:]_]+)")ptoarch");
-    if (!archRegex.match(text, &matches) || matches.size() < 3)
-      return std::nullopt;
-    return normalizeArch(matches[2]);
-  };
-
-  std::string arch = normalizeArch(ptoTargetArch);
-  if (cliArchSpecified) {
-    if (arch != "a3" && arch != "a5") {
-      llvm::errs() << "Error: invalid --pto-arch='" << ptoTargetArch
-                   << "'. Expected 'a3' or 'a5'.\n";
-      return 1;
-    }
-  } else if (!isPTOBC) {
-    if (auto detectedArch = detectTextualModuleArch(buf))
-      arch = *detectedArch;
-  }
-  if (arch != "a3" && arch != "a5")
-    arch = "a3";
-
-  if (isPTOBC) {
-    // Decode PTO bytecode directly into an MLIR module.
-    llvm::ArrayRef<uint8_t> bytes(reinterpret_cast<const uint8_t *>(buf.data()), buf.size());
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-    try {
-      module = ptobc::decodePTOBCToModule(bytes, context);
-    } catch (...) {
-      llvm::errs() << "Error: Failed to decode PTOBC.\n";
-      return 1;
-    }
-#else
-    module = ptobc::decodePTOBCToModule(bytes, context);
-#endif
-    if (!module) {
-      llvm::errs() << "Error: Failed to decode PTOBC.\n";
-      return 1;
-    }
-  } else {
-    // Parse textual MLIR (.pto).
-    llvm::SourceMgr sourceMgr;
-    sourceMgr.AddNewSourceBuffer(std::move(*fileOrErr), llvm::SMLoc());
-    pto::ScopedPTOParserTargetArch scopedParserArch(
-        &context, arch == "a5" ? pto::PTOParserTargetArch::A5
-                               : pto::PTOParserTargetArch::A3);
-    module = parseSourceFile<ModuleOp>(sourceMgr, &context);
-    if (!module) {
-      llvm::errs() << "Error: Failed to parse MLIR.\n";
-      return 1;
-    }
-  }
-
-  // If the CLI explicitly requested an arch, it overrides the input module.
-  // Otherwise, preserve the textual module's arch when present and only fall
-  // back to the effective default.
-  if (cliArchSpecified || !module->getOperation()->hasAttr("pto.target_arch")) {
-    module->getOperation()->setAttr("pto.target_arch",
-                                    mlir::StringAttr::get(&context, arch));
   }
 
   PTOBuildLevel effectiveLevel = defaultBuildLevel();
@@ -1731,9 +1691,13 @@ int main(int argc, char **argv) {
     }
   }
 
-  const bool enableA5FrontendFusionPath =
+  const bool enableA5FusionPath =
       enableOpFusion && arch == "a5" &&
       effectiveLevel != PTOBuildLevel::Level1;
+  const bool enableA5EmitCFusionPath =
+      enableA5FusionPath && effectiveBackend == PTOBackend::EmitC;
+  const bool enableA5VPTOFusionPath =
+      enableA5FusionPath && effectiveBackend == PTOBackend::VPTO;
 
   bool invalidAutoSyncTailHint = false;
   module->walk([&](mlir::func::FuncOp func) {
@@ -1752,7 +1716,7 @@ int main(int argc, char **argv) {
       return;
     }
     func->setAttr("pto.auto_sync_tail_hint",
-                  mlir::StringAttr::get(&context, normalizedHint));
+                  mlir::StringAttr::get(module->getContext(), normalizedHint));
   });
   if (invalidAutoSyncTailHint)
     return 1;
@@ -1839,16 +1803,17 @@ int main(int argc, char **argv) {
       return 1;
   }
 
-  // [Fix] ToolOutputFile Usage
-  std::error_code ec;
-  llvm::ToolOutputFile outputFile(outputFilename, ec, llvm::sys::fs::OF_None);
-  if (ec) {
-    llvm::errs() << ec.message() << "\n";
-    return 1;
+  {
+    PassManager preBackendPM(module->getContext());
+    preBackendPM.enableVerifier();
+    preBackendPM.addPass(pto::createPTONormalizeUncoveredTileSectionsPass());
+    if (failed(preBackendPM.run(module.get()))) {
+      llvm::errs() << "Error: failed to normalize uncovered PTO tile sections.\n";
+      return 1;
+    }
   }
 
   const bool hasTileOpsToExpand = hasUnexpandedTileOps(*module);
-  const bool hasTilelangHelpers = hasTilelangInlineHelpers(*module);
 
   if (effectiveBackend == PTOBackend::VPTO && !hasTileOpsToExpand) {
     if (ptoPrintSeamIR || !ptoSeamIRFile.empty()) {
@@ -1856,18 +1821,26 @@ int main(int argc, char **argv) {
                       "skipping the shared PTO-to-VPTO lowering pipeline.\n";
       return 1;
     }
-    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand,
-                                      hasTilelangHelpers)))
+    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand)))
       return 1;
-    return emitVPTOBackendResult(module.get(), outputFile);
+    return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
+                                 context.getCANNVersionOrDefault());
   }
 
   // Main PassManager
-  PassManager pm(&context);
+  PassManager pm(module->getContext());
 
   if (failed(applyPassManagerCLOptions(pm)))
     return 1;
 
+  // Rank-2 → rank-5 view canonicalization is currently gated on the VPTO
+  // backend to limit blast radius.  A3/A5 EmitC codegen already pads strides
+  // to rank-5 via InferPTOLayout and buildGlobalTensorShapeAndStride, so it
+  // does not need the canonicalization pass at the IR level.  When VPTO
+  // validation is complete and the pass is proven stable, the gate can be
+  // lifted to make it unconditional for all backends.
+  if (effectiveBackend == PTOBackend::VPTO)
+    pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOCanonicalizeIRPass());
   pm.addNestedPass<mlir::func::FuncOp>(
       pto::createPTOAssignDefaultFrontendPipeIdPass());
   pm.addNestedPass<mlir::func::FuncOp>(
@@ -1883,10 +1856,24 @@ int main(int argc, char **argv) {
 
   // Keep frontend fusion on tile-native PTO IR and annotate last_use directly
   // on scheduled block-local spans before the shared mainline lowers tiles.
-  if (enableA5FrontendFusionPath) {
-    pm.addNestedPass<mlir::func::FuncOp>(pto::createFusionPlanPass());
+  // The shape-inference switch drives FusionPlan only: that is where the
+  // iteration-domain decisions (static vs ShapeConstraintSolver) are made.
+  // FusionRegionGen consumes only the shared pre-fusion dataflow graph (cached
+  // by the analysis manager and built once by FusionPlan) plus the resulting
+  // pto.fusion.group_id/order metadata; it never consults the domain classes,
+  // so it takes no option here.
+  pto::FusionPlanOptions fusionPlanOpts;
+  fusionPlanOpts.enableShapeInference = enableShapeInference;
+  if (enableA5EmitCFusionPath) {
+    pm.addNestedPass<mlir::func::FuncOp>(
+        pto::createFusionPlanPass(fusionPlanOpts));
     pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOMarkLastUsePass());
+  } else if (enableA5VPTOFusionPath) {
+    pm.addNestedPass<mlir::func::FuncOp>(
+        pto::createFusionPlanPass(fusionPlanOpts));
+    pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
+    pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOFusionRegionGenPass());
   }
 
   pm.addPass(pto::createPTOViewToMemrefPass());
@@ -1906,6 +1893,8 @@ int main(int argc, char **argv) {
   // `pto.slot_marker` ops and can keep multi-buffer slot identity (const slot
   // K vs slot K' or dynamic slot) for the alias / event-id analysis.
   // solvers, while BufidSync is A5-only get_buf/rls_buf synchronization.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      pto::createPTOVerifySubkernelPipeContractPass());
   if (enableInsertSync)
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOInsertSyncPass());
   else if (enableBufidSync) {
@@ -1933,8 +1922,10 @@ int main(int argc, char **argv) {
       llvm::errs() << "Error: Pass execution failed.\n";
       return 1;
     }
-    module->print(outputFile.os());
-    outputFile.keep();
+    result.kind = PTOASCompileResultKind::Text;
+    llvm::raw_string_ostream os(result.textOutput);
+    module->print(os);
+    os.flush();
     return 0;
   }
 
@@ -1942,11 +1933,17 @@ int main(int argc, char **argv) {
   // backends consume the same post-planning seam IR.
   pm.addPass(pto::createPTOMaterializeTileHandlesPass());
   pm.addPass(createCSEPass());
+  // Inline PTODSL backend helpers only after the shared mainline has
+  // materialized tile-native handles, so helper arguments are restored to the
+  // tile_buf ABI before qk.as_ptr()-style bridges are cloned into callers.
+  pm.addPass(pto::createPTOInlineBackendHelpersPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
   if (failed(applyConfiguredPassManagerCLOptions(pm, "main PTOAS pipeline")))
     return 1;
 
   module->getOperation()->setAttr("pto.target_arch",
-                                  mlir::StringAttr::get(&context, arch));
+                                  mlir::StringAttr::get(module->getContext(), arch));
 
   if (effectiveBackend == PTOBackend::VPTO) {
     if (failed(pm.run(*module))) {
@@ -1961,10 +1958,10 @@ int main(int argc, char **argv) {
     if (failed(emitSharedPreBackendSeamIR(*module, ptoSeamIRFile)))
       return 1;
 
-    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand,
-                                      hasTilelangHelpers)))
+    if (failed(runVPTOBackendPipeline(module, argc, argv, hasTileOpsToExpand)))
       return 1;
-    return emitVPTOBackendResult(module.get(), outputFile);
+    return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
+                                 context.getCANNVersionOrDefault());
   }
 
   if (arch == "a3") {
@@ -2007,13 +2004,11 @@ int main(int argc, char **argv) {
   rewriteEventIdArrayMarkers(cppOutput);
   pto::rewriteLastUseMarkersInCpp(cppOutput);
   rewriteAddPtrTraceMarkers(cppOutput, emitAddPtrTrace);
+  rewriteMalformedVerbatimSemicolons(cppOutput);
   rewriteScalarConstantDecls(cppOutput);
   rewriteHoistedGlobalTensorDecls(cppOutput);
 
-  outputFile.os() << cppOutput;
-  outputFile.os().flush();
-
-  outputFile.keep(); // Success, keep the file
-
+  result.kind = PTOASCompileResultKind::Text;
+  result.textOutput = std::move(cppOutput);
   return 0;
 }

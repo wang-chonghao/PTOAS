@@ -20,7 +20,7 @@ PTOAS_OUT_DIR="${PTOAS_OUT_DIR:-}"
 PTO_BUILD_DIR="${PTO_BUILD_DIR:-}"
 PTOAS_ENABLE_INSERT_SYNC="${PTOAS_ENABLE_INSERT_SYNC:-1}"
 PTOAS_FLAGS="${PTOAS_FLAGS:-}"
-PTO_PTO_DIRS="${PTO_PTO_DIRS:-Sync Qwen3DecodeA3 Qwen3DecodeA5 DeepseekV4DecodeA3 DeepseekV4DecodeA5 CommSync}"
+PTO_PTO_DIRS="${PTO_PTO_DIRS:-Sync Qwen3DecodeA3 Qwen3DecodeA5 DeepseekV4DecodeA3 DeepseekV4DecodeA5 CommSync Prelu Rem Rems Gemvmx MatmulMxLowPrecision TquantMx}"
 ENABLE_BC=0
 
 usage() {
@@ -38,7 +38,7 @@ Env:
   PTO_BUILD_DIR  # build directory root that contains tools/ptoas and tools/ptobc (optional)
   PTOAS_FLAGS  # extra flags passed to ptoas (e.g. --enable-insert-sync)
   PTOAS_ENABLE_INSERT_SYNC  # 1 to append --enable-insert-sync to PTOAS_FLAGS (default: 1)
-  PTO_PTO_DIRS  # space-separated dirs to run .pto directly (default: Sync Qwen3DecodeA3 Qwen3DecodeA5 DeepseekV4DecodeA3 DeepseekV4DecodeA5)
+  PTO_PTO_DIRS  # space-separated dirs to run .pto directly (default: Sync Qwen3DecodeA3 Qwen3DecodeA5 DeepseekV4DecodeA3 DeepseekV4DecodeA5 CommSync Prelu Rem Rems Gemvmx MatmulMxLowPrecision TquantMx)
 
 Flags:
   --enablebc  # enable: python -> .pto -> ptobc -> .pto -> ptoas
@@ -306,6 +306,10 @@ process_one_dir() {
         ;;
     esac
     base="$(basename "$f" .py)"
+    if [[ -f "${dir}/${base}-pto.pto" ]]; then
+      echo -e "${A}(${base}.py)\tSKIP\tprefer checked-in direct PTO sample: ${base}-pto.pto"
+      continue
+    fi
     local expect_fail=0
     case "$base" in
       *_invalid|*_xfail) expect_fail=1 ;;
@@ -339,7 +343,7 @@ process_one_dir() {
       echo -e "${A}(${base}.py)\tSKIP\trequires --pto-arch=a5"
       continue
     fi
-    if [[ "$base" == "gemvmx" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
+    if [[ ( "$base" == "gemvmx" || "$base" == "matmul_mx_low_precision" ) && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
       echo -e "${A}(${base}.py)\tSKIP\trequires --pto-arch=a5"
       continue
     fi
@@ -1335,12 +1339,19 @@ PY
       cpp="${out_subdir}/${base}.cpp"
       if [[ "$A" == "Qwen3DecodeA3" || "$A" == "Qwen3DecodeA5" || "$A" == "DeepseekV4DecodeA3" || "$A" == "DeepseekV4DecodeA5" ]]; then
         cpp="${out_subdir}/${base}-pto.cpp"
+      elif [[ "$base" == "tquant_mx" ]]; then
+        # Board validation currently discovers generated sample kernels via
+        # the historical `*-pto.cpp` naming convention.
+        cpp="${out_subdir}/${base}-pto.cpp"
       fi
       local sample_use_ptobc_roundtrip="$use_ptobc_roundtrip"
 
       # TODO(ptobc): Keep ptoas regression coverage for patterns that are not
       # yet supported by ptobc roundtrip; re-enable once ptobc catches up.
-      if [[ "$base" == "test_if_else_tile_result" || \
+      if [[ "$base" == "prelu-pto" || \
+            "$base" == "gemvmx-pto" || \
+            "$base" == "matmul_mx_low_precision-pto" || \
+            "$base" == "test_if_else_tile_result" || \
             "$base" == "test_tmov_col_major_16x1_align_a5" || \
             "$base" == "test_tmov_row_major_1x16_control_a5" || \
             "$base" == "decode_projection_incore_0" || \

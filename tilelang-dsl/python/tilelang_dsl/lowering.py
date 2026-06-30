@@ -254,7 +254,7 @@ class _AuthoringRenderer:
         kernel_kind = "cube" if self.kernel.kernel_family == "cube" else "vector"
         function_attrs = (
             "attributes { "
-            f"pto.tilelang.instance, pto.kernel_kind = #pto.kernel_kind<{kernel_kind}> "
+            f"pto.entry, pto.tilelang.instance, pto.kernel_kind = #pto.kernel_kind<{kernel_kind}> "
             "}"
         )
         lines.append(f'module attributes {{pto.target_arch = "{self.kernel.target}"}} {{')
@@ -1184,7 +1184,7 @@ class _AuthoringRenderer:
             + f"{remaining_cols} = arith.subi {total_cols}, {col_value.name} : index"
         )
         subview_type = self._render_rank2_subview_result_type(
-            element_dtype=tile_type.element_dtype.name,
+            element_dtype=self._render_dtype_name(tile_type.element_dtype),
             memory_space=tile_type.memory_space or "ub",
         )
         subview_name = self._new_temp()
@@ -1282,7 +1282,7 @@ class _AuthoringRenderer:
 
         result_name = desired_name or self._new_temp()
         result_type_text = self._render_partition_tensor_view_type(
-            element_dtype=expr.type.element_dtype.name,
+            element_dtype=self._render_dtype_name(expr.type.element_dtype),
             shape=tuple("?" if dim is None else dim for dim in expr.type.extents),
         )
         into.append(
@@ -2665,14 +2665,33 @@ class _AuthoringRenderer:
         destination = self._lower_expr(expr.args[1], env, indent=indent, into=into)
         first = self._lower_to_i64(expr.args[2], env, indent=indent, into=into)
         second = self._lower_to_i64(expr.args[3], env, indent=indent, into=into)
-        attr_suffix = ""
-        if len(expr.args) > 4 and self._extract_static_bool(expr.args[4], context=f"pto.{expr.name} transpose"):
-            attr_suffix = " {transpose = true}"
+        cursor = 4
+        start_suffix = ""
+        start_type_suffix = ""
+        attr_entries: list[str] = []
+        if expr.name in {"mte_l1_l0a", "mte_l1_l0b", "mte_l1_l0a_mx", "mte_l1_l0b_mx"}:
+            if len(expr.args) < 7:
+                if expr.name in {"mte_l1_l0a", "mte_l1_l0b"}:
+                    raise ValueError(f"pto.{expr.name} requires normalized start_row and start_col operands")
+                if len(expr.args) < 6:
+                    raise ValueError(f"pto.{expr.name} requires normalized start_row and start_col operands")
+            start_row_expr = expr.args[cursor]
+            start_col_expr = expr.args[cursor + 1]
+            cursor += 2
+            start_row = self._lower_to_i64(start_row_expr, env, indent=indent, into=into)
+            start_col = self._lower_to_i64(start_col_expr, env, indent=indent, into=into)
+            start_suffix = f", {start_row.name}, {start_col.name}"
+            start_type_suffix = f", {self._render_type(start_row.type)}, {self._render_type(start_col.type)}"
+        if expr.name in {"mte_l1_l0a", "mte_l1_l0b"} and len(expr.args) > cursor and self._extract_static_bool(
+            expr.args[cursor], context=f"pto.{expr.name} transpose"
+        ):
+            attr_entries.append("transpose = true")
+        attr_suffix = f" {{{', '.join(attr_entries)}}}" if attr_entries else ""
         into.append(
             self._indent(indent)
-            + f"pto.{expr.name} {source.name}, {destination.name}, {first.name}, {second.name}{attr_suffix} : "
+            + f"pto.{expr.name} {source.name}, {destination.name}, {first.name}, {second.name}{start_suffix}{attr_suffix} : "
             + f"{self._render_type(source.type)}, {self._render_type(destination.type)}, "
-            + f"{self._render_type(first.type)}, {self._render_type(second.type)}"
+            + f"{self._render_type(first.type)}, {self._render_type(second.type)}{start_type_suffix}"
         )
 
     def _render_mte_l0c_store(
@@ -2729,6 +2748,15 @@ class _AuthoringRenderer:
         sat = self._extract_optional_static_string(expr.args[cursor + 9], context=f"pto.{expr.name} sat")
         atomic_type = self._extract_optional_static_string(expr.args[cursor + 10], context=f"pto.{expr.name} atomic type")
         atomic_op = self._extract_optional_static_string(expr.args[cursor + 11], context=f"pto.{expr.name} atomic op")
+
+        if pre_quant_mode is not None:
+            source = self._bridge_rendered_ptr_element_to_signless_integer(
+                source,
+                indent=indent,
+                into=into,
+            )
+            operands[0] = source
+            type_parts[0] = self._render_type(source.type)
 
         if unit_flag is not None:
             clause_parts.append(f"unit_flag({unit_flag})")
@@ -3118,6 +3146,40 @@ class _AuthoringRenderer:
         )
         return _RenderedValue(name=cast_name, type=raw_type)
 
+    def _bridge_rendered_ptr_element_to_signless_integer(
+        self,
+        value: _RenderedValue,
+        *,
+        indent: int,
+        into: list[str],
+    ) -> _RenderedValue:
+        if not isinstance(value.type, SemanticPtrType) or not is_integer_dtype(value.type.element_dtype):
+            return value
+        signless_element_type = self._signless_integer_scalar_type(
+            SemanticScalarType(dtype=value.type.element_dtype)
+        )
+        if signless_element_type is None:
+            return value
+        target_type = SemanticPtrType(
+            element_dtype=signless_element_type.dtype,
+            memory_space=value.type.memory_space,
+        )
+        if value.type == target_type:
+            return value
+        rendered_target_type = self._render_type(target_type)
+        cache_key = (value.name, rendered_target_type)
+        existing = self._castptr_cache.get(cache_key)
+        if existing is not None:
+            return _RenderedValue(name=existing, type=target_type)
+        cast_name = self._new_temp()
+        into.append(
+            self._indent(indent)
+            + f"{cast_name} = pto.castptr {value.name} : "
+            f"{self._render_type(value.type)} -> {rendered_target_type}"
+        )
+        self._castptr_cache[cache_key] = cast_name
+        return _RenderedValue(name=cast_name, type=target_type)
+
     def _bridge_rendered_integer_to_target(
         self,
         value: _RenderedValue,
@@ -3460,7 +3522,7 @@ class _AuthoringRenderer:
             return value
         memref_type = _RenderedTextualType(
             self._render_memref_type(
-                element_dtype=value.type.element_dtype.name,
+                element_dtype=self._render_dtype_name(value.type.element_dtype),
                 shape=value.type.shape if value.type.shape is not None else ("?",) * value.type.rank,
                 memory_space=value.type.memory_space or "ub",
             )
@@ -3778,17 +3840,17 @@ class _AuthoringRenderer:
         if isinstance(ty, SemanticIndexType):
             return "index"
         if isinstance(ty, SemanticScalarType):
-            return ty.dtype.name
+            return self._render_dtype_name(ty.dtype)
         if isinstance(ty, SemanticPtrType):
-            return f"!pto.ptr<{ty.element_dtype.name}, {self._render_address_space_name(ty.memory_space)}>"
+            return f"!pto.ptr<{self._render_dtype_name(ty.element_dtype)}, {self._render_address_space_name(ty.memory_space)}>"
         if isinstance(ty, SemanticTensorViewType):
             return self._render_tensor_view_type(
-                element_dtype=ty.element_dtype.name,
+                element_dtype=self._render_dtype_name(ty.element_dtype),
                 shape=("?",) * ty.rank,
             )
         if isinstance(ty, SemanticPartitionTensorViewType):
             return self._render_partition_tensor_view_type(
-                element_dtype=ty.element_dtype.name,
+                element_dtype=self._render_dtype_name(ty.element_dtype),
                 shape=("?",) * ty.rank,
             )
         if isinstance(ty, SemanticTileType):
@@ -3798,11 +3860,21 @@ class _AuthoringRenderer:
         if isinstance(ty, SemanticMaskType):
             return f"!pto.mask<{ty.granularity}>"
         if isinstance(ty, SemanticVRegType):
-            return f"!pto.vreg<{ty.lanes}x{ty.element_dtype.name}>"
+            return f"!pto.vreg<{ty.lanes}x{self._render_dtype_name(ty.element_dtype)}>"
         if isinstance(ty, SemanticVectorType):
             dims = "x".join(str(dim) for dim in ty.shape)
-            return f"vector<{dims}x{ty.element_dtype.name}>"
+            return f"vector<{dims}x{self._render_dtype_name(ty.element_dtype)}>"
         raise NotImplementedError(f"unsupported semantic type {ty!r}")
+
+    def _render_dtype_name(self, dtype: ScalarType) -> str:
+        low_precision = {
+            "hif8": "!pto.hif8",
+            "f8e4m3": "f8E4M3FN",
+            "f8e5m2": "f8E5M2",
+            "f4e1m2x2": "!pto.f4E1M2x2",
+            "f4e2m1x2": "!pto.f4E2M1x2",
+        }
+        return low_precision.get(dtype.name, dtype.name)
 
     def _is_memref_like_type(self, ty: SemanticType) -> bool:
         return isinstance(ty, (SemanticTensorViewType, SemanticPartitionTensorViewType, SemanticTileType)) or (
@@ -3813,10 +3885,10 @@ class _AuthoringRenderer:
         if isinstance(ty, SemanticPtrType):
             return self._render_type(ty)
         if isinstance(ty, (SemanticTensorViewType, SemanticPartitionTensorViewType)):
-            return f"!pto.ptr<{ty.element_dtype.name}, gm>"
+            return f"!pto.ptr<{self._render_dtype_name(ty.element_dtype)}, gm>"
         if isinstance(ty, SemanticTileType):
             memory_space = ty.memory_space or "ub"
-            return f"!pto.ptr<{ty.element_dtype.name}, {self._render_address_space_name(memory_space)}>"
+            return f"!pto.ptr<{self._render_dtype_name(ty.element_dtype)}, {self._render_address_space_name(memory_space)}>"
         return self._render_type(ty)
 
     def _render_memref_type(
@@ -3872,7 +3944,7 @@ class _AuthoringRenderer:
             compact_suffix = f", compact={self._render_tile_buf_compact_mode(config.compact_mode)}"
         return (
             f"!pto.tile_buf<loc={self._render_tile_buf_loc(ty.memory_space or 'ub')}, "
-            f"dtype={ty.element_dtype.name}, rows={rows}, cols={cols}, "
+            f"dtype={self._render_dtype_name(ty.element_dtype)}, rows={rows}, cols={cols}, "
             f"v_row={self._render_tile_buf_dim(v_row)}, v_col={self._render_tile_buf_dim(v_col)}, "
             f"blayout={config.b_layout.value}, slayout={config.s_layout.value}, "
             f"fractal={config.s_fractal_size}, pad={self._render_tile_buf_pad_value(config.pad_value)}{compact_suffix}>"

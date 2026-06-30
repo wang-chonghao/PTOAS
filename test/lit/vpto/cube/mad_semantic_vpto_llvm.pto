@@ -23,7 +23,19 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cu
       : !pto.ptr<f32, l0a>, !pto.ptr<f32, l0b>, !pto.ptr<f32, l0c>, !pto.ptr<f32, bt>, i64, i64, i64
     return
   }
+
+  func.func @mad_semantic_vpto_llvm_i8(
+      %lhs: !pto.ptr<i8, l0a>,
+      %rhs: !pto.ptr<i8, l0b>,
+      %dst: !pto.ptr<i32, l0c>) attributes {pto.aicore} {
+    %c16 = arith.constant 16 : i64
+    pto.mad %lhs, %rhs, %dst, %c16, %c16, %c16 unit_flag(check_only) disable_gemv
+      : !pto.ptr<i8, l0a>, !pto.ptr<i8, l0b>, !pto.ptr<i32, l0c>, i64, i64, i64
+    return
+  }
 }
 
 // CHECK-LABEL: llvm.func @mad_semantic_vpto_llvm_mix_aic
 // CHECK-COUNT-3: llvm.call @llvm.hivm.MAD.f322f32.c310
+// CHECK-LABEL: llvm.func @mad_semantic_vpto_llvm_i8_mix_aic
+// CHECK: llvm.call @llvm.hivm.MAD.s8.c310

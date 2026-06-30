@@ -89,6 +89,14 @@ static bool hasPtrNormalizeConvertibleType(TypeRange types) {
       types, [](Type type) { return hasPtrNormalizeConvertibleType(type); });
 }
 
+static FailureOr<SmallVector<Type>>
+convertTypes(const TypeConverter &typeConverter, TypeRange types) {
+  SmallVector<Type> convertedTypes;
+  if (failed(typeConverter.convertTypes(types, convertedTypes)))
+    return failure();
+  return convertedTypes;
+}
+
 static bool isMemRefType(Type type) { return isa<BaseMemRefType>(type); }
 
 static Value materializeUnrealizedCast(OpBuilder &builder, Type resultType,
@@ -119,7 +127,7 @@ static LogicalResult computeSubviewElementOffset(memref::SubViewOp op,
 
   Location loc = op.getLoc();
   Value total = rewriter.create<arith::ConstantIndexOp>(loc, baseOffset);
-  ArrayRef<OpFoldResult> mixedOffsets = op.getMixedOffsets();
+  SmallVector<OpFoldResult> mixedOffsets = op.getMixedOffsets();
   if (mixedOffsets.size() != strides.size())
     return failure();
 
@@ -408,7 +416,11 @@ struct ConvertVldsSubviewOperandPattern : public OpConversionPattern<pto::VldsOp
 
     OperationState state(op.getLoc(), op->getName().getStringRef());
     state.addOperands({adaptor.getSource(), adaptor.getOffset()});
-    state.addTypes(op->getResultTypes());
+    FailureOr<SmallVector<Type>> resultTypes =
+        convertTypes(*getTypeConverter(), op->getResultTypes());
+    if (failed(resultTypes))
+      return failure();
+    state.addTypes(*resultTypes);
     state.addAttributes(op->getAttrs());
     Operation *newOp = rewriter.create(state);
     rewriter.replaceOp(op, newOp->getResults());
@@ -429,7 +441,37 @@ struct ConvertVstsSubviewOperandPattern : public OpConversionPattern<pto::VstsOp
     state.addOperands(
         {adaptor.getValue(), adaptor.getDestination(), adaptor.getOffset(),
          adaptor.getMask()});
-    state.addTypes(op->getResultTypes());
+    FailureOr<SmallVector<Type>> resultTypes =
+        convertTypes(*getTypeConverter(), op->getResultTypes());
+    if (failed(resultTypes))
+      return failure();
+    state.addTypes(*resultTypes);
+    state.addAttributes(op->getAttrs());
+    Operation *newOp = rewriter.create(state);
+    rewriter.replaceOp(op, newOp->getResults());
+    return success();
+  }
+};
+
+struct ConvertVsstbSubviewOperandPattern
+    : public OpConversionPattern<pto::VsstbOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::VsstbOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isa<pto::PtrType>(adaptor.getDestination().getType()))
+      return failure();
+
+    OperationState state(op.getLoc(), op->getName().getStringRef());
+    state.addOperands({adaptor.getValue(), adaptor.getDestination(),
+                       adaptor.getBlockStride(), adaptor.getRepeatStride(),
+                       adaptor.getMask()});
+    FailureOr<SmallVector<Type>> resultTypes =
+        convertTypes(*getTypeConverter(), op->getResultTypes());
+    if (failed(resultTypes))
+      return failure();
+    state.addTypes(*resultTypes);
     state.addAttributes(op->getAttrs());
     Operation *newOp = rewriter.create(state);
     rewriter.replaceOp(op, newOp->getResults());
@@ -640,6 +682,18 @@ struct ConvertAccStoreUbOperandPattern
   }
 };
 
+struct ConvertMteUbGmOperandPattern
+    : public OpConversionPattern<pto::MteUbGmOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::MteUbGmOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    return rewriteBufferLikeBoundaryOp(op, adaptor, rewriter, "mte_ub_gm source",
+                                       "mte_ub_gm destination");
+  }
+};
+
 struct ConvertLoadOperandToPtrPattern : public OpConversionPattern<pto::PTOLoadOp> {
   using OpConversionPattern::OpConversionPattern;
 
@@ -652,8 +706,8 @@ struct ConvertLoadOperandToPtrPattern : public OpConversionPattern<pto::PTOLoadO
     if (!isa<pto::PtrType>(ptr.getType()))
       return rewriter.notifyMatchFailure(op, "expected ptr-form load input");
 
-    rewriter.replaceOpWithNewOp<pto::PTOLoadOp>(op, op.getValue().getType(),
-                                                ptr, adaptor.getOffset());
+    rewriter.replaceOpWithNewOp<pto::PTOLoadOp>(
+        op, op.getValue().getType(), ptr, adaptor.getOffset());
     return success();
   }
 };
@@ -671,8 +725,8 @@ struct ConvertStoreOperandToPtrPattern
     if (!isa<pto::PtrType>(ptr.getType()))
       return rewriter.notifyMatchFailure(op, "expected ptr-form store input");
 
-    rewriter.replaceOpWithNewOp<pto::PTOStoreOp>(op, ptr, adaptor.getOffset(),
-                                                 adaptor.getValue());
+    rewriter.replaceOpWithNewOp<pto::PTOStoreOp>(
+        op, ptr, adaptor.getOffset(), adaptor.getValue());
     return success();
   }
 };
@@ -726,7 +780,7 @@ struct VPTOPtrNormalizePass
                            scf::SCFDialect>();
     target.addDynamicallyLegalDialect<pto::PTODialect>([](Operation *op) {
       return !isa<pto::TileBufAddrOp, pto::PointerCastOp, pto::CastPtrOp,
-                  pto::BindTileOp, pto::VldsOp, pto::VstsOp>(op);
+                  pto::BindTileOp, pto::VldsOp, pto::VstsOp, pto::VsstbOp>(op);
     });
     target.addLegalOp<ModuleOp>();
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
@@ -760,10 +814,20 @@ struct VPTOPtrNormalizePass
              typeConverter.convertType(op.getResult().getType());
     });
     target.addDynamicallyLegalOp<pto::VldsOp>(
-        [](pto::VldsOp op) { return isa<pto::PtrType>(op.getSource().getType()); });
-    target.addDynamicallyLegalOp<pto::VstsOp>([](pto::VstsOp op) {
-      return isa<pto::PtrType>(op.getDestination().getType());
-    });
+        [&](pto::VldsOp op) {
+          return isa<pto::PtrType>(op.getSource().getType()) &&
+                 typeConverter.isLegal(op->getResultTypes());
+        });
+    target.addDynamicallyLegalOp<pto::VstsOp>(
+        [&](pto::VstsOp op) {
+          return isa<pto::PtrType>(op.getDestination().getType()) &&
+                 typeConverter.isLegal(op->getResultTypes());
+        });
+    target.addDynamicallyLegalOp<pto::VsstbOp>(
+        [&](pto::VsstbOp op) {
+          return isa<pto::PtrType>(op.getDestination().getType()) &&
+                 typeConverter.isLegal(op->getResultTypes());
+        });
     target.addDynamicallyLegalOp<pto::LoadScalarOp>(
         [](pto::LoadScalarOp op) { return isa<pto::PtrType>(op.getPtr().getType()); });
     target.addDynamicallyLegalOp<pto::StoreScalarOp>(
@@ -820,6 +884,10 @@ struct VPTOPtrNormalizePass
       return isa<pto::PtrType>(op.getSource().getType()) &&
              isa<pto::PtrType>(op.getDestination().getType());
     });
+    target.addDynamicallyLegalOp<pto::MteUbGmOp>([](pto::MteUbGmOp op) {
+      return isa<pto::PtrType>(op.getSource().getType()) &&
+             isa<pto::PtrType>(op.getDestination().getType());
+    });
     target.addDynamicallyLegalOp<pto::PTOLoadOp>(
         [](pto::PTOLoadOp op) { return isa<pto::PtrType>(op.getPtr().getType()); });
     target.addDynamicallyLegalOp<pto::PTOStoreOp>(
@@ -839,6 +907,7 @@ struct VPTOPtrNormalizePass
                  ConvertBindTileToPtrPattern,
                  ConvertSubviewToAddPtrPattern, ConvertVldsSubviewOperandPattern,
                  ConvertVstsSubviewOperandPattern,
+                 ConvertVsstbSubviewOperandPattern,
                  ConvertLoadScalarOperandToPtrPattern,
                  ConvertStoreScalarOperandToPtrPattern,
                  ConvertMteUbUbOperandPattern,
@@ -854,6 +923,7 @@ struct VPTOPtrNormalizePass
                  ConvertAccStoreOperandPattern,
                  ConvertAccStoreGmOperandPattern,
                  ConvertAccStoreUbOperandPattern,
+                 ConvertMteUbGmOperandPattern,
                  ConvertLoadOperandToPtrPattern,
                  ConvertStoreOperandToPtrPattern,
                  ConvertPtrNormalizeUnrealizedCastOp>(

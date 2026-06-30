@@ -9,33 +9,12 @@
 
 from __future__ import annotations
 
-from mlir.dialects import arith
-from mlir.ir import IndexType, IntegerType
+from ._scalar_adaptation import coerce_runtime_index_value
 
 
 def coerce_runtime_index(value, *, context: str):
     """Normalize one authored loop/slice bound to an MLIR index SSA value."""
-    if isinstance(value, bool):
-        raise TypeError(f"{context} does not accept bool values")
-
-    if isinstance(value, int):
-        return arith.ConstantOp(IndexType.get(), value).result
-
-    if not hasattr(value, "type"):
-        raise TypeError(
-            f"{context} expects a Python int, an index value, or an integer runtime scalar; "
-            f"got {value!r}"
-        )
-
-    value_type = value.type
-    if IndexType.isinstance(value_type):
-        return value
-    if IntegerType.isinstance(value_type):
-        return arith.IndexCastOp(IndexType.get(), value).result
-
-    raise TypeError(
-        f"{context} expects an index or integer runtime scalar, got {value_type}"
-    )
+    return coerce_runtime_index_value(value, context=context)
 
 
 __all__ = [

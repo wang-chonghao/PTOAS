@@ -74,6 +74,139 @@ def PTO_AddressSpaceAttr : PTO_Attr<"AddressSpace", "address_space"> {
 }
 
 //===----------------------------------------------------------------------===//
+// Signedness
+//===----------------------------------------------------------------------===//
+
+def PTO_Signedness_Signed : I32EnumAttrCase<"Signed", 0, "signed">;
+def PTO_Signedness_Unsigned : I32EnumAttrCase<"Unsigned", 1, "unsigned">;
+
+def PTO_SignednessEnum : PTO_I32Enum<
+  "Signedness", "PTO integer signedness", [
+    PTO_Signedness_Signed,
+    PTO_Signedness_Unsigned
+  ]>;
+
+def PTO_SignednessAttr : PTO_Attr<"Signedness", "signedness"> {
+  let parameters = (ins EnumParameter<PTO_SignednessEnum>:$value);
+  let assemblyFormat = "`<` params `>`";
+  let summary = "Integer signedness control for semantic ops";
+}
+
+//===----------------------------------------------------------------------===//
+// SIMT GM load/store L1 and L2 cache controls
+//===----------------------------------------------------------------------===//
+
+def PTO_LdL2CacheEnum : PTO_I32Enum<
+  "LdL2Cache", "PTO load L2 cache control", [
+    I32EnumAttrCase<"NMFV", 0, "nmfv">,
+    I32EnumAttrCase<"NMLV", 1, "nmlv">,
+    I32EnumAttrCase<"NMPRS", 2, "nmprs">,
+    I32EnumAttrCase<"NMPREF", 3, "nmpref">,
+    I32EnumAttrCase<"NAKEEP", 4, "nakeep">,
+    I32EnumAttrCase<"NACLEAN", 5, "naclean">,
+    I32EnumAttrCase<"NADROP", 6, "nadrop">,
+    I32EnumAttrCase<"IDSFV", 8, "idsfv">,
+    I32EnumAttrCase<"IDSLV", 9, "idslv">,
+    I32EnumAttrCase<"IDSPRS", 10, "idsprs">,
+    I32EnumAttrCase<"IDSPREF", 11, "idspref">,
+    I32EnumAttrCase<"EXFV", 12, "exfv">,
+    I32EnumAttrCase<"EXLV", 13, "exlv">,
+    I32EnumAttrCase<"EXPRS", 14, "exprs">,
+    I32EnumAttrCase<"EXPREF", 15, "expref">
+  ]>;
+
+def PTO_LdL2CacheAttr
+    : EnumAttr<PTO_Dialect, PTO_LdL2CacheEnum, "ld_l2cache"> {
+  let assemblyFormat = "`<` params `>`";
+  let summary = "load L2 cache control";
+}
+
+def PTO_StL2CacheEnum : PTO_I32Enum<
+  "StL2Cache", "PTO store/atomic L2 cache control", [
+    I32EnumAttrCase<"NMFV", 0, "nmfv">,
+    I32EnumAttrCase<"NMLV", 1, "nmlv">,
+    I32EnumAttrCase<"NMPRS", 2, "nmprs">,
+    I32EnumAttrCase<"NMRED", 3, "nmred">,
+    I32EnumAttrCase<"NACI", 4, "naci">,
+    I32EnumAttrCase<"NAPW", 5, "napw">,
+    I32EnumAttrCase<"NAPI", 6, "napi">,
+    I32EnumAttrCase<"NARED", 7, "nared">,
+    I32EnumAttrCase<"WBHFV", 8, "wbhfv">,
+    I32EnumAttrCase<"WBHLV", 9, "wbhlv">,
+    I32EnumAttrCase<"WBHPRS", 10, "wbhprs">,
+    I32EnumAttrCase<"WBHRED", 11, "wbhred">,
+    I32EnumAttrCase<"WTSFV", 12, "wtsfv">,
+    I32EnumAttrCase<"WTSLV", 13, "wtslv">,
+    I32EnumAttrCase<"WTSPRS", 14, "wtsprs">,
+    I32EnumAttrCase<"WTSRED", 15, "wtsred">
+  ]>;
+
+def PTO_StL2CacheAttr
+    : EnumAttr<PTO_Dialect, PTO_StL2CacheEnum, "st_l2cache"> {
+  let assemblyFormat = "`<` params `>`";
+  let summary = "store and atomic L2 cache control";
+}
+
+def PTO_L1CacheEnum : PTO_I32Enum<
+  "L1Cache", "PTO L1 cache control", [
+    I32EnumAttrCase<"Uncache", 0, "uncache">,
+    I32EnumAttrCase<"Cache", 1, "cache">
+  ]>;
+
+def PTO_L1CacheAttr
+    : EnumAttr<PTO_Dialect, PTO_L1CacheEnum, "l1cache"> {
+  let assemblyFormat = "`<` params `>`";
+  let summary = "L1 cache control";
+}
+
+//===----------------------------------------------------------------------===//
+// SIMT conversion controls
+//===----------------------------------------------------------------------===//
+
+// CANN ROUND semantics confirmed from installed beta.1 headers:
+//   R = round to nearest, ties to even
+//   A = round away from zero
+//   F = round toward minus infinity
+//   C = round toward plus infinity
+//   Z = round toward zero
+//   O = round to odd
+//   H = CAST_CEIL (special cast mode observed on H8/HiF8 conversion paths)
+def PTO_RoundingEnum : PTO_I32Enum<
+  "Rounding", "PTO SIMT conversion rounding selector", [
+    // nearest-even
+    I32EnumAttrCase<"R", 0, "r">,
+    // away-zero
+    I32EnumAttrCase<"A", 1, "a">,
+    // floor / toward minus infinity
+    I32EnumAttrCase<"F", 2, "f">,
+    // ceil / toward plus infinity
+    I32EnumAttrCase<"C", 3, "c">,
+    // trunc / toward zero
+    I32EnumAttrCase<"Z", 4, "z">,
+    // round to odd
+    I32EnumAttrCase<"O", 5, "o">,
+    // CAST_CEIL on the confirmed H8/HiF8 conversion slice
+    I32EnumAttrCase<"H", 6, "h">
+  ]>;
+
+def PTO_RoundingAttr : EnumAttr<PTO_Dialect, PTO_RoundingEnum, "rounding"> {
+  let assemblyFormat = "`<` params `>`";
+  let summary = "SIMT conversion rounding selector";
+}
+
+def PTO_SaturationEnum : PTO_I32Enum<
+  "Saturation", "PTO SIMT conversion saturation selector", [
+    I32EnumAttrCase<"Disable", 0, "nosat">,
+    I32EnumAttrCase<"Enable", 1, "sat">
+  ]>;
+
+def PTO_SaturationAttr
+    : EnumAttr<PTO_Dialect, PTO_SaturationEnum, "saturation"> {
+  let assemblyFormat = "`<` params `>`";
+  let summary = "SIMT conversion saturation selector";
+}
+
+//===----------------------------------------------------------------------===//
 // Pipe
 //===----------------------------------------------------------------------===//
 
@@ -265,12 +398,16 @@ def PTO_SyncCoreTypeAttr : PTO_Attr<"SyncCoreType", "sync_core_type"> {
 def PTO_Layout_ND : I32EnumAttrCase<"ND", 0, "nd">;
 def PTO_Layout_DN : I32EnumAttrCase<"DN", 1, "dn">;
 def PTO_Layout_NZ : I32EnumAttrCase<"NZ", 2, "nz">;
+def PTO_Layout_MX_A_ZZ : I32EnumAttrCase<"MX_A_ZZ", 3, "mx_a_zz">;
+def PTO_Layout_MX_B_NN : I32EnumAttrCase<"MX_B_NN", 4, "mx_b_nn">;
 
 def PTO_LayoutEnum : PTO_I32Enum<
   "Layout", "Global tensor layout (row/col/fractal)", [
     PTO_Layout_ND,
     PTO_Layout_DN,
-    PTO_Layout_NZ
+    PTO_Layout_NZ,
+    PTO_Layout_MX_A_ZZ,
+    PTO_Layout_MX_B_NN
   ]>;
 
 def PTO_LayoutAttr : PTO_Attr<"Layout", "layout"> {
@@ -278,7 +415,8 @@ def PTO_LayoutAttr : PTO_Attr<"Layout", "layout"> {
   let assemblyFormat = "`<` params `>`";
   let description = [{
     Layout inferred from shape/stride for GlobalTensor:
-      ND (row-major), DN (col-major), NZ (fractal).
+      ND (row-major), DN (col-major), NZ (fractal),
+      MX_A_ZZ (A-side MX scale), MX_B_NN (B-side MX scale).
   }];
 }
 
@@ -613,6 +751,19 @@ def PTO_FmodPrecisionAttr : EnumAttr<PTO_Dialect, PTO_FmodPrecisionEnum, "fmod_p
   let summary = "TFMOD precision mode attribute";
 }
 //===----------------------------------------------------------------------===//
+// TPOW / TPOWS template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_PowPrecisionEnum : PTO_I32Enum<
+  "PowPrecision", "PTO TPOW/TPOWS precision mode", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"HighPrecision", 1, "high_precision">
+  ]>;
+
+def PTO_PowPrecisionAttr : EnumAttr<PTO_Dialect, PTO_PowPrecisionEnum, "pow_precision"> {
+  let summary = "TPOW/TPOWS precision mode attribute";
+}
+//===----------------------------------------------------------------------===//
 // TStore template controls
 //===----------------------------------------------------------------------===//
 
@@ -845,6 +996,16 @@ def PTO_GatherOOBAttr : EnumAttr<PTO_Dialect, PTO_GatherOOBEnum, "gather_oob"> {
   let summary = "MGATHER out-of-bounds handling mode";
 }
 
+def PTO_CoalesceEnum : PTO_I32Enum<
+  "Coalesce", "PTO MGATHER/MSCATTER coalesce mode", [
+    I32EnumAttrCase<"Row", 0, "row">,
+    I32EnumAttrCase<"Elem", 1, "elem">
+  ]>;
+
+def PTO_CoalesceAttr : EnumAttr<PTO_Dialect, PTO_CoalesceEnum, "coalesce"> {
+  let summary = "MGATHER/MSCATTER coalesce mode";
+}
+
 def PTO_ScatterAtomicOpEnum : PTO_I32Enum<
   "ScatterAtomicOp", "PTO MSCATTER atomic mode", [
     I32EnumAttrCase<"None", 0, "none">,
@@ -867,6 +1028,16 @@ def PTO_ScatterOOBEnum : PTO_I32Enum<
 
 def PTO_ScatterOOBAttr : EnumAttr<PTO_Dialect, PTO_ScatterOOBEnum, "scatter_oob"> {
   let summary = "MSCATTER out-of-bounds handling mode";
+}
+
+def PTO_ScatterConflictEnum : PTO_I32Enum<
+  "ScatterConflict", "PTO MSCATTER scatter conflict handling", [
+    I32EnumAttrCase<"Default", 0, "default">,
+    I32EnumAttrCase<"Last", 1, "last">
+  ]>;
+
+def PTO_ScatterConflictAttr : EnumAttr<PTO_Dialect, PTO_ScatterConflictEnum, "scatter_conflict"> {
+  let summary = "MSCATTER scatter conflict handling mode";
 }
 
 def PTO_AccToVecMode_Enum : PTO_I32Enum<"AccToVecMode", "TMOV acc-to-vec mode", [
@@ -990,11 +1161,27 @@ def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
 def PTO_QuantTypeEnum : PTO_I32Enum<
   "QuantType", "PTO quantization type", [
     I32EnumAttrCase<"INT8_SYM",  0>,
-    I32EnumAttrCase<"INT8_ASYM", 1>
+    I32EnumAttrCase<"INT8_ASYM", 1>,
+    I32EnumAttrCase<"MXFP8", 2>,
+    I32EnumAttrCase<"MXFP4_E2M1", 3>
   ]>;
 
 def PTO_QuantTypeAttr : EnumAttr<PTO_Dialect, PTO_QuantTypeEnum, "quant_type"> {
   let summary = "quantization type attribute";
+}
+
+//===----------------------------------------------------------------------===//
+// TInsertMode (tinsert FP split mode for A5)
+//===----------------------------------------------------------------------===//
+
+def PTO_TInsertMode_Enum : PTO_I32Enum<"TInsertMode", "TINSERT split mode (A5)", [
+  I32EnumAttrCase<"SPLIT2", 2, "split2">,
+  I32EnumAttrCase<"SPLIT4", 3, "split4">
+]>;
+
+def PTO_TInsertModeAttr : PTO_Attr<"TInsertMode", "tinsert_mode"> {
+  let parameters = (ins EnumParameter<PTO_TInsertMode_Enum>:$value);
+  let assemblyFormat = "`<` params `>`";
 }
 
 #endif // MLIR_DIALECT_PTO_IR_PTOATTRS

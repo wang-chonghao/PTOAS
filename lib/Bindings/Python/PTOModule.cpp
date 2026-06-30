@@ -236,7 +236,9 @@ static void bindPTOModule(pybind11::module &m) {
     py::enum_<mlir::pto::Layout>(m, "Layout")
       .value("ND", mlir::pto::Layout::ND)
       .value("DN", mlir::pto::Layout::DN)
-      .value("NZ", mlir::pto::Layout::NZ);
+      .value("NZ", mlir::pto::Layout::NZ)
+      .value("MX_A_ZZ", mlir::pto::Layout::MX_A_ZZ)
+      .value("MX_B_NN", mlir::pto::Layout::MX_B_NN);
 
     py::enum_<mlir::pto::AccToVecMode>(m, "AccToVecMode")
       .value("SingleModeVec0", mlir::pto::AccToVecMode::SingleModeVec0)
@@ -671,6 +673,8 @@ static void bindPTOModule(pybind11::module &m) {
     py::enum_<mlir::pto::QuantType>(m, "QuantType")
       .value("INT8_SYM",  mlir::pto::QuantType::INT8_SYM)
       .value("INT8_ASYM", mlir::pto::QuantType::INT8_ASYM)
+      .value("MXFP8",     mlir::pto::QuantType::MXFP8)
+      .value("MXFP4_E2M1", mlir::pto::QuantType::MXFP4_E2M1)
       .export_values();
 
     mlir_attribute_subclass(
@@ -881,6 +885,28 @@ static void bindPTOModule(pybind11::module &m) {
             "get",
             [](py::object cls, MlirContext context) -> py::object {
                 MlirType t = mlirPTOHiF8TypeGet(context);
+                return cls.attr("__call__")(t);
+            },
+            py::arg("cls"), py::arg("context") = py::none());
+
+    mlir_type_subclass(
+        m, "F8E8M0Type",
+        [](MlirType type) -> bool { return mlirPTOTypeIsAF8E8M0Type(type); })
+        .def_classmethod(
+            "get",
+            [](py::object cls, MlirContext context) -> py::object {
+                MlirType t = mlirPTOF8E8M0TypeGet(context);
+                return cls.attr("__call__")(t);
+            },
+            py::arg("cls"), py::arg("context") = py::none());
+
+    mlir_type_subclass(
+        m, "HiF8x2Type",
+        [](MlirType type) -> bool { return mlirPTOTypeIsAHiF8x2Type(type); })
+        .def_classmethod(
+            "get",
+            [](py::object cls, MlirContext context) -> py::object {
+                MlirType t = mlirPTOHiF8x2TypeGet(context);
                 return cls.attr("__call__")(t);
             },
             py::arg("cls"), py::arg("context") = py::none());

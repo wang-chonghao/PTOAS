@@ -76,6 +76,10 @@ static int64_t alignUpBytes(int64_t value, int64_t align) {
   return value + (safeAlign - rem);
 }
 
+static size_t plannerAlignBitsFromBytes(size_t alignBytes) {
+  return std::max<size_t>(alignBytes, 1) * kBitsPerByte;
+}
+
 static LocalMemSpec getLocalMemSpec(Operation *op, AddressSpace as) {
   switch (as) {
   case AddressSpace::VEC:
@@ -295,8 +299,12 @@ static LogicalResult assignAutoReserveBufferBases(
     // Reserve-buffer allocation intentionally happens after normal MemPlan.
     // Reconstruct the already occupied byte ranges from the planned local
     // buffers, then place reserve_buffer into the first aligned hole.
-    int64_t occupiedSizeBytes =
-        alignUpBytes(ceilDivBitsToBytes(bufferInfo.constBits), /*align=*/1);
+    int64_t occupiedSizeBytes = ceilDivBitsToBytes(bufferInfo.constBits);
+    if (bufferInfo.operation) {
+      auto spec = getLocalMemSpec(bufferInfo.operation, bufferInfo.bufferScope);
+      occupiedSizeBytes =
+          alignUpBytes(occupiedSizeBytes, std::max<int64_t>(spec.alignBytes, 1));
+    }
     for (uint64_t offsetBytes : offsetsIt->second) {
       occupiedByAddressSpace[bufferInfo.bufferScope].push_back(
           OccupiedByteRange{static_cast<int64_t>(offsetBytes),
@@ -387,6 +395,9 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
       return WalkResult::skip();
     } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
       RecursiveForOp(forOp, live);
+      return WalkResult::skip();
+    } else if (auto fusionRegion = dyn_cast<pto::FusionRegionOp>(op)) {
+      RecursiveFusionRegionOp(fusionRegion, live);
       return WalkResult::skip();
     }
 
@@ -625,6 +636,34 @@ void MemLivenessAnalysis::RecursiveIfOp(scf::IfOp ifOp, Liveness live) {
   OpKillHandle(curIfEnd, live, ifOp->getBlock());
 }
 
+void MemLivenessAnalysis::UpdateFusionRegionBufferAlias(
+    pto::FusionRegionOp fusionRegion, pto::YieldOp yieldOp) {
+  if (fusionRegion.getResults().empty())
+    return;
+  if (fusionRegion->getResults().size() != yieldOp->getOperands().size()) {
+    llvm::report_fatal_error(
+        "pto.fusion_region result/yield sizes are inconsistent");
+  }
+  for (auto [i, yielded] : llvm::enumerate(yieldOp->getOperands())) {
+    UpdateBufferAlias(fusionRegion->getResult(i), yielded);
+  }
+}
+
+void MemLivenessAnalysis::RecursiveFusionRegionOp(pto::FusionRegionOp fusionRegion,
+                                                  Liveness live) {
+  UpdateLinearOperation(fusionRegion.getOperation());
+  RecursionIR(&fusionRegion.getBody(), live);
+
+  auto yieldOp =
+      dyn_cast<pto::YieldOp>(fusionRegion.getBody().front().getTerminator());
+  if (!yieldOp)
+    llvm::report_fatal_error("pto.fusion_region must terminate with pto.yield");
+  UpdateFusionRegionBufferAlias(fusionRegion, yieldOp);
+
+  auto regionEnd = UpdateLinearOperation(fusionRegion.getOperation());
+  OpKillHandle(regionEnd, live, fusionRegion->getBlock());
+}
+
 SmallVector<Value> MemLivenessAnalysis::GetLiveBuffersInLoop(scf::ForOp forOp,
                                                              Liveness live) {
   SmallVector<Value> allocBeforeLoopBuffers;
@@ -676,7 +715,7 @@ bool MemLivenessAnalysis::isSkippableOp(Operation *op) const {
   // still be exercised. The N-way physical fan-out lives on the
   // `pto.multi_buffer` attr of the underlying `memref.alloc` and is a
   // follow-up.
-  return isa<func::ReturnOp, scf::YieldOp, memref::DimOp,
+  return isa<func::ReturnOp, scf::YieldOp, pto::YieldOp, memref::DimOp,
              mlir::pto::SlotMarkerOp>(op);
 }
 
@@ -1642,19 +1681,24 @@ std::pair<size_t, size_t>
 MemPlan::GetBufferSpaceInfo(pto::AddressSpace &space) const {
   switch (space) {
   case pto::AddressSpace::VEC:
-    return std::make_pair(ubAlignSize, ubSpaceSize);
+    return std::make_pair(plannerAlignBitsFromBytes(ubAlignSize), ubSpaceSize);
   case pto::AddressSpace::MAT:
-    return std::make_pair(l1AlignSize, l1SpaceSize);
+    return std::make_pair(plannerAlignBitsFromBytes(l1AlignSize), l1SpaceSize);
   case pto::AddressSpace::ACC:
-    return std::make_pair(l0cAlignSize, l0cSpaceSize);
+    return std::make_pair(plannerAlignBitsFromBytes(l0cAlignSize),
+                          l0cSpaceSize);
   case pto::AddressSpace::LEFT:
-    return std::make_pair(l0aAlignSize, l0aSpaceSize);
+    return std::make_pair(plannerAlignBitsFromBytes(l0aAlignSize),
+                          l0aSpaceSize);
   case pto::AddressSpace::RIGHT:
-    return std::make_pair(l0bAlignSize, l0bSpaceSize);
+    return std::make_pair(plannerAlignBitsFromBytes(l0bAlignSize),
+                          l0bSpaceSize);
   case pto::AddressSpace::BIAS:
-    return std::make_pair(biasAlignSize, biasSpaceSize);
+    return std::make_pair(plannerAlignBitsFromBytes(biasAlignSize),
+                          biasSpaceSize);
   case pto::AddressSpace::SCALING:
-    return std::make_pair(scalingAlignSize, scalingSpaceSize);
+    return std::make_pair(plannerAlignBitsFromBytes(scalingAlignSize),
+                          scalingSpaceSize);
   case pto::AddressSpace::Zero:
   case pto::AddressSpace::GM:
     return std::make_pair(size_t{0}, size_t{0});

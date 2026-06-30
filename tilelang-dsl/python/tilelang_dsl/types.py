@@ -59,11 +59,24 @@ _FLOAT_DTYPE_WIDTHS = {
     "bf16": 16,
     "f32": 32,
 }
+_LOW_PRECISION_DTYPE_WIDTHS = {
+    "hif8": 8,
+    "f8e4m3": 8,
+    "f8e5m2": 8,
+    "f4e1m2x2": 8,
+    "f4e2m1x2": 8,
+}
+_STORAGE_ONLY_DTYPE_WIDTHS = {
+    "hif8": 8,
+    "f4e1m2x2": 8,
+    "f4e2m1x2": 8,
+}
 
 _DTYPE_BYTE_WIDTHS = {
     name: bits // 8 for name, bits in _INTEGER_DTYPE_WIDTHS.items()
 }
 _DTYPE_BYTE_WIDTHS.update({name: bits // 8 for name, bits in _FLOAT_DTYPE_WIDTHS.items()})
+_DTYPE_BYTE_WIDTHS.update({name: bits // 8 for name, bits in _LOW_PRECISION_DTYPE_WIDTHS.items()})
 
 
 class TensorView:
@@ -535,6 +548,14 @@ class FractalMode(str, Enum):
     NZ2NZ = "nz2nz"
 
 
+class ViewLayout(str, Enum):
+    ND = "nd"
+    DN = "dn"
+    NZ = "nz"
+    MX_A_ZZ = "mx_a_zz"
+    MX_B_NN = "mx_b_nn"
+
+
 @dataclass(frozen=True)
 class TileConfig:
     fields: tuple[tuple[str, Any], ...] = ()
@@ -730,6 +751,58 @@ class TileConfig:
 
 
 @dataclass(frozen=True)
+class ViewConfig:
+    fields: tuple[tuple[str, Any], ...] = ()
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "ViewConfig":
+        if not isinstance(mapping, Mapping):
+            raise TypeError("ViewConfig.from_mapping expects a mapping")
+        normalized: dict[str, Any] = {}
+        for key, value in mapping.items():
+            canonical_key = cls._canonical_key(key)
+            if canonical_key in normalized:
+                raise ValueError(f"duplicate ViewConfig field '{canonical_key}'")
+            normalized[canonical_key] = cls._normalize_field_value(canonical_key, value)
+        return cls(tuple(sorted(normalized.items())))
+
+    @staticmethod
+    def _canonical_key(key: Any) -> str:
+        if not isinstance(key, str):
+            raise TypeError("ViewConfig field names must be strings")
+        aliases = {
+            "layout": "layout",
+            "view_layout": "layout",
+        }
+        return aliases.get(key, key)
+
+    @staticmethod
+    def _normalize_field_value(key: str, value: Any) -> Any:
+        if key == "layout":
+            return ViewConfig._normalize_layout(value)
+        return value
+
+    @staticmethod
+    def _normalize_layout(value: Any) -> ViewLayout | None:
+        if value is None:
+            return None
+        if isinstance(value, ViewLayout):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().upper().replace("-", "_")
+            try:
+                return ViewLayout[normalized]
+            except KeyError as exc:
+                raise ValueError(f"unsupported ViewConfig layout value {value!r}") from exc
+        raise ValueError(f"unsupported ViewConfig layout value {value!r}")
+
+    @property
+    def layout(self) -> ViewLayout | None:
+        value = dict(self.fields).get("layout")
+        return self._normalize_layout(value)
+
+
+@dataclass(frozen=True)
 class TileSpecialization:
     shape: tuple[int, ...]
     memory_space: MemorySpace
@@ -753,6 +826,11 @@ ui64 = ScalarType("ui64")
 f16 = ScalarType("f16")
 bf16 = ScalarType("bf16")
 f32 = ScalarType("f32")
+hif8 = ScalarType("hif8")
+f8e4m3 = ScalarType("f8e4m3")
+f8e5m2 = ScalarType("f8e5m2")
+f4e1m2x2 = ScalarType("f4e1m2x2")
+f4e2m1x2 = ScalarType("f4e2m1x2")
 PIPE = Pipe
 EVENT = Event
 PAT = MaskPattern
@@ -789,6 +867,11 @@ def vreg(dtype: ScalarType) -> VRegType:
 def vector(dtype: ScalarType, shape: tuple[int, ...] | list[int] | int) -> VectorType:
     if not isinstance(dtype, ScalarType):
         raise TypeError("vector() expects a TileLang scalar dtype")
+    if is_storage_only_dtype(dtype):
+        raise TypeError(
+            f"vector() does not accept storage-only low-precision dtype `{dtype.name}`; "
+            "these dtypes are only supported by storage and ptr surfaces in TileLang DSL v1"
+        )
     if isinstance(shape, int) and not isinstance(shape, bool):
         normalized_shape = (shape,)
     elif isinstance(shape, (list, tuple)):
@@ -825,6 +908,14 @@ def is_float_dtype(dtype: ScalarType) -> bool:
     return isinstance(dtype, ScalarType) and dtype.name in _FLOAT_DTYPE_WIDTHS
 
 
+def is_storage_only_dtype(dtype: ScalarType) -> bool:
+    return isinstance(dtype, ScalarType) and dtype.name in _STORAGE_ONLY_DTYPE_WIDTHS
+
+
+def is_low_precision_dtype(dtype: ScalarType) -> bool:
+    return isinstance(dtype, ScalarType) and dtype.name in _LOW_PRECISION_DTYPE_WIDTHS
+
+
 def bytewidth(dtype: ScalarType) -> int:
     if not isinstance(dtype, ScalarType):
         raise TypeError("bytewidth expects a TileLang scalar dtype")
@@ -835,6 +926,10 @@ def bytewidth(dtype: ScalarType) -> int:
 
 
 def get_lanes(dtype: ScalarType) -> int:
+    if is_storage_only_dtype(dtype):
+        raise TypeError(
+            f"dtype `{dtype.name}` is storage-only in TileLang DSL v1 and cannot be used as a vreg element dtype"
+        )
     return 256 // bytewidth(dtype)
 
 
@@ -883,6 +978,7 @@ __all__ = [
     "PadMode",
     "BLayout",
     "SLayout",
+    "ViewLayout",
     "CompactMode",
     "PadValue",
     "DeinterleaveDist",
@@ -891,6 +987,7 @@ __all__ = [
     "OrderMode",
     "PostUpdateMode",
     "TileConfig",
+    "ViewConfig",
     "TileSpecialization",
     "i1",
     "i8",
@@ -908,6 +1005,11 @@ __all__ = [
     "f16",
     "bf16",
     "f32",
+    "hif8",
+    "f8e4m3",
+    "f8e5m2",
+    "f4e1m2x2",
+    "f4e2m1x2",
     "AnyFloat",
     "AnyInt",
     "AnyType",
@@ -920,4 +1022,6 @@ __all__ = [
     "bytewidth",
     "get_lanes",
     "elements_per_vreg",
+    "is_storage_only_dtype",
+    "is_low_precision_dtype",
 ]

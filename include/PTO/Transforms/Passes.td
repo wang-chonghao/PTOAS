@@ -194,6 +194,29 @@ def PTOLoweringSyncToPipe : Pass<"pto-lowering-sync-to-pipe", "func::FuncOp"> {
   ];
 }
 
+def PreFusionAnalysis : Pass<"pto-pre-fusion-analysis", "func::FuncOp"> {
+  let summary = "Analyze block-local tile-fusion candidates before planning";
+  let description = [{
+    Builds reusable pre-planning analysis state for tile fusion in tile-native
+    PTO IR. This pass is analysis-only and does not emit grouping or
+    scheduling decisions.
+  }];
+  let constructor = "mlir::pto::createPreFusionAnalysisPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def PrintPreFusionAnalysis
+    : Pass<"pto-print-pre-fusion-analysis", "func::FuncOp"> {
+  let summary = "Print pre-fusion analysis results for testing and debugging";
+  let description = [{
+    Computes the pre-fusion analysis result and prints a stable textual dump of
+    block-local compute nodes, edges, liveness, iteration-domain classes, and
+    local boundaries.
+  }];
+  let constructor = "mlir::pto::createPrintPreFusionAnalysisPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
 def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
   let summary = "Build conservative tile-fusion planning groups from block-local analysis";
   let description = [{
@@ -205,6 +228,16 @@ def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
   }];
   let constructor = "mlir::pto::createFusionPlanPass()";
   let dependentDialects = ["mlir::pto::PTODialect"];
+  let options = [
+    Option<"enableShapeInference", "enable-shape-inference",
+           "bool", /*default=*/"false",
+           "Enable shape inference (ShapeConstraintSolver) for tile fusion. "
+           "When disabled (default), fall back to static/direct-bound "
+           "iteration-domain inference.  Only FusionPlan consumes this option; "
+           "FusionRegionGen consumes only the shared pre-fusion dataflow graph "
+           "(cached by the analysis manager) and never consults iteration-domain "
+           "classes, so it does not need the option.">
+  ];
 }
 
 def OpScheduling : Pass<"pto-op-scheduling", "func::FuncOp"> {
@@ -230,6 +263,17 @@ def PTOMarkLastUse : Pass<"pto-mark-last-use", "func::FuncOp"> {
   let dependentDialects = ["mlir::pto::PTODialect"];
 }
 
+def PTOFusionRegionGen : Pass<"pto-fusion-region-gen", "func::FuncOp"> {
+  let summary = "Wrap one scheduled fusion span into one pto.fusion_region";
+  let description = [{
+    Consumes scheduled tile-fusion metadata and encapsulates one contiguous
+    fusion group span into one pto.fusion_region without redefining group
+    membership or physical order.
+  }];
+  let constructor = "mlir::pto::createPTOFusionRegionGenPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
 def PTOWrapFunctionsInSections : Pass<"pto-wrap-functions-in-sections", "func::FuncOp"> {
   let summary = "Wrap attributed single-core functions in PTO cube/vector sections";
   let description = [{
@@ -241,6 +285,26 @@ def PTOWrapFunctionsInSections : Pass<"pto-wrap-functions-in-sections", "func::F
   }];
 
   let constructor = "mlir::pto::createPTOWrapFunctionsInSectionsPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
+def PTONormalizeUncoveredTileSections
+    : Pass<"pto-normalize-uncovered-tile-sections", "ModuleOp"> {
+  let summary = "Collect uncovered top-level PTO tile segments before section normalization";
+  let description = [{
+    Scans function top-level blocks for contiguous operation segments that are
+    not already covered by `pto.section.cube` / `pto.section.vector`.
+
+    This pass is the shared entry point for inferred-section normalization:
+    explicit sections remain in place, while uncovered top-level segments that
+    contain tile operations are identified for later wrapping.
+  }];
+
+  let constructor = "mlir::pto::createPTONormalizeUncoveredTileSectionsPass()";
 
   let dependentDialects = [
     "mlir::pto::PTODialect",
@@ -434,9 +498,38 @@ def FoldTileBufIntrinsics : Pass<"pto-fold-tile-buf-intrinsics", "mlir::func::Fu
     rewrite.
   }];
   let constructor = "mlir::pto::createFoldTileBufIntrinsicsPass()";
+  let options = [
+    Option<"foldMode", "fold-mode", "std::string",
+           /*default=*/"\"all\"",
+           "Select which intrinsic family to fold: all, shape-only, or addr-only">
+  ];
   let dependentDialects = [
     "mlir::pto::PTODialect",
     "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
+def PTOCanonicalizeIR : Pass<"pto-canonicalize-ir", "func::FuncOp"> {
+  let summary = "Canonicalize rank-2 view descriptors into rank-5 form (VPTO-only)";
+  let description = [{
+    Rewrites rank-2 tensor_view / partition_tensor_view descriptors into the
+    canonical right-aligned rank-5 form [1, 1, 1, R, C], matching the 5D
+    descriptor layout expected by VPTO lowering. Stride expansion uses the
+    same cumulative-product rule as rightAlignTo5D and
+    buildGlobalTensorShapeAndStride: stride[i] = shape[i+1] * stride[i+1].
+
+    Currently gated on --pto-backend=vpto to limit blast radius. A3/A5
+    EmitC codegen already pads strides to rank-5 via InferPTOLayout and
+    buildGlobalTensorShapeAndStride, so it does not need this pass at the
+    IR level. The gate can be lifted once the pass is proven stable.
+
+    A post-canonicalization verification detects any surviving rank-2 view
+    types to prevent silent failures when new view-consuming ops are added.
+  }];
+  let constructor = "mlir::pto::createPTOCanonicalizeIRPass()";
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
     "mlir::arith::ArithDialect"
   ];
 }
@@ -459,6 +552,28 @@ def PTOInlineLibCall : Pass<"pto-inline-libcall", "ModuleOp"> {
       "Enable verbose debug logging for OP-Lib instantiation/inlining">];
 }
 
+def PTOInlineBackendHelpers
+    : Pass<"pto-inline-backend-helpers", "ModuleOp"> {
+  let summary = "Inline backend helper functions shared by VPTO and EmitC";
+  let description = [{
+    Force-inlines backend helper functions that should not survive to backend-
+    specific lowering:
+    - PTODSL subkernel helpers marked with `pto.ptodsl.subkernel_helper`
+
+    This pass runs on the shared mainline before backend-specific pipelines so
+    both VPTO and EmitC consume the same helper-inlined IR.
+  }];
+  let constructor = "mlir::pto::createPTOInlineBackendHelpersPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::pto::PTODialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect"];
+  let options = [Option<
+      "debug", "debug", "bool",
+      /*default=*/"false",
+      "Enable verbose debug logging for backend helper inlining">];
+}
+
 def PTOVerifyTFree : Pass<"pto-verify-tfree", "func::FuncOp"> {
   let summary = "Verify explicit matching pto.tfree placement for pto.tpop";
   let description = [{
@@ -471,6 +586,32 @@ def PTOVerifyTFree : Pass<"pto-verify-tfree", "func::FuncOp"> {
   let constructor = "mlir::pto::createPTOVerifyTFreePass()";
 
   let dependentDialects = [
+    "mlir::pto::PTODialect"
+  ];
+}
+
+def PTOVerifySubkernelPipeContract
+    : Pass<"pto-verify-subkernel-pipe-contract", "func::FuncOp"> {
+  let summary = "Verify PTODSL subkernel helpers stay within one InsertSync pipe contract";
+  let description = [{
+    Verifies PTODSL subkernel helpers marked with `pto.ptodsl.subkernel_helper`
+    and their same-module local call closure stay within one role-consistent PTO
+    compute contract before InsertSync models the call boundary as one compound
+    node.
+
+    Current contract:
+    - `simd` helpers may only contain PTO ops on `PIPE_V`
+    - `cube` helpers may only contain PTO ops on `PIPE_M`
+    - both reject role-mismatched PTO pipe ops (including MTE/FIX/S) and
+      nested PTODSL subkernel calls
+    - local helper `func.call` is allowed only when the transitive callee closure
+      satisfies the same contract
+  }];
+
+  let constructor = "mlir::pto::createPTOVerifySubkernelPipeContractPass()";
+
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
     "mlir::pto::PTODialect"
   ];
 }
@@ -553,6 +694,33 @@ def PTOResolveBufferSelect : Pass<"pto-resolve-buffer-select", "ModuleOp"> {
   let dependentDialects = [
     "mlir::pto::PTODialect",
     "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
+def PTOUnrollSIMTFor : Pass<"pto-unroll-simt-for", "func::FuncOp"> {
+  let summary =
+      "Unroll explicitly annotated scf.for loops in pto.simt_entry functions";
+  let description = [{
+    Walks functions with `pto.simt_entry` attribute and fully unrolls `scf.for`
+    loops that carry the `{pto.unroll = "full"}` attribute.
+
+    Only loops with constant lower bound, upper bound, and positive step are
+    unrolled.  The annotation is opt-in: loops without the attribute are
+    left unchanged regardless of trip count.
+
+    Full unrolling enables subsequent canonicalize/sccp/cse to constant-fold
+    induction-variable-dependent conditionals (e.g. `scf.if i < 10`), eliminating
+    divergent branches inside SIMTVF kernels.
+
+    This pass must run before `createConvertSCFToCFPass` (i.e. before LLVM
+    lowering) so that the unrolled structured control flow can be canonicalized.
+  }];
+  let constructor = "mlir::pto::createPTOUnrollSIMTForPass()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::pto::PTODialect",
     "mlir::arith::ArithDialect"
   ];
 }
@@ -649,6 +817,68 @@ def PTOVPTOPtrBoundary
   let dependentDialects = ["mlir::func::FuncDialect",
                            "mlir::pto::PTODialect",
                            "mlir::memref::MemRefDialect"];
+}
+
+def PTOLowLevelLoopFusion : Pass<"pto-low-level-loop-fusion", "ModuleOp"> {
+  let summary =
+      "Fuse adjacent VPTO post-lowering loop nests inside pto.fusion_region";
+  let description = [{
+    Conservatively fuses adjacent post-lowering loop stages for already-planned
+    fusion groups after the tile-native frontend fusion core. The formal input
+    contract for this pass is low-level `scf.for + pto.*` structure that
+    remains inside `pto.fusion_region` until explicit flatten.
+  }];
+  let constructor = "mlir::pto::createPTOLowLevelLoopFusionPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::vector::VectorDialect"];
+  let options = [Option<
+      "debug", "debug", "bool",
+      /*default=*/"false",
+      "Enable verbose debug logging for low-level loop fusion">];
+}
+
+def PTOFusionPredicateElision
+    : Pass<"pto-fusion-predicate-elision", "func::FuncOp"> {
+  let summary =
+      "Elide redundant fusion-local VPTO plt predicate materialization";
+  let description = [{
+    Scans `pto.fusion_region` bodies after VPTO post-lowering CSE and prepares
+    fusion-local redundant `pto.plt_*` predicate elimination before
+    load/store cleanup and explicit flatten.
+  }];
+  let constructor = "mlir::pto::createPTOFusionPredicateElisionPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def PTOFusionLoadStoreElision
+    : Pass<"pto-fusion-load-store-elision", "func::FuncOp"> {
+  let summary =
+      "Elide fusion-local VPTO load/store round trips before flattening";
+  let description = [{
+    Removes local store materialization inside canonical fused loop bodies
+    before explicit flatten. It also performs conservative frontier-aware
+    cleanup for non-escaping fusion-region internal buffers.
+  }];
+  let constructor = "mlir::pto::createPTOFusionLoadStoreElisionPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def PTOFlattenFusionRegion : Pass<"pto-flatten-fusion-region", "func::FuncOp"> {
+  let summary = "Flatten pto.fusion_region wrappers back into the parent block";
+  let description = [{
+    Eliminates residual `pto.fusion_region` wrappers after region-local
+    lowering is complete by moving body operations back to the parent block,
+    replacing region results with `pto.yield` operands, and erasing both
+    `pto.yield` and the wrapper op.
+  }];
+  let constructor = "mlir::pto::createPTOFlattenFusionRegionPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
 }
 
 def VPTOPtrNormalize

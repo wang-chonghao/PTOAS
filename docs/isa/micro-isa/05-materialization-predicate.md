@@ -151,6 +151,35 @@ Where `VL_t` is the logical lane count of the concrete op variant:
 
 ---
 
+### `pto.pltm_b8` / `pto.pltm_b16` / `pto.pltm_b32`
+
+- **syntax:** `%mask = pto.pltm_b8 %loop, %bound : i16, i32 -> !pto.mask<b8>`
+- **syntax:** `%mask = pto.pltm_b16 %loop, %bound : i16, i32 -> !pto.mask<b16>`
+- **syntax:** `%mask = pto.pltm_b32 %loop, %bound : i16, i32 -> !pto.mask<b32>`
+- **semantics:** Generate a loop-indexed tail predicate without updating the
+  bound scalar.
+- **inputs:**
+  `%loop` is the current logical loop index multiplier and `%bound` is the
+  total element bound.
+- **outputs:**
+  `%mask` is true for lanes whose logical index is still below `%bound`.
+
+```c
+for (int i = 0; i < VL_t; ++i)
+    mask[i] = (i + loop * VL_t) < bound;
+```
+
+Where `VL_t` is the logical lane count of the concrete op variant:
+
+- `pto.pltm_b8`: `VL_t = 256`
+- `pto.pltm_b16`: `VL_t = 128`
+- `pto.pltm_b32`: `VL_t = 64`
+
+Unlike `pto.plt_b*`, `pto.pltm_b*` does not return a post-update scalar. It is
+used when the loop index is already tracked separately in scalar SSA.
+
+---
+
 ## Predicate Pack/Unpack
 
 ### `pto.ppack`

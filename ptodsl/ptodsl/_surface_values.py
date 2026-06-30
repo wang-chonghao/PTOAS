@@ -14,35 +14,62 @@ from dataclasses import dataclass
 
 from ._diagnostics import native_python_control_flow_error
 from ._runtime_scalar_ops import emit_runtime_binary_op, emit_runtime_bitwise_op, emit_runtime_compare
+from ._scalar_adaptation import coerce_runtime_index_value
 from ._surface_types import PartitionTensorView, TensorView, Tile
 from ._types import _normalize_address_space, _resolve, ptr
 
 from mlir.dialects import arith
 from mlir.dialects import memref
 from mlir.dialects import pto as _pto
-from mlir.ir import IndexType, IntegerAttr, IntegerType, MemRefType, ShapedType, StridedLayoutAttr, Type
+from mlir.ir import IndexType, IntegerAttr, MemRefType, ShapedType, StridedLayoutAttr, Type
+
+
+def _validate_surface_value_access(value):
+    try:
+        from ._tracing.active import current_session
+
+        session = current_session()
+    except Exception:
+        session = None
+    if session is not None and hasattr(session, "validate_surface_value_access"):
+        session.validate_surface_value_access(value)
+    return value
 
 
 def unwrap_surface_value(value):
     """Return the underlying MLIR SSA value for a surface wrapper."""
-    return value.value if isinstance(value, _SurfaceValue) else value
+    if isinstance(value, _SurfaceValue):
+        return value.value
+    return _validate_surface_value_access(value)
+
+
+def _is_python_index_literal(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _unwrap_sequence(values):
     normalized = []
     interned_ints = {}
     for value in values:
-        if isinstance(value, int):
+        if _is_python_index_literal(value):
             if value not in interned_ints:
                 interned_ints[value] = _index_const(value)
             normalized.append(interned_ints[value])
         else:
-            normalized.append(unwrap_surface_value(value))
+            normalized.append(_coerce_index_value(value))
     return normalized
 
 
 def _normalize_index(value):
-    return unwrap_surface_value(value)
+    raw_value = unwrap_surface_value(value)
+    if _is_python_index_literal(raw_value):
+        return raw_value
+    try:
+        return coerce_runtime_index_value(raw_value, context="surface index value")
+    except TypeError as exc:
+        if hasattr(raw_value, "type"):
+            raise TypeError(f"expected an index-like value, got {raw_value.type}") from exc
+        raise
 
 
 def _index_const(value: int):
@@ -50,24 +77,24 @@ def _index_const(value: int):
 
 
 def _add_index(lhs, rhs):
-    if isinstance(lhs, int) and lhs == 0:
+    if _is_python_index_literal(lhs) and lhs == 0:
         return _normalize_index(rhs)
-    if isinstance(rhs, int) and rhs == 0:
+    if _is_python_index_literal(rhs) and rhs == 0:
         return _normalize_index(lhs)
     lhs = _normalize_index(lhs)
     rhs = _normalize_index(rhs)
-    if isinstance(lhs, int) and isinstance(rhs, int):
+    if _is_python_index_literal(lhs) and _is_python_index_literal(rhs):
         return lhs + rhs
-    if isinstance(lhs, int):
+    if _is_python_index_literal(lhs):
         lhs = _index_const(lhs)
-    if isinstance(rhs, int):
+    if _is_python_index_literal(rhs):
         rhs = _index_const(rhs)
     return arith.AddIOp(lhs, rhs).result
 
 
 def _try_get_constant_index(value) -> int | None:
     """Return a compile-time index when *value* is a Python int or ``arith.constant``."""
-    if isinstance(value, int):
+    if _is_python_index_literal(value):
         return value
     raw = unwrap_surface_value(value)
     owner = getattr(raw, "owner", None)
@@ -156,7 +183,7 @@ class _SurfaceValue:
 
     @property
     def value(self):
-        return self._value
+        return _validate_surface_value_access(self._value)
 
     @property
     def type(self):
@@ -388,7 +415,7 @@ class _TileValidShapeView:
         if self._tile.static_valid_shape is not None:
             dim = self._tile.static_valid_shape[index]
             if dim is not None:
-                value = _index_const(dim) if isinstance(dim, int) else unwrap_surface_value(dim)
+                value = _index_const(dim) if _is_python_index_literal(dim) else unwrap_surface_value(dim)
                 value = wrap_surface_value(value)
                 self._cache[index] = value
                 return value
@@ -520,7 +547,14 @@ def wrap_like_surface_value(template, value):
     if isinstance(template, TensorViewValue):
         return TensorViewValue(value, shape=template.shape, strides=template.strides)
     if isinstance(template, TileValue):
-        return TileValue(value, **template.surface_metadata)
+        metadata = dict(template.surface_metadata)
+        valid_shape = metadata.get("valid_shape")
+        if valid_shape is not None:
+            metadata["valid_shape"] = tuple(
+                dim if isinstance(dim, int) or dim is None else None
+                for dim in valid_shape
+            )
+        return TileValue(value, **metadata)
     if isinstance(template, AddressValue):
         return AddressValue(value)
     return wrap_surface_value(value)
@@ -595,7 +629,25 @@ def infer_ptr_type_from_surface_value(surface_value):
     if space_enum is None:
         raise RuntimeError("unable to infer tile pointer type: unsupported tile memory space")
 
-    return _resolve(ptr(tile_type.element_type, space_enum))
+    try:
+        return _resolve(ptr(tile_type.element_type, space_enum))
+    except TypeError as exc:
+        if "storage-only low-precision type" not in str(exc):
+            raise
+        return _resolve_storage_tile_ptr_type(tile_type.element_type, space_enum)
+
+
+def _resolve_storage_tile_ptr_type(element_type, space_enum):
+    space_attr = _pto.AddressSpaceAttr.get(space_enum)
+    try:
+        return _pto.PtrType.get(element_type, memory_space=space_attr)
+    except TypeError:
+        ptr_get_impl = getattr(_pto, "_ptr_type_get_impl", None)
+        if ptr_get_impl is None:
+            raise
+        if space_enum != _pto.AddressSpace.GM:
+            return ptr_get_impl(element_type, space_attr)
+        return _pto.PtrType.get(element_type)
 
 
 def emit_as_ptr(surface_value):
@@ -863,24 +915,24 @@ def _emit_tile_memref(tile: TileValue):
 
 
 def _dynamic_extent(static_dim, start):
-    if isinstance(start, int):
+    if _is_python_index_literal(start):
         return static_dim - start
     return arith.SubIOp(_index_const(static_dim), _coerce_index_value(start)).result
 
 
 def _static_extent_if_known(extent):
-    return extent if isinstance(extent, int) else ShapedType.get_dynamic_size()
+    return extent if _is_python_index_literal(extent) else ShapedType.get_dynamic_size()
 
 
 def _static_index_attr(value):
-    return value if isinstance(value, int) else ShapedType.get_dynamic_size()
+    return value if _is_python_index_literal(value) else ShapedType.get_dynamic_size()
 
 
 def _split_dynamic_index_operands(values):
     operands = []
     static_attrs = []
     for value in values:
-        if isinstance(value, int):
+        if _is_python_index_literal(value):
             static_attrs.append(value)
         else:
             operands.append(_coerce_index_value(value))
@@ -913,7 +965,7 @@ def _compose_static_subview_offset(base_offset, base_strides, raw_offsets):
 
     linear_offset = base_offset
     for stride, authored_offset in zip(base_strides, raw_offsets):
-        if not isinstance(authored_offset, int):
+        if not _is_python_index_literal(authored_offset):
             return ShapedType.get_dynamic_size()
         linear_offset += stride * authored_offset
     return linear_offset
@@ -922,24 +974,20 @@ def _compose_static_subview_offset(base_offset, base_strides, raw_offsets):
 def _mul_index(lhs, rhs):
     lhs = _normalize_index(lhs)
     rhs = _normalize_index(rhs)
-    if isinstance(lhs, int) and isinstance(rhs, int):
+    if _is_python_index_literal(lhs) and _is_python_index_literal(rhs):
         return lhs * rhs
-    if isinstance(lhs, int):
+    if _is_python_index_literal(lhs):
         lhs = _index_const(lhs)
-    if isinstance(rhs, int):
+    if _is_python_index_literal(rhs):
         rhs = _index_const(rhs)
     return arith.MulIOp(lhs, rhs).result
 
 
 def _coerce_index_value(value):
     value = _normalize_index(value)
-    if isinstance(value, int):
+    if _is_python_index_literal(value):
         return _index_const(value)
-    if IndexType.isinstance(value.type):
-        return value
-    if IntegerType.isinstance(value.type):
-        return arith.IndexCastOp(IndexType.get(), value).result
-    raise TypeError(f"expected an index-like value, got {value.type}")
+    return value
 
 
 __all__ = [

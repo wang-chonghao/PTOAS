@@ -115,6 +115,14 @@ CASE_POINTER_COUNT_MINIMUMS = {
         "v1": 123648,
         "v2": 123648,
     },
+    "tquant_mx": {
+        # The generated MX auxiliary tiles use 1x32 Vec storage even though
+        # the logical tensor views are 1x16. Keep the GM backing buffers large
+        # enough for the lowered TSTORE footprint on A5.
+        "v3": 32,
+        "v4": 32,
+        "v5": 32,
+    },
     **{
         testcase: {
             "v1": 1024 * 4096,
@@ -276,7 +284,7 @@ def _split_cpp_args(text: str):
 
 def _extract_aicore_functions(text: str):
     pattern = re.compile(
-        r"(?P<global>__global__\s+)?AICORE\s+void\s+(?P<name>\w+)\s*\((?P<params>[^)]*)\)\s*\{",
+        r"(?P<extern_c>extern\s+\"C\"\s+)?(?P<global>__global__\s+)?AICORE\s+void\s+(?P<name>\w+)\s*\((?P<params>[^)]*)\)\s*\{",
         re.S,
     )
     functions = []
@@ -294,6 +302,7 @@ def _extract_aicore_functions(text: str):
                 "params_blob": params_blob,
                 "raw_params": _split_params_blob(params_blob),
                 "is_global": bool(match.group("global")),
+                "is_extern_c": bool(match.group("extern_c")),
                 "text": text[match.start():end_index + 1],
             }
         )
@@ -311,7 +320,20 @@ def _describe_kernel_source(text: str):
                 "analysis_texts": [func["text"]],
                 "writer_texts": [func["text"]],
                 "call_text": func["text"],
+                "needs_global_wrapper": False,
             }
+
+    if len(functions) == 1:
+        func = functions[0]
+        return {
+            "kind": "global",
+            "kernel_name": func["name"],
+            "raw_params": func["raw_params"],
+            "analysis_texts": [func["text"]],
+            "writer_texts": [func["text"]],
+            "call_text": func["text"],
+            "needs_global_wrapper": not func["is_global"],
+        }
 
     mixed_groups = {}
     for func in functions:
@@ -336,6 +358,7 @@ def _describe_kernel_source(text: str):
                 "aic_text": group["aic"]["text"],
                 "aiv_text": group["aiv"]["text"],
                 "call_text": group["aiv"]["text"],
+                "needs_global_wrapper": False,
             }
 
     return {
@@ -345,7 +368,38 @@ def _describe_kernel_source(text: str):
         "analysis_texts": [text],
         "writer_texts": [text],
         "call_text": text,
+        "needs_global_wrapper": False,
     }
+
+
+def _append_single_kernel_global_wrapper(
+    kernel_text: str,
+    kernel_name: str,
+    raw_params: list[str],
+) -> str:
+    impl_name = f"__ptoas_{kernel_name}_impl"
+    pattern = re.compile(
+        rf"(?P<prefix>extern\s+\"C\"\s+)?(?P<global>__global__\s+)?(?P<static>static\s+)?"
+        rf"AICORE\s+(?P<inline>inline\s+)?void\s+{re.escape(kernel_name)}\s*\((?P<params>[^)]*)\)\s*\{{",
+        re.S,
+    )
+
+    def _replace_entry(match):
+        params = match.group("params").strip()
+        return f"static AICORE inline void {impl_name}({params}) {{"
+
+    rewritten, count = pattern.subn(_replace_entry, kernel_text, count=1)
+    if count == 0:
+        return kernel_text
+
+    call_args = ", ".join(_extract_cpp_name(param) for param in raw_params)
+    wrapper = (
+        "\n\n"
+        f"extern \"C\" __global__ AICORE void {kernel_name}({', '.join(raw_params)}) {{\n"
+        f"  {impl_name}({call_args});\n"
+        "}\n"
+    )
+    return rewritten.rstrip() + wrapper
 
 
 def _append_mixed_kernel_wrapper(
@@ -508,7 +562,7 @@ def _append_mixed_kernel_wrapper(
 
     wrapper = (
         "\n\n"
-        f"__global__ AICORE void {kernel_name}({', '.join(raw_params)}) {{\n"
+        f"extern \"C\" __global__ AICORE void {kernel_name}({', '.join(raw_params)}) {{\n"
         + ("\n".join(shared_decls) + ("\n\n" if shared_decls else ""))
         + "\n".join(wrapper_blocks)
         + ("\n  ptoas_auto_sync_tail(PTOAutoSyncTailMode::kBarrierAll);" if (aic_has_tail or aiv_has_tail) else "")
@@ -883,7 +937,13 @@ def _parse_kernel_name(text: str) -> str:
 def _np_dtype_for_cpp(cpp_type: str) -> str:
     mapping = {
         "float": "np.float32",
+        "float4_e1m2x2_t": "np.uint8",
+        "float4_e2m1x2_t": "np.uint8",
+        "float8_e4m3_t": "np.uint8",
+        "float8_e5m2_t": "np.uint8",
+        "float8_e8m0_t": "np.uint8",
         "half": "np.float16",
+        "hifloat8_t": "np.uint8",
         "aclFloat16": "np.float16",
         "__bf16": "np.uint16",
         "bfloat16_t": "np.uint16",
@@ -979,7 +1039,10 @@ def _find_custom_case_asset(sample_root: Path, testcase: str, filename: str) -> 
 def _use_custom_golden_for_case(testcase: str, soc_version: str) -> bool:
     testcase_lc = testcase.lower()
     soc_lc = (soc_version or "").lower()
-    is_a3 = "910b" in soc_lc or os.environ.get("PTOAS_BOARD_IS_A3") == "1"
+    is_a3 = (
+        any(token in soc_lc for token in ("910a", "910proa", "910b"))
+        or os.environ.get("PTOAS_BOARD_IS_A3") == "1"
+    )
     if is_a3 and testcase_lc in UNSTABLE_A3_CUSTOM_GOLDEN_CASES:
         return False
     return True
@@ -1098,10 +1161,12 @@ def _infer_aicore_arch(kernel_text: str, soc_version: str) -> str:
         # kernels with dav-c310-{vec|cube}.
         return "dav-c310-cube" if needs_cube else "dav-c310-vec"
     if "910b" in sv:
+        # A3 board validation follows the official a2a3 PTO-ISA ST setup:
+        # build vec/cube kernels with dav-c220 and MEMORY_BASE rather than
+        # the A5 dav-c310/REGISTER_BASE path.
         if has_mixed_section_sync:
-            return "dav-c310"
-        # Ascend910B* (e.g. Ascend910B1) uses dav-c310 toolchain arch.
-        return "dav-c310-cube" if needs_cube else "dav-c310-vec"
+            return "dav-c220"
+        return "dav-c220-cube" if needs_cube else "dav-c220-vec"
 
     # Default to Ascend910 (dav-c220) when SoC is unknown.
     return "dav-c220-cube" if needs_cube else "dav-c220-vec"
@@ -1610,7 +1675,7 @@ def generate_testcase(
             if "950" in sv or "a5" in sv:
                 aicore_arch = "dav-c310"
             elif "910b" in sv:
-                aicore_arch = "dav-c310"
+                aicore_arch = "dav-c220"
             else:
                 aicore_arch = "dav-c220"
         elif has_cube_only_section:
@@ -1618,7 +1683,7 @@ def generate_testcase(
             # while forcing `__DAV_CUBE__` makes AIC pipe synchronization fail
             # legality checks on A5.
             sv = (soc_version or "").lower()
-            if "950" in sv or "a5" in sv or "910b" in sv:
+            if "950" in sv or "a5" in sv:
                 aicore_arch = "dav-c310-cube"
             else:
                 aicore_arch = "dav-c220-cube"
@@ -1627,7 +1692,7 @@ def generate_testcase(
             if "950" in sv or "a5" in sv:
                 aicore_arch = "dav-c310-vec"
             elif "910b" in sv:
-                aicore_arch = "dav-c310-vec"
+                aicore_arch = "dav-c220-vec"
             else:
                 aicore_arch = "dav-c220-vec"
         elif has_dav_cube or has_dav_vec:
@@ -1637,7 +1702,7 @@ def generate_testcase(
             if "950" in sv or "a5" in sv:
                 aicore_arch = "dav-c310-vec"
             elif "910b" in sv:
-                aicore_arch = "dav-c310-vec"
+                aicore_arch = "dav-c220-vec"
             else:
                 aicore_arch = "dav-c220-vec"
         else:
@@ -1897,8 +1962,10 @@ def generate_testcase(
         param_decls_lines.append("    pto::comm::sdma::SdmaWorkspaceManager sdmaMgr;")
         param_decls_lines.append("    bool sdmaWorkspaceOk = false;")
         param_decls_lines.append('    const char *sdmaSocVersion = std::getenv("SOC_VERSION");')
+        param_decls_lines.append('    const char *ptoasBoardIsA3 = std::getenv("PTOAS_BOARD_IS_A3");')
         param_decls_lines.append(
             '    const bool skipSdmaWorkspaceInit = (std::getenv("PTO_DISABLE_SDMA_WORKSPACE_INIT") != nullptr) || '
+            '(ptoasBoardIsA3 != nullptr && std::strcmp(ptoasBoardIsA3, "1") == 0) || '
             '(sdmaSocVersion != nullptr && (std::strstr(sdmaSocVersion, "950") != nullptr || '
             'std::strstr(sdmaSocVersion, "A5") != nullptr || std::strstr(sdmaSocVersion, "a5") != nullptr));'
         )
@@ -1967,6 +2034,11 @@ def generate_testcase(
             if runtime_rt_include
             else '#include "pto/npu/comm/async/sdma/sdma_workspace_manager.hpp"'
         )
+    cann_extra_link_dirs = """set(PTO_CANN_EXTRA_LINK_DIRS "")
+if(DEFINED ENV{PTO_CANN_EXTRA_LINK_DIRS} AND NOT "$ENV{PTO_CANN_EXTRA_LINK_DIRS}" STREQUAL "")
+    string(REPLACE ":" ";" PTO_CANN_EXTRA_LINK_DIRS "$ENV{PTO_CANN_EXTRA_LINK_DIRS}")
+endif()
+"""
     main_cpp = (
         template
         .replace("@RUNTIME_RT_INCLUDE@", runtime_rt_include)
@@ -1975,7 +2047,7 @@ def generate_testcase(
         .replace("@RUNTIME_RT_INCLUDE@", runtime_rt_include)
         .replace(
             "@LAUNCH_DECL@",
-            f"void {launch_name}({', '.join(launch_decl_params + ['void *stream'])});",
+            f'extern "C" void {launch_name}({", ".join(launch_decl_params + ["void *stream"])});',
         )
         .replace("@PARAM_DECLS@", param_decls)
         .replace("@ALLOC_HOST@", "\n".join(alloc_host))
@@ -2199,6 +2271,13 @@ def generate_testcase(
                     logical_elem_count=logical_elem_count,
                 )
 
+    if kernel_info.get("needs_global_wrapper"):
+        kernel_text_out = _append_single_kernel_global_wrapper(
+            kernel_text_out,
+            kernel_name,
+            raw_params,
+        )
+
     if is_mixed_kernel:
         kernel_text_out = _append_mixed_kernel_wrapper(
             kernel_text_out,
@@ -2230,11 +2309,11 @@ def generate_testcase(
         INCLUDE_REPLACEMENT
         + "\n"
         "#if defined(__CCE_AICORE__)\n"
-        f"__global__ AICORE void {kernel_name}({', '.join(raw_params)});\n"
+        f"extern \"C\" __global__ AICORE void {kernel_name}({', '.join(raw_params)});\n"
         "#else\n"
-        f"__global__ AICORE void {kernel_name}({', '.join(raw_params_host)});\n"
+        f"extern \"C\" __global__ AICORE void {kernel_name}({', '.join(raw_params_host)});\n"
         "#endif\n\n"
-        f"void {launch_name}({launch_fn_params}) {{\n"
+        f"extern \"C\" void {launch_name}({launch_fn_params}) {{\n"
         "#if defined(__CCE_AICORE__)\n"
         f"    {kernel_name}<<<{launch_block_count}, nullptr, stream>>>({kernel_call_args_device});\n"
         "#else\n"
@@ -2245,10 +2324,12 @@ def generate_testcase(
     (output_dir / "launch.cpp").write_text(launch_cpp, encoding="utf-8")
 
     # pto-isa selects instruction implementations based on MEMORY_BASE vs
-    # REGISTER_BASE. Ascend A5 (e.g. Ascend950) and Ascend910B use REGISTER_BASE.
+    # REGISTER_BASE. A3 board validation follows the official a2a3 ST setup,
+    # so Ascend910B still uses MEMORY_BASE. Only A5-class targets use
+    # REGISTER_BASE here.
     mem_base_define = "MEMORY_BASE"
     sv = (soc_version or "").lower()
-    if "910b" in sv or "950" in sv or "a5" in sv:
+    if "950" in sv or "a5" in sv:
         mem_base_define = "REGISTER_BASE"
     if uses_prefetch_async_runtime and not is_a5_soc:
         mem_base_define = "MEMORY_BASE"
@@ -2349,6 +2430,8 @@ include_directories(
     ${{ASCEND_DRIVER_PATH}}/kernel/inc
 )
 
+{cann_extra_link_dirs}
+
 	add_library({testcase}_kernel SHARED {testcase}_kernel.cpp launch.cpp)
 	target_compile_options({testcase}_kernel PRIVATE ${{CMAKE_CCE_COMPILE_OPTIONS}} --cce-aicore-arch={aicore_arch}{dav_defines} -D{mem_base_define} -std=c++17)
 	target_include_directories({testcase}_kernel PRIVATE
@@ -2367,13 +2450,27 @@ target_include_directories({testcase} PRIVATE
 
 target_link_directories({testcase} PUBLIC
     ${{ASCEND_HOME_PATH}}/lib64
+    ${{PTO_CANN_EXTRA_LINK_DIRS}}
 )
+
+find_library(PTO_NNOPBASE_LIB
+    NAMES nnopbase
+    HINTS ${{PTO_CANN_EXTRA_LINK_DIRS}} ${{ASCEND_HOME_PATH}}/lib64
+    NO_DEFAULT_PATH
+)
+if(NOT PTO_NNOPBASE_LIB)
+    find_library(PTO_NNOPBASE_LIB NAMES nnopbase)
+endif()
+if(NOT PTO_NNOPBASE_LIB)
+    message(FATAL_ERROR "Cannot find libnnopbase.so. Set PTO_CANN_EXTRA_LINK_DIRS or fix ASCEND_HOME_PATH.")
+endif()
 
 target_link_libraries({testcase} PRIVATE
     {testcase}_kernel
     runtime
-    stdc++ ascendcl m tiling_api platform c_sec dl nnopbase
+    stdc++ ascendcl m tiling_api platform c_sec dl ${{PTO_NNOPBASE_LIB}}
 )
+target_link_options({testcase} PRIVATE -Wl,--allow-shlib-undefined)
 
 if(ENABLE_SIM_GOLDEN)
     # Simulator executable: used to generate golden outputs (Ascend camodel).
@@ -2385,15 +2482,18 @@ if(ENABLE_SIM_GOLDEN)
 {runtime_host_include_dirs})
     target_link_directories({testcase}_sim PUBLIC
         ${{ASCEND_HOME_PATH}}/lib64
+        ${{PTO_CANN_EXTRA_LINK_DIRS}}
         ${{ASCEND_HOME_PATH}}/aarch64-linux/simulator/${{SOC_VERSION}}/lib
+        ${{ASCEND_HOME_PATH}}/x86_64-linux/simulator/${{SOC_VERSION}}/lib
         ${{ASCEND_HOME_PATH}}/simulator/${{SOC_VERSION}}/lib
         ${{ASCEND_HOME_PATH}}/tools/simulator/${{SOC_VERSION}}/lib
     )
     target_link_libraries({testcase}_sim PRIVATE
         {testcase}_kernel
         runtime_camodel
-        stdc++ ascendcl m tiling_api platform c_sec dl nnopbase
+        stdc++ ascendcl m tiling_api platform c_sec dl ${{PTO_NNOPBASE_LIB}}
     )
+    target_link_options({testcase}_sim PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 """
     (output_dir / "CMakeLists.txt").write_text(cmake_content.strip() + "\n", encoding="utf-8")

@@ -620,7 +620,7 @@ def vlds(tile_slice: _TileSlice) -> _VectorValue:
     ptr_value = trace.ensure_tile_ptr(tile_slice.tile)
     offset = trace.materialize_linear_offset(tile_slice)
     vector_ty = _resolve(_vreg_type(tile_slice.tile.element_type.lanes, _scalar_descriptor(tile_slice.tile.element_type)))
-    result = _pto.VldsOp(vector_ty, ptr_value.value, offset.value).result
+    result = _pto.VldsOp(vector_ty, None, ptr_value.value, offset.value).result
     return _VectorValue(result, tile_slice.tile.element_type)
 
 
@@ -641,7 +641,7 @@ def vsts(vec: _VectorValue, tile_slice: _TileSlice, mask: _MaskValue) -> None:
         raise TypeError("tile-template tracing expects vsts destination dtype to match vector dtype")
     ptr_value = trace.ensure_tile_ptr(tile_slice.tile)
     offset = trace.materialize_linear_offset(tile_slice)
-    _pto.VstsOp(vec.value, ptr_value.value, offset.value, mask.value)
+    _pto.VstsOp(None, vec.value, ptr_value.value, offset.value, mask.value)
 
 
 def _is_tile_annotation(annotation) -> bool:
