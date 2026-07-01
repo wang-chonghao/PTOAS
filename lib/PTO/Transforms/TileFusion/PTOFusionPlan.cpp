@@ -25,6 +25,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <limits>
 #include <system_error>
 
 namespace mlir {
@@ -45,15 +46,18 @@ namespace {
 
 using pto::ConservativeDAGGreedyCostModel;
 using pto::CostModel;
+using pto::LegalityOnlyDAGGreedyCostModel;
 using pto::PlanningContext;
 using pto::PlanningDecision;
 
 static constexpr llvm::StringLiteral kFusionGroupIdAttr =
     "pto.fusion.group_id";
 static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kFusionUnrollAttr = "pto.fusion.unroll";
 
 struct PlannedFusionGroup {
   SmallVector<const pto::FusionComputeNode *, 8> members;
+  unsigned selectedUnroll = 1;
 };
 
 struct PlannedVfSimProgram {
@@ -84,7 +88,8 @@ buildStableInGroupOrder(ArrayRef<const pto::FusionComputeNode *> members) {
 
 static void assignStableGroupMetadata(ArrayRef<PlannedFusionGroup> groups,
                                       MLIRContext *ctx,
-                                      int64_t &nextGroupId) {
+                                      int64_t &nextGroupId,
+                                      bool writeUnrollAttr) {
   SmallVector<const PlannedFusionGroup *, 8> orderedGroups;
   orderedGroups.reserve(groups.size());
   for (const PlannedFusionGroup &group : groups)
@@ -110,6 +115,11 @@ static void assignStableGroupMetadata(ArrayRef<PlannedFusionGroup> groups,
           kFusionOrderAttr,
           IntegerAttr::get(IntegerType::get(ctx, 64),
                            static_cast<int64_t>(order)));
+      if (writeUnrollAttr)
+        node->op->setAttr(
+            kFusionUnrollAttr,
+            IntegerAttr::get(IntegerType::get(ctx, 64),
+                             static_cast<int64_t>(group->selectedUnroll)));
     }
   }
 }
@@ -229,7 +239,125 @@ static void clearPlanningAttrs(func::FuncOp func) {
   func.walk([](Operation *op) {
     op->removeAttr(kFusionGroupIdAttr);
     op->removeAttr(kFusionOrderAttr);
+    op->removeAttr(kFusionUnrollAttr);
   });
+}
+
+static void collectLoopTripCounts(const pto::VfSimNode &node,
+                                  SmallVectorImpl<int64_t> &tripCounts) {
+  if (node.kind != pto::VfSimNode::Kind::Loop)
+    return;
+
+  tripCounts.push_back(node.tripCount);
+  for (const pto::VfSimNode &child : node.body)
+    collectLoopTripCounts(child, tripCounts);
+}
+
+static void setLoopUnroll(pto::VfSimNode &node, unsigned unroll) {
+  if (node.kind != pto::VfSimNode::Kind::Loop)
+    return;
+
+  node.unroll = unroll;
+  for (pto::VfSimNode &child : node.body)
+    setLoopUnroll(child, unroll);
+}
+
+static bool isValidUnrollCandidate(const pto::VfSimProgram &program,
+                                   unsigned unroll) {
+  if (unroll == 0)
+    return false;
+
+  SmallVector<int64_t, 4> tripCounts;
+  for (const pto::VfSimNode &node : program.body)
+    collectLoopTripCounts(node, tripCounts);
+
+  if (tripCounts.empty())
+    return unroll == 1;
+
+  for (int64_t tripCount : tripCounts) {
+    if (tripCount <= 0)
+      return unroll == 1;
+    if (tripCount % static_cast<int64_t>(unroll) != 0)
+      return false;
+  }
+  return true;
+}
+
+static void applyLoopUnroll(pto::VfSimProgram &program, unsigned unroll) {
+  for (pto::VfSimNode &node : program.body)
+    setLoopUnroll(node, unroll);
+}
+
+static unsigned selectBestUnrollForGroup(
+    const PlannedFusionGroup &group,
+    const pto::FusionBlockAnalysis &blockAnalysis,
+    bool dumpVfSimUnrollTest) {
+  if (group.members.size() < 2)
+    return 1;
+
+  ArrayRef<const pto::FusionComputeNode *> prefix(group.members.data(),
+                                                  group.members.size() - 1);
+  pto::VfCostInput input{&blockAnalysis, prefix, group.members.back()};
+  FailureOr<pto::VfSimProgram> baseProgram =
+      pto::buildFusedElementwiseVfSimProgram(input);
+  if (failed(baseProgram)) {
+    if (dumpVfSimUnrollTest)
+      llvm::errs() << "[pto-fusion-plan] vfsim unroll test: failed to build "
+                      "VF program for group\n";
+    return 1;
+  }
+
+  if (dumpVfSimUnrollTest)
+    llvm::errs() << "[pto-fusion-plan] vfsim unroll test: group_size="
+                 << group.members.size() << "\n";
+
+  unsigned bestUnroll = 1;
+  int64_t bestCycles = std::numeric_limits<int64_t>::max();
+  bool foundSupported = false;
+
+  for (unsigned unroll = 1; unroll <= 8; ++unroll) {
+    if (!isValidUnrollCandidate(*baseProgram, unroll)) {
+      if (dumpVfSimUnrollTest)
+        llvm::errs() << "[pto-fusion-plan]   unroll=" << unroll
+                     << " valid=false\n";
+      continue;
+    }
+
+    pto::VfSimProgram candidateProgram = *baseProgram;
+    applyLoopUnroll(candidateProgram, unroll);
+    pto::VfLatencyResult latency = predictVfLatency(candidateProgram);
+    if (dumpVfSimUnrollTest) {
+      llvm::errs() << "[pto-fusion-plan]   unroll=" << unroll
+                   << " valid=true supported="
+                   << (latency.supported ? "true" : "false")
+                   << " cycles=" << latency.cycles;
+      if (!latency.supported)
+        llvm::errs() << " reject=\"" << latency.rejectReason << "\"";
+      llvm::errs() << "\n";
+    }
+    if (!latency.supported)
+      continue;
+
+    if (!foundSupported || latency.cycles < bestCycles) {
+      foundSupported = true;
+      bestCycles = latency.cycles;
+      bestUnroll = unroll;
+    }
+  }
+
+  if (dumpVfSimUnrollTest)
+    llvm::errs() << "[pto-fusion-plan]   selected_unroll=" << bestUnroll
+                 << "\n";
+  return bestUnroll;
+}
+
+static void selectBestUnrollsForGroups(
+    MutableArrayRef<PlannedFusionGroup> groups,
+    const pto::FusionBlockAnalysis &blockAnalysis,
+    bool dumpVfSimUnrollTest) {
+  for (PlannedFusionGroup &group : groups)
+    group.selectedUnroll =
+        selectBestUnrollForGroup(group, blockAnalysis, dumpVfSimUnrollTest);
 }
 
 static void dumpVfProgramsForGroupsText(
@@ -248,6 +376,7 @@ static void dumpVfProgramsForGroupsText(
       llvm::errs() << "[pto-fusion-plan] failed to build VF program for group\n";
       continue;
     }
+    applyLoopUnroll(*program, group.selectedUnroll);
 
     llvm::errs() << "[pto-fusion-plan] VF program for fusion group:\n";
     pto::printVfSimProgram(*program, llvm::errs());
@@ -278,6 +407,7 @@ static void collectVfProgramsForGroups(
     if (failed(program))
       continue;
 
+    applyLoopUnroll(*program, group.selectedUnroll);
     pto::VfLatencyResult latency = predictVfLatency(*program);
     programs.push_back(PlannedVfSimProgram{
         static_cast<int64_t>(groupIndex), std::move(*program), latency});
@@ -334,6 +464,8 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
     enableShapeInference = options.enableShapeInference;
     dumpVfProgram = options.dumpVfProgram;
     dumpVfProgramJson = options.dumpVfProgramJson;
+    useVfSimFusionPlanner = options.useVfSimFusionPlanner;
+    dumpVfSimUnrollTest = options.dumpVfSimUnrollTest;
   }
 
   void runOnOperation() override {
@@ -365,18 +497,26 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
     MLIRContext *ctx = &getContext();
     int64_t nextGroupId = 0;
     ConservativeDAGGreedyCostModel costModel;
+    LegalityOnlyDAGGreedyCostModel legalityOnlyCostModel;
     ConservativeDAGGreedyStrategyEngine strategyEngine;
     SmallVector<PlannedVfSimProgram, 8> plannedVfSimPrograms;
 
     for (const pto::FusionBlockAnalysis &blockAnalysis : analysis.blocks) {
       PlanningContext planningCtx{blockAnalysis};
+      const CostModel &activeCostModel =
+          useVfSimFusionPlanner ? static_cast<const CostModel &>(legalityOnlyCostModel)
+                                : static_cast<const CostModel &>(costModel);
       SmallVector<PlannedFusionGroup, 8> groups =
-          strategyEngine.planBlock(planningCtx, costModel);
+          strategyEngine.planBlock(planningCtx, activeCostModel);
+      if (useVfSimFusionPlanner)
+        selectBestUnrollsForGroups(groups, blockAnalysis,
+                                   dumpVfSimUnrollTest);
       if (dumpVfProgram)
         dumpVfProgramsForGroupsText(groups, blockAnalysis);
       if (!dumpVfProgramJson.empty())
         collectVfProgramsForGroups(groups, blockAnalysis, plannedVfSimPrograms);
-      assignStableGroupMetadata(groups, ctx, nextGroupId);
+      assignStableGroupMetadata(groups, ctx, nextGroupId,
+                                useVfSimFusionPlanner);
     }
 
     if (failed(writeVfProgramsJson(plannedVfSimPrograms, dumpVfProgramJson))) {

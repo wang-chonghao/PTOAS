@@ -1,0 +1,124 @@
+// Full GeLU_poly tileop case derived from vfsimulator/cce_code/GeLU_poly.dsl.
+// Shape is reduced from repeat_times=96 to 16x64 to keep host camodel validation fast.
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @gelu_poly_full_unroll_vfsim(
+      %x_ptr: !pto.ptr<f32>, %out_ptr: !pto.ptr<f32>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c16 = arith.constant 16 : index
+    %c64 = arith.constant 64 : index
+    %c1024 = arith.constant 1024 : index
+
+    %c_half = arith.constant 5.000000e-01 : f32
+    %c_inv_sqrt2 = arith.constant 7.071000e-01 : f32
+    %c_pos392 = arith.constant 3.920000e+00 : f32
+    %c_neg392 = arith.constant -3.920000e+00 : f32
+    %c05344 = arith.constant 5.344000e-01 : f32
+    %c75517 = arith.constant 7.551700e+00 : f32
+    %c10162809 = arith.constant 1.0162809e+02 : f32
+    %c13938015 = arith.constant 1.3938015e+03 : f32
+    %c50637915 = arith.constant 5.0637915e+03 : f32
+    %c296393848 = arith.constant 2.96393848e+04 : f32
+    %c312128582 = arith.constant 3.12128582e+01 : f32
+    %c308569641 = arith.constant 3.08569641e+02 : f32
+    %c302312476 = arith.constant 3.02312476e+03 : f32
+    %c142433662 = arith.constant 1.42433662e+04 : f32
+    %c262672246 = arith.constant 2.62672246e+04 : f32
+    %c_one = arith.constant 1.000000e+00 : f32
+
+    %x_view = pto.make_tensor_view %x_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xf32>
+    %out_view = pto.make_tensor_view %out_ptr,
+      shape = [%c1, %c1, %c1, %c16, %c64],
+      strides = [%c1024, %c1024, %c1024, %c64, %c1]
+      : !pto.tensor_view<1x1x1x16x64xf32>
+
+    %x_part = pto.partition_view %x_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xf32> -> !pto.partition_tensor_view<1x1x1x16x64xf32>
+    %out_part = pto.partition_view %out_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c16, %c64]
+      : !pto.tensor_view<1x1x1x16x64xf32> -> !pto.partition_tensor_view<1x1x1x16x64xf32>
+
+    %v0 = pto.alloc_tile : !pto.tile_buf<vec, 16x64xf32>
+    %v1 = pto.alloc_tile : !pto.tile_buf<vec, 16x64xf32>
+    %v2 = pto.alloc_tile : !pto.tile_buf<vec, 16x64xf32>
+    %v3 = pto.alloc_tile : !pto.tile_buf<vec, 16x64xf32>
+    %v4 = pto.alloc_tile : !pto.tile_buf<vec, 16x64xf32>
+    %v5 = pto.alloc_tile : !pto.tile_buf<vec, 16x64xf32>
+    %v6 = pto.alloc_tile : !pto.tile_buf<vec, 16x64xf32>
+
+    pto.tload ins(%x_part : !pto.partition_tensor_view<1x1x1x16x64xf32>)
+              outs(%v0 : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tmuls ins(%v0, %c_half : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v1 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmuls ins(%v0, %c_inv_sqrt2 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v2 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmins ins(%v2, %c_pos392 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v2 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmaxs ins(%v2, %c_neg392 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v2 : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tmul ins(%v2, %v2 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v3 : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tmuls ins(%v3, %c05344 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v4, %c75517 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v4, %v3 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v4, %c10162809 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v4, %v3 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v4, %c13938015 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v4, %v3 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v4, %c50637915 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v4, %v3 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v4, %c296393848 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v4, %v2 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tadds ins(%v3, %c312128582 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v5, %v3 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v5, %c308569641 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v5, %v3 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v5, %c302312476 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v5, %v3 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v5, %c142433662 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v5, %v3 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v5, %c262672246 : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tdiv ins(%v4, %v5 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tadds ins(%v5, %c_one : !pto.tile_buf<vec, 16x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 16x64xf32>)
+    pto.tmul ins(%v5, %v1 : !pto.tile_buf<vec, 16x64xf32>, !pto.tile_buf<vec, 16x64xf32>)
+             outs(%v6 : !pto.tile_buf<vec, 16x64xf32>)
+
+    pto.tstore ins(%v6 : !pto.tile_buf<vec, 16x64xf32>)
+               outs(%out_part : !pto.partition_tensor_view<1x1x1x16x64xf32>)
+    return
+  }
+}

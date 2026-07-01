@@ -78,6 +78,17 @@ public:
                  const FusionComputeNode &candidate) const override;
 };
 
+class LegalityOnlyDAGGreedyCostModel final : public CostModel {
+public:
+  PlanningDecision evaluateSeed(const PlanningContext &ctx,
+                                const FusionComputeNode &candidate) const override;
+
+  PlanningDecision
+  evaluateAppend(const PlanningContext &ctx,
+                 ArrayRef<const FusionComputeNode *> currentGroup,
+                 const FusionComputeNode &candidate) const override;
+};
+
 } // namespace pto
 } // namespace mlir
 

@@ -1,5 +1,7 @@
 // RUN: ptoas --pto-arch=a5 --pto-level=level2 --enable-op-fusion --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck %s --check-prefix=PLAN
 // RUN: ptoas --pto-arch=a5 --pto-level=level2 --enable-op-fusion --emit-pto-ir --dump-vf-program %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=VF
+// RUN: ptoas --pto-arch=a5 --pto-level=level2 --enable-op-fusion --use-vfsim-fusion-planner --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck %s --check-prefix=VFSIMPLAN
+// RUN: ptoas --pto-arch=a5 --pto-level=level2 --enable-op-fusion --use-vfsim-fusion-planner --dump-vfsim-unroll-test --emit-pto-ir %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNROLLTEST
 
 module {
   func.func @tcvt_fusion_probe(
@@ -29,3 +31,21 @@ module {
 
 // VF: vcvt_f32_to_f16
 // VF: VF latency cycles=
+
+// VFSIMPLAN: pto.tadd
+// VFSIMPLAN-SAME: pto.fusion.group_id = 0
+// VFSIMPLAN-SAME: pto.fusion.unroll =
+// VFSIMPLAN: pto.tcvt
+// VFSIMPLAN-SAME: pto.fusion.group_id = 0
+// VFSIMPLAN-SAME: pto.fusion.unroll =
+// VFSIMPLAN: pto.tadd
+// VFSIMPLAN-SAME: pto.fusion.group_id = 0
+// VFSIMPLAN-SAME: pto.fusion.unroll =
+
+// UNROLLTEST: vfsim unroll test: group_size=3
+// UNROLLTEST: unroll=1 valid=true supported=true cycles=
+// UNROLLTEST: unroll=2 valid=true supported=true cycles=
+// UNROLLTEST: unroll=3 valid=false
+// UNROLLTEST: unroll=4 valid=true supported=true cycles=
+// UNROLLTEST: unroll=8 valid=true supported=true cycles=
+// UNROLLTEST: selected_unroll=1

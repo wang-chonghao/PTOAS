@@ -1,0 +1,1 @@
+--pto-arch a5 --pto-backend=vpto --pto-level=level2 --enable-tile-op-expand --enable-op-fusion --use-vfsim-fusion-planner --dump-vfsim-unroll-test --enable-insert-sync

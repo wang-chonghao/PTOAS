@@ -450,6 +450,16 @@ static llvm::cl::opt<std::string> dumpVfProgramJson(
     llvm::cl::desc("Write VF costmodel programs built by frontend tile fusion as JSON"),
     llvm::cl::init(""));
 
+static llvm::cl::opt<bool> useVfSimFusionPlanner(
+    "use-vfsim-fusion-planner",
+    llvm::cl::desc("Use VF simulator planner path for frontend tile fusion"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> dumpVfSimUnrollTest(
+    "dump-vfsim-unroll-test",
+    llvm::cl::desc("Print VF simulator unroll candidate timings"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> disableInferLayout(
     "disable-infer-layout",
     llvm::cl::desc("Disable PTO layout inference pass (static-only)"),
@@ -1576,6 +1586,7 @@ static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module, int argc,
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
       pto::createFoldTileBufIntrinsicsPass("shape-only"));
   if (enableA5VPTOPostLoweringFusionLifecycle) {
+    kernelModulePM.addPass(pto::createPTOPropagateFusionLoopAttrsPass());
     kernelModulePM.addPass(pto::createPTOLowLevelLoopFusionPass());
     kernelModulePM.addPass(mlir::createCanonicalizerPass());
     kernelModulePM.addPass(mlir::createCSEPass());
@@ -1593,7 +1604,7 @@ static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module, int argc,
   kernelModulePM.addPass(mlir::createCanonicalizerPass());
 }
 
-static void inlineTilelangHelpersOnVPTOInput(PassManager &pm) {
+[[maybe_unused]] static void inlineTilelangHelpersOnVPTOInput(PassManager &pm) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
   kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
   kernelModulePM.addPass(mlir::createSCCPPass());
@@ -1905,6 +1916,8 @@ int mlir::pto::compilePTOASModule(
   fusionPlanOpts.enableShapeInference = enableShapeInference;
   fusionPlanOpts.dumpVfProgram = dumpVfProgram;
   fusionPlanOpts.dumpVfProgramJson = dumpVfProgramJson;
+  fusionPlanOpts.useVfSimFusionPlanner = useVfSimFusionPlanner;
+  fusionPlanOpts.dumpVfSimUnrollTest = dumpVfSimUnrollTest;
   if (enableA5EmitCFusionPath) {
     pm.addNestedPass<mlir::func::FuncOp>(
         pto::createFusionPlanPass(fusionPlanOpts));

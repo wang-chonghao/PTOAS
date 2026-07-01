@@ -95,6 +95,7 @@ std::unique_ptr<Pass> createVPTOExpandWrapperOpsPass();
 std::unique_ptr<Pass> createPTOVPTOPtrBoundaryPass();
 std::unique_ptr<Pass>
 createPTOLowLevelLoopFusionPass(const PTOLowLevelLoopFusionOptions &options = {});
+std::unique_ptr<Pass> createPTOPropagateFusionLoopAttrsPass();
 std::unique_ptr<Pass> createPTOFusionPredicateElisionPass();
 std::unique_ptr<Pass> createPTOFusionLoadStoreElisionPass();
 std::unique_ptr<Pass> createPTOFlattenFusionRegionPass();
