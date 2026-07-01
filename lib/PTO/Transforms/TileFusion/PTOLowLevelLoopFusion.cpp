@@ -17,12 +17,14 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/STLExtras.h"
 
 #include <cstdlib>
+#include <optional>
 
 namespace mlir {
 namespace pto {
@@ -34,6 +36,14 @@ namespace pto {
 using namespace mlir;
 
 namespace {
+
+static constexpr llvm::StringLiteral kFusionGroupIdAttr =
+    "pto.fusion.group_id";
+static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kFusionLoopIndexAttr =
+    "pto.fusion.loop_index";
+static constexpr llvm::StringLiteral kFusionLoopUnrollAttr =
+    "pto.fusion.loop_unroll";
 
 struct LoopLevelInfo {
   scf::ForOp loop;
@@ -51,6 +61,28 @@ struct StageInfo {
 
 static bool areEquivalentValues(Value lhs, Value rhs);
 
+static bool isFusionControlAttr(StringRef name) {
+  return name == kFusionGroupIdAttr || name == kFusionOrderAttr ||
+         name == kFusionLoopIndexAttr || name == kFusionLoopUnrollAttr ||
+         name == "pto.fusion.unroll";
+}
+
+static bool sameNonFusionAttrs(Operation *lhs, Operation *rhs) {
+  for (NamedAttribute attr : lhs->getAttrs()) {
+    if (isFusionControlAttr(attr.getName().getValue()))
+      continue;
+    if (rhs->getAttr(attr.getName()) != attr.getValue())
+      return false;
+  }
+  for (NamedAttribute attr : rhs->getAttrs()) {
+    if (isFusionControlAttr(attr.getName().getValue()))
+      continue;
+    if (!lhs->hasAttr(attr.getName()))
+      return false;
+  }
+  return true;
+}
+
 static Value mapValueOrSelf(Value value, IRMapping &mapping) {
   return mapping.lookupOrDefault(value);
 }
@@ -59,7 +91,7 @@ static bool sameForHeader(scf::ForOp lhs, scf::ForOp rhs) {
   return areEquivalentValues(lhs.getLowerBound(), rhs.getLowerBound()) &&
          areEquivalentValues(lhs.getUpperBound(), rhs.getUpperBound()) &&
          areEquivalentValues(lhs.getStep(), rhs.getStep()) &&
-         lhs->getAttrs() == rhs->getAttrs();
+         sameNonFusionAttrs(lhs.getOperation(), rhs.getOperation());
 }
 
 static bool isPureNoRegionOp(Operation *op) {
@@ -382,6 +414,98 @@ static bool sameLoopNestShape(const StageInfo &lhs, const StageInfo &rhs) {
   });
 }
 
+static std::optional<int64_t> getConstantIntValue(Value value) {
+  APInt intValue;
+  if (!matchPattern(value, m_ConstantInt(&intValue)))
+    return std::nullopt;
+  return intValue.getSExtValue();
+}
+
+static std::optional<int64_t> getStaticTripCount(scf::ForOp loop) {
+  std::optional<int64_t> lower = getConstantIntValue(loop.getLowerBound());
+  std::optional<int64_t> upper = getConstantIntValue(loop.getUpperBound());
+  std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+  if (!lower || !upper || !step || *step <= 0 || *upper < *lower)
+    return std::nullopt;
+  int64_t distance = *upper - *lower;
+  if (distance % *step != 0)
+    return std::nullopt;
+  return distance / *step;
+}
+
+static std::optional<int64_t> getLoopUnrollFactor(scf::ForOp loop) {
+  Attribute attr = loop->getAttr(kFusionLoopUnrollAttr);
+  if (!attr)
+    return 1;
+  auto intAttr = dyn_cast<IntegerAttr>(attr);
+  if (!intAttr)
+    return std::nullopt;
+  int64_t value = intAttr.getInt();
+  if (value < 1)
+    return std::nullopt;
+  return value;
+}
+
+static bool validateFusionLoopAttrs(ArrayRef<StageInfo> stages,
+                                    unsigned levelIndex,
+                                    llvm::raw_ostream *debugOS) {
+  bool hasAnyUnroll = false;
+  for (const StageInfo &stage : stages)
+    hasAnyUnroll |= stage.levels[levelIndex].loop->hasAttr(kFusionLoopUnrollAttr);
+  if (!hasAnyUnroll)
+    return true;
+
+  scf::ForOp firstLoop = stages.front().levels[levelIndex].loop;
+  Attribute firstGroup = firstLoop->getAttr(kFusionGroupIdAttr);
+  Attribute firstLoopIndex = firstLoop->getAttr(kFusionLoopIndexAttr);
+  Attribute firstUnroll = firstLoop->getAttr(kFusionLoopUnrollAttr);
+  if (!firstGroup || !firstLoopIndex || !firstUnroll) {
+    if (debugOS)
+      *debugOS << "[op-fusion] reject loop run: incomplete fusion loop attrs\n";
+    return false;
+  }
+
+  std::optional<int64_t> unroll = getLoopUnrollFactor(firstLoop);
+  if (!unroll) {
+    if (debugOS)
+      *debugOS << "[op-fusion] reject loop run: invalid loop unroll attr\n";
+    return false;
+  }
+
+  for (const StageInfo &stage : stages) {
+    scf::ForOp loop = stage.levels[levelIndex].loop;
+    if (loop->getAttr(kFusionGroupIdAttr) != firstGroup ||
+        loop->getAttr(kFusionLoopIndexAttr) != firstLoopIndex ||
+        loop->getAttr(kFusionLoopUnrollAttr) != firstUnroll) {
+      if (debugOS)
+        *debugOS << "[op-fusion] reject loop run: fusion loop attr mismatch\n";
+      return false;
+    }
+    if (*unroll > 1 && !loop.getInitArgs().empty()) {
+      if (debugOS)
+        *debugOS << "[op-fusion] reject loop run: unroll with loop-carried "
+                    "values is not supported yet\n";
+      return false;
+    }
+    std::optional<int64_t> tripCount = getStaticTripCount(loop);
+    if (*unroll > 1 && (!tripCount || *tripCount % *unroll != 0)) {
+      if (debugOS)
+        *debugOS << "[op-fusion] reject loop run: loop trip count is not "
+                    "statically divisible by unroll\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static int64_t getCommonLoopUnrollFactor(ArrayRef<StageInfo> stages,
+                                         unsigned levelIndex) {
+  std::optional<int64_t> unroll =
+      getLoopUnrollFactor(stages.front().levels[levelIndex].loop);
+  return unroll.value_or(1);
+}
+
 static void cloneOpAndMapResults(OpBuilder &builder, Operation *op,
                                  IRMapping &mapping) {
   Operation *cloned = builder.clone(*op, mapping);
@@ -396,22 +520,48 @@ static void appendMappedValues(ValueRange values, IRMapping &mapping,
     mappedValues.push_back(mapValueOrSelf(value, mapping));
 }
 
+static Value buildOffsetInductionVar(OpBuilder &builder, Location loc,
+                                     Value baseIv, Value originalStep,
+                                     int64_t offset) {
+  if (offset == 0)
+    return baseIv;
+
+  Value offsetValue = builder.create<arith::ConstantIndexOp>(loc, offset);
+  Value delta = offsetValue;
+  if (std::optional<int64_t> step = getConstantIntValue(originalStep)) {
+    delta = builder.create<arith::ConstantIndexOp>(loc, *step * offset);
+  } else {
+    delta = builder.create<arith::MulIOp>(loc, originalStep, offsetValue);
+  }
+  return builder.create<arith::AddIOp>(loc, baseIv, delta);
+}
+
 static scf::ForOp buildFusedLoopNestAtLevel(OpBuilder &builder,
                                             MutableArrayRef<StageInfo> stages,
                                             MutableArrayRef<IRMapping> mappings,
                                             unsigned levelIndex) {
   scf::ForOp firstLoop = stages.front().levels[levelIndex].loop;
+  int64_t unroll = getCommonLoopUnrollFactor(stages, levelIndex);
 
   SmallVector<Value, 8> fusedInitArgs;
   for (auto [stageIndex, stage] : llvm::enumerate(stages))
     appendMappedValues(ValueRange(stage.levels[levelIndex].loop.getInitArgs()),
                        mappings[stageIndex], fusedInitArgs);
 
+  Value originalStep = mapValueOrSelf(firstLoop.getStep(), mappings.front());
+  Value fusedStep = originalStep;
+  if (unroll > 1) {
+    Value factor =
+        builder.create<arith::ConstantIndexOp>(firstLoop.getLoc(), unroll);
+    fusedStep = builder.create<arith::MulIOp>(firstLoop.getLoc(), originalStep,
+                                              factor);
+  }
+
   auto fusedLoop = builder.create<scf::ForOp>(
       firstLoop.getLoc(),
       mapValueOrSelf(firstLoop.getLowerBound(), mappings.front()),
       mapValueOrSelf(firstLoop.getUpperBound(), mappings.front()),
-      mapValueOrSelf(firstLoop.getStep(), mappings.front()), fusedInitArgs);
+      fusedStep, fusedInitArgs);
   fusedLoop->setAttrs(firstLoop->getAttrs());
 
   unsigned iterArgOffset = 0;
@@ -427,17 +577,40 @@ static scf::ForOp buildFusedLoopNestAtLevel(OpBuilder &builder,
   }
 
   OpBuilder bodyBuilder = OpBuilder::atBlockBegin(fusedLoop.getBody());
-  for (auto [stageIndex, stage] : llvm::enumerate(stages))
-    for (Operation *op : stage.levels[levelIndex].preludeOps)
-      cloneOpAndMapResults(bodyBuilder, op, mappings[stageIndex]);
+  auto emitLevelBody = [&](MutableArrayRef<IRMapping> bodyMappings) {
+    for (auto [stageIndex, stage] : llvm::enumerate(stages))
+      for (Operation *op : stage.levels[levelIndex].preludeOps)
+        cloneOpAndMapResults(bodyBuilder, op, bodyMappings[stageIndex]);
 
-  if (levelIndex + 1 < stages.front().getDepth()) {
-    (void)buildFusedLoopNestAtLevel(bodyBuilder, stages, mappings,
-                                    levelIndex + 1);
-  } else {
+    if (levelIndex + 1 < stages.front().getDepth()) {
+      (void)buildFusedLoopNestAtLevel(bodyBuilder, stages, bodyMappings,
+                                      levelIndex + 1);
+      return;
+    }
+
     for (auto [stageIndex, stage] : llvm::enumerate(stages))
       for (Operation *op : stage.leafOps)
-        cloneOpAndMapResults(bodyBuilder, op, mappings[stageIndex]);
+        cloneOpAndMapResults(bodyBuilder, op, bodyMappings[stageIndex]);
+  };
+
+  if (unroll == 1) {
+    emitLevelBody(mappings);
+  } else {
+    for (int64_t offset = 0; offset < unroll; ++offset) {
+      SmallVector<IRMapping, 8> offsetMappings;
+      offsetMappings.reserve(stages.size());
+      for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+        scf::ForOp originalLoop = stage.levels[levelIndex].loop;
+        IRMapping offsetMapping = mappings[stageIndex];
+        Value offsetIv = buildOffsetInductionVar(
+            bodyBuilder, originalLoop.getLoc(), fusedLoop.getInductionVar(),
+            mapValueOrSelf(originalLoop.getStep(), mappings[stageIndex]),
+            offset);
+        offsetMapping.map(originalLoop.getInductionVar(), offsetIv);
+        offsetMappings.push_back(std::move(offsetMapping));
+      }
+      emitLevelBody(offsetMappings);
+    }
   }
 
   SmallVector<Value, 8> fusedYieldOperands;
@@ -491,6 +664,9 @@ static bool fuseStageRun(SmallVectorImpl<StageInfo> &stages,
   }
   if (!arePreludeReordersLegal(stages, debugOS))
     return false;
+  for (unsigned levelIndex = 0; levelIndex < first.getDepth(); ++levelIndex)
+    if (!validateFusionLoopAttrs(stages, levelIndex, debugOS))
+      return false;
 
   OpBuilder blockBuilder(first.getOuterLoop());
   SmallVector<IRMapping, 8> stageMappings(stages.size());

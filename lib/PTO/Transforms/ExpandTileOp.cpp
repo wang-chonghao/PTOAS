@@ -75,6 +75,19 @@ namespace pto {
 
 namespace {
 
+static constexpr llvm::StringLiteral kFusionGroupIdAttr =
+    "pto.fusion.group_id";
+static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kFusionUnrollAttr = "pto.fusion.unroll";
+
+static void copyFusionAttrs(Operation *src, Operation *dst) {
+  for (llvm::StringLiteral attrName :
+       {kFusionGroupIdAttr, kFusionOrderAttr, kFusionUnrollAttr}) {
+    if (Attribute attr = src->getAttr(attrName))
+      dst->setAttr(attrName, attr);
+  }
+}
+
 // ============================================================================
 // OperandTypeInfo: describes one operand for template specialization.
 //
@@ -1230,7 +1243,8 @@ LogicalResult ExpandState::expandTileOpsInFunction(func::FuncOp func,
       }
       operands.push_back(operand);
     }
-    builder.create<func::CallOp>(op->getLoc(), dslFn, operands);
+    auto call = builder.create<func::CallOp>(op->getLoc(), dslFn, operands);
+    copyFusionAttrs(op, call.getOperation());
     op->erase();
   }
 

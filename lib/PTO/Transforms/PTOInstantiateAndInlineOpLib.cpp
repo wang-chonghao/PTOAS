@@ -37,8 +37,20 @@ static constexpr llvm::StringLiteral kOpLibAttrInstVariantId =
 static constexpr llvm::StringLiteral kOpLibAttrInstOp = "pto.oplib.instance.op";
 static constexpr llvm::StringLiteral kOpLibAttrInstDType =
     "pto.oplib.instance.dtype";
+static constexpr llvm::StringLiteral kFusionGroupIdAttr =
+    "pto.fusion.group_id";
+static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kFusionUnrollAttr = "pto.fusion.unroll";
 static constexpr llvm::StringLiteral kErrInstanceBodyMissing =
     "E_OPLIB_INSTANCE_BODY_MISSING";
+
+static void copyFusionAttrs(Operation *src, Operation *dst) {
+  for (llvm::StringLiteral attrName :
+       {kFusionGroupIdAttr, kFusionOrderAttr, kFusionUnrollAttr}) {
+    if (Attribute attr = src->getAttr(attrName))
+      dst->setAttr(attrName, attr);
+  }
+}
 
 static bool isInstanceFunc(func::FuncOp fn) {
   return fn->hasAttr(kOpLibAttrInstVariantId);
@@ -160,6 +172,7 @@ static LogicalResult inlineCall(func::CallOp call, func::FuncOp callee) {
       continue;
 
     Operation *newOp = cloneOpForInlineWithFix(builder, op, mapping);
+    copyFusionAttrs(call.getOperation(), newOp);
     for (auto [oldRes, newRes] :
          llvm::zip(op.getResults(), newOp->getResults()))
       mapping.map(oldRes, newRes);
@@ -248,6 +261,7 @@ struct PTOInlineLibCallPass
           OpBuilder builder(call);
           auto newCall = builder.create<func::CallOp>(call.getLoc(), callee,
                                                       concreteOperands);
+          copyFusionAttrs(call.getOperation(), newCall.getOperation());
           if (call.getNumResults() != newCall.getNumResults()) {
             call.emitOpError("call result arity mismatch during inline staging");
             signalPassFailure();

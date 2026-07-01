@@ -281,5 +281,51 @@ PlanningDecision ConservativeDAGGreedyCostModel::evaluateAppend(
   return decision;
 }
 
+PlanningDecision LegalityOnlyDAGGreedyCostModel::evaluateSeed(
+    const PlanningContext &ctx, const FusionComputeNode &candidate) const {
+  PlanningDecision decision;
+  if (!isSupportedPlanningNode(candidate))
+    return decision;
+
+  if (!isProvenIterationDomain(ctx.blockAnalysis, candidate)) {
+    decision.cost.rejectedForDynamicShape = true;
+    return decision;
+  }
+
+  decision.accept = true;
+  return decision;
+}
+
+PlanningDecision LegalityOnlyDAGGreedyCostModel::evaluateAppend(
+    const PlanningContext &ctx, ArrayRef<const FusionComputeNode *> currentGroup,
+    const FusionComputeNode &candidate) const {
+  PlanningDecision seedDecision = evaluateSeed(ctx, candidate);
+  if (!seedDecision.accept)
+    return seedDecision;
+
+  PlanningDecision decision;
+  if (currentGroup.empty()) {
+    decision.accept = true;
+    return decision;
+  }
+
+  if (currentGroup.front()->iterationDomainClass !=
+      candidate.iterationDomainClass)
+    return decision;
+
+  if (hasHardBoundaryToGroup(currentGroup, candidate))
+    return decision;
+
+  const unsigned connectionCount =
+      countConnectionsToGroup(ctx.blockAnalysis, currentGroup, candidate);
+  if (connectionCount == 0)
+    return decision;
+
+  decision.cost.dependencyBenefit = 4 * static_cast<int64_t>(connectionCount);
+  decision.cost.loopMergeBenefit = 4;
+  decision.accept = true;
+  return decision;
+}
+
 } // namespace pto
 } // namespace mlir

@@ -81,6 +81,13 @@ std::unique_ptr<Pass> createFusionPlanPass();
 std::unique_ptr<Pass> createFusionPlanPass(bool dumpVfProgram);
 std::unique_ptr<Pass> createFusionPlanPass(bool dumpVfProgram,
                                            StringRef dumpVfProgramJson);
+std::unique_ptr<Pass> createFusionPlanPass(bool dumpVfProgram,
+                                           StringRef dumpVfProgramJson,
+                                           bool useVfSimFusionPlanner);
+std::unique_ptr<Pass> createFusionPlanPass(bool dumpVfProgram,
+                                           StringRef dumpVfProgramJson,
+                                           bool useVfSimFusionPlanner,
+                                           bool dumpVfSimUnrollTest);
 std::unique_ptr<Pass> createOpSchedulingPass();
 std::unique_ptr<Pass> createPTOMarkLastUsePass();
 std::unique_ptr<Pass> createPTOFusionRegionGenPass();
@@ -92,6 +99,7 @@ std::unique_ptr<Pass> createVPTOExpandWrapperOpsPass();
 std::unique_ptr<Pass> createPTOVPTOPtrBoundaryPass();
 std::unique_ptr<Pass>
 createPTOLowLevelLoopFusionPass(const PTOLowLevelLoopFusionOptions &options = {});
+std::unique_ptr<Pass> createPTOPropagateFusionLoopAttrsPass();
 std::unique_ptr<Pass> createPTOFusionPredicateElisionPass();
 std::unique_ptr<Pass> createPTOFusionLoadStoreElisionPass();
 std::unique_ptr<Pass> createPTOFlattenFusionRegionPass();

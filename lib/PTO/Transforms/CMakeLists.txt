@@ -33,6 +33,7 @@ add_mlir_dialect_library(PTOTransforms
   TileFusion/PTOOpScheduling.cpp
   TileFusion/PTOMarkLastUse.cpp
   TileFusion/PTOFusionRegionGen.cpp
+  TileFusion/PTOPropagateFusionLoopAttrs.cpp
   TileFusion/PTOLowLevelLoopFusion.cpp
   TileFusion/PTOFusionPredicateElision.cpp
   TileFusion/PTOFusionLoadStoreElision.cpp
