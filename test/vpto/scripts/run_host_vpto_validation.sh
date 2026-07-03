@@ -173,6 +173,7 @@ build_launch_object() {
     -mllvm -cce-aicore-record-overflow=true \
     -mllvm -cce-aicore-addr-transform \
     -mllvm -cce-aicore-dcci-insert-for-scalar=false \
+    -mllvm -cce-aicore-vec-misched=0 \
     --cce-aicore-arch=dav-c310 \
     -DREGISTER_BASE \
     -std=c++17 \

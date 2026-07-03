@@ -34,6 +34,7 @@ enum class VfOpcode {
   VMULS,
   VDIV,
   VDIVS,
+  VBR,
   VMAX,
   VMAXS,
   VMIN,

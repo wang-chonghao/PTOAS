@@ -167,6 +167,8 @@ StringRef getVfOpcodeName(VfOpcode opcode) {
     return "vdiv";
   case VfOpcode::VDIVS:
     return "vdivs";
+  case VfOpcode::VBR:
+    return "vbr";
   case VfOpcode::VMAX:
     return "vmax";
   case VfOpcode::VMAXS:

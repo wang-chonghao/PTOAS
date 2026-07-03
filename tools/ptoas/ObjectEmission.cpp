@@ -396,6 +396,11 @@ static bool runCommandWithStderr(llvm::StringRef program,
   llvm::SmallVector<std::optional<llvm::StringRef>, 3> redirects = {
       stdinPath, stderrPath, stderrPath};
 
+  diagOS << "[ptoas-object-emission] " << what << " command:";
+  for (llvm::StringRef arg : args)
+    diagOS << " " << arg;
+  diagOS << "\n";
+
   std::string execErr;
   bool execFailed = false;
   int rc = llvm::sys::ExecuteAndWait(program, args, std::nullopt, redirects, 0,
@@ -434,6 +439,8 @@ static bool compileDeviceLLVMToObject(llvm::StringRef llPath,
       "-cce-dyn-kernel-stack-size=true",
       "-mllvm",
       "-cce-vf-auto-sync=global",
+      "-mllvm",
+      "-cce-aicore-vec-misched=0",
       "-c",
       "-x",
       "ir",
@@ -468,6 +475,8 @@ static bool compileCppDeviceSourceToObject(
       "-cce-aicore-addr-transform",
       "-mllvm",
       "-cce-aicore-dcci-insert-for-scalar=false",
+      "-mllvm",
+      "-cce-aicore-vec-misched=0",
       std::string("--cce-aicore-arch=") + targetCPU.str(),
       "-DREGISTER_BASE",
       "-std=c++17",
@@ -506,6 +515,8 @@ static bool compileCppDeviceSourceToFatobj(
       "-cce-aicore-addr-transform",
       "-mllvm",
       "-cce-aicore-dcci-insert-for-scalar=false",
+      "-mllvm",
+      "-cce-aicore-vec-misched=0",
       "--cce-aicore-arch=dav-c310",
       "-DREGISTER_BASE",
       "-std=c++17",
@@ -610,6 +621,8 @@ static bool compileHostStubToObject(llvm::StringRef stubPath,
       "-cce-aicore-addr-transform",
       "-mllvm",
       "-cce-aicore-dcci-insert-for-scalar=false",
+      "-mllvm",
+      "-cce-aicore-vec-misched=0",
       "-fcce-include-aibinary",
       deviceObjPath.str(),
       "-fcce-device-module-id",

@@ -23,12 +23,11 @@ namespace mlir {
 namespace pto {
 namespace {
 
-constexpr int64_t kA5VectorBytes = 256;
-
 struct VfSimProgramBuilder {
   unsigned nextOperandId = 0;
   DenseMap<Value, VfSimOperand> tileValueOperands;
   DenseMap<Value, VfSimOperand> scalarValueOperands;
+  DenseMap<Value, VfSimOperand> scalarBroadcastRegs;
 
   FailureOr<VfDType> inferDType(Type type) {
     if (auto tileType = dyn_cast<pto::TileBufType>(type))
@@ -90,6 +89,12 @@ struct VfSimProgramBuilder {
 
   FailureOr<VfSimOperand> makeVirtualReg(Value value) {
     return makeOperand(VfOperandKind::VReg, value);
+  }
+
+  FailureOr<VfSimOperand> makeVirtualReg(VfDType dtype) {
+    if (dtype == VfDType::Unknown)
+      return failure();
+    return VfSimOperand{nextOperandId++, VfOperandKind::VReg, dtype};
   }
 };
 
@@ -209,7 +214,7 @@ static bool mustStoreTileOutput(const FusionBlockAnalysis &blockAnalysis,
 }
 
 static FailureOr<int64_t>
-computeFlattenTripCount(const FusionBlockAnalysis &blockAnalysis,
+computeTileRowTripCount(const FusionBlockAnalysis &blockAnalysis,
                         ArrayRef<const FusionComputeNode *> group) {
   if (group.empty())
     return failure();
@@ -224,39 +229,12 @@ computeFlattenTripCount(const FusionBlockAnalysis &blockAnalysis,
       info.vRow == ShapedType::kDynamic || info.vCol == ShapedType::kDynamic)
     return failure();
 
-  Type elementType;
-  for (const FusionComputeNode *node : group) {
-    for (Value output : node->semantics.tileOutputs) {
-      if (auto tileType = dyn_cast<pto::TileBufType>(output.getType())) {
-        elementType = tileType.getElementType();
-        break;
-      }
-    }
-    if (elementType)
-      break;
-    for (Value input : node->semantics.tileInputs) {
-      if (auto tileType = dyn_cast<pto::TileBufType>(input.getType())) {
-        elementType = tileType.getElementType();
-        break;
-      }
-    }
-    if (elementType)
-      break;
-  }
-
-  if (!elementType)
-    return failure();
-
-  unsigned elemBytes = pto::getPTOStorageElemByteSize(elementType);
-  if (elemBytes == 0 || elemBytes > kA5VectorBytes)
-    return failure();
-
-  int64_t elemsPerVector = kA5VectorBytes / elemBytes;
-  if (elemsPerVector <= 0)
-    return failure();
-
-  int64_t elementCount = info.vRow * info.vCol;
-  return (elementCount + elemsPerVector - 1) / elemsPerVector;
+  // The VPTO tile expansion used by the currently modeled elementwise tileops
+  // preserves the tile row dimension as the low-level vector loop and emits one
+  // masked vector operation per row.  Do not flatten by the hardware vector
+  // byte width here: for example, a 32x32xf32 tile lowers to 32 b32-masked
+  // vector iterations, not 1024 / (256 / sizeof(f32)) = 16 iterations.
+  return info.vRow;
 }
 
 static LogicalResult appendLoadIfNeeded(VfSimProgramBuilder &builder,
@@ -308,14 +286,80 @@ selectConvertOpcodeAndForm(Type srcType, Type dstType) {
   return std::nullopt;
 }
 
+static bool isTileValue(Value value) {
+  return isa<pto::TileBufType>(value.getType());
+}
+
 static FailureOr<VfSimOperand>
-emitComputeNode(VfSimProgramBuilder &builder, std::vector<VfSimNode> &body,
+emitTDivSNode(VfSimProgramBuilder &builder, std::vector<VfSimNode> &setupBody,
+              std::vector<VfSimNode> &body,
+              DenseMap<Value, VfSimOperand> &valueToReg,
+              const FusionComputeNode &node) {
+  auto op = dyn_cast_or_null<pto::TDivSOp>(node.semantics.op);
+  if (!op || node.semantics.tileOutputs.size() != 1)
+    return failure();
+
+  Value lhs = op.getSrc();
+  Value rhs = op.getScalar();
+  bool lhsIsTile = isTileValue(lhs);
+  bool rhsIsTile = isTileValue(rhs);
+  if (lhsIsTile == rhsIsTile)
+    return failure();
+
+  Value tileValue = lhsIsTile ? lhs : rhs;
+  Value scalarValue = lhsIsTile ? rhs : lhs;
+
+  FailureOr<VfSimOperand> tileReg =
+      getTileInputReg(builder, body, valueToReg, tileValue);
+  FailureOr<VfSimOperand> scalarOperand =
+      builder.getScalarValueOperand(scalarValue);
+  if (failed(tileReg) || failed(scalarOperand))
+    return failure();
+
+  auto [broadcastIt, inserted] =
+      builder.scalarBroadcastRegs.try_emplace(scalarValue);
+  if (inserted) {
+    FailureOr<VfSimOperand> broadcastReg =
+        builder.makeVirtualReg(scalarOperand->dtype);
+    if (failed(broadcastReg))
+      return failure();
+    broadcastIt->second = *broadcastReg;
+    setupBody.push_back(makeInstNode(
+        VfSimInst{VfOpcode::VBR, {}, {broadcastIt->second}, {*scalarOperand}}));
+  }
+
+  FailureOr<VfSimOperand> result =
+      builder.makeVirtualReg(node.semantics.tileOutputs.front());
+  if (failed(result))
+    return failure();
+
+  SmallVector<VfSimOperand, 4> src;
+  if (lhsIsTile) {
+    src.push_back(*tileReg);
+    src.push_back(broadcastIt->second);
+  } else {
+    src.push_back(broadcastIt->second);
+    src.push_back(*tileReg);
+  }
+
+  body.push_back(
+      makeInstNode(VfSimInst{VfOpcode::VDIV, {}, {*result}, std::move(src)}));
+  valueToReg[node.semantics.tileOutputs.front()] = *result;
+  return *result;
+}
+
+static FailureOr<VfSimOperand>
+emitComputeNode(VfSimProgramBuilder &builder, std::vector<VfSimNode> &setupBody,
+                std::vector<VfSimNode> &body,
                 DenseMap<Value, VfSimOperand> &valueToReg,
                 const FusionComputeNode &node) {
   std::optional<TileOpPatternSpec> spec =
       lookupTileOpPatternSpec(node.semantics.opName);
   if (!spec)
     return failure();
+
+  if (node.semantics.opName == "tdivs")
+    return emitTDivSNode(builder, setupBody, body, valueToReg, node);
 
   SmallVector<VfSimOperand, 4> src;
   for (Value input : node.semantics.tileInputs) {
@@ -456,17 +500,18 @@ buildFusedElementwiseVfSimProgram(const VfCostInput &input) {
   }
 
   FailureOr<int64_t> tripCount =
-      computeFlattenTripCount(*input.blockAnalysis, proposedGroup);
+      computeTileRowTripCount(*input.blockAnalysis, proposedGroup);
   if (failed(tripCount))
     return failure();
 
   VfSimProgramBuilder builder;
   VfSimProgram program;
+  std::vector<VfSimNode> setupBody;
   std::vector<VfSimNode> loopBody;
 
   DenseMap<Value, VfSimOperand> valueToReg;
   for (const FusionComputeNode *node : proposedGroup) {
-    if (failed(emitComputeNode(builder, loopBody, valueToReg, *node)))
+    if (failed(emitComputeNode(builder, setupBody, loopBody, valueToReg, *node)))
       return failure();
   }
 
@@ -488,6 +533,7 @@ buildFusedElementwiseVfSimProgram(const VfCostInput &input) {
     }
   }
 
+  program.body = std::move(setupBody);
   program.body.push_back(makeLoopNode(*tripCount, 1, std::move(loopBody)));
   return program;
 }

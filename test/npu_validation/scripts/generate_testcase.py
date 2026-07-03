@@ -2415,6 +2415,7 @@ add_link_options(
 	    "SHELL:-mllvm -cce-aicore-record-overflow=true"
     "SHELL:-mllvm -cce-aicore-addr-transform"
     "SHELL:-mllvm -cce-aicore-dcci-insert-for-scalar=false"
+    "SHELL:-mllvm -cce-aicore-vec-misched=0"
 )
 
 set(CMAKE_CPP_COMPILE_OPTIONS

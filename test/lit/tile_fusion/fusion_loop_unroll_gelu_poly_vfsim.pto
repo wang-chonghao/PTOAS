@@ -79,10 +79,11 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // PLAN: unroll=1 valid=true supported=true cycles=
 // PLAN: unroll=4 valid=true supported=true cycles=
 // PLAN: unroll=6 valid=true supported=true cycles=
-// PLAN: selected_unroll=6
-// PLAN: pto.fusion.unroll = 6 : i64
+// PLAN: unroll=8 valid=true supported=true cycles=
+// PLAN: selected_unroll=8
+// PLAN: pto.fusion.unroll = 8 : i64
 
 // LLF: // -----// IR Dump After PTOLowLevelLoopFusion (pto-low-level-loop-fusion) //----- //
 // LLF-LABEL: func.func @fusion_loop_unroll_gelu_poly_vfsim(
 // LLF: pto.fusion_region
-// LLF: pto.fusion.loop_unroll = 6 : i64
+// LLF: pto.fusion.loop_unroll = 8 : i64

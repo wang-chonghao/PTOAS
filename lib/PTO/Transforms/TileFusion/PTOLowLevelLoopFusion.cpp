@@ -578,20 +578,33 @@ static void appendMappedValues(ValueRange values, IRMapping &mapping,
     mappedValues.push_back(mapValueOrSelf(value, mapping));
 }
 
-static Value buildOffsetInductionVar(OpBuilder &builder, Location loc,
-                                     Value baseIv, Value originalStep,
-                                     int64_t offset) {
-  if (offset == 0)
-    return baseIv;
-
-  Value offsetValue = builder.create<arith::ConstantIndexOp>(loc, offset);
-  Value delta = offsetValue;
-  if (std::optional<int64_t> step = getConstantIntValue(originalStep)) {
-    delta = builder.create<arith::ConstantIndexOp>(loc, *step * offset);
-  } else {
-    delta = builder.create<arith::MulIOp>(loc, originalStep, offsetValue);
+static Value buildUnrolledInductionVar(OpBuilder &builder, Location loc,
+                                       Value regularIv, Value originalLower,
+                                       Value originalStep, int64_t unroll,
+                                       int64_t offset) {
+  Value lane = regularIv;
+  if (unroll != 1) {
+    Value unrollValue = builder.create<arith::ConstantIndexOp>(loc, unroll);
+    lane = builder.create<arith::MulIOp>(loc, regularIv, unrollValue);
   }
-  return builder.create<arith::AddIOp>(loc, baseIv, delta);
+  Value offsetValue = builder.create<arith::ConstantIndexOp>(loc, offset);
+  if (offset != 0)
+    lane = builder.create<arith::AddIOp>(loc, lane, offsetValue);
+
+  Value scaledLane = lane;
+  if (std::optional<int64_t> step = getConstantIntValue(originalStep)) {
+    if (*step != 1) {
+      Value stepValue = builder.create<arith::ConstantIndexOp>(loc, *step);
+      scaledLane = builder.create<arith::MulIOp>(loc, lane, stepValue);
+    }
+  } else {
+    scaledLane = builder.create<arith::MulIOp>(loc, lane, originalStep);
+  }
+
+  if (std::optional<int64_t> lower = getConstantIntValue(originalLower))
+    if (*lower == 0)
+      return scaledLane;
+  return builder.create<arith::AddIOp>(loc, originalLower, scaledLane);
 }
 
 static scf::ForOp buildFusedLoopNestAtLevel(OpBuilder &builder,
@@ -606,20 +619,21 @@ static scf::ForOp buildFusedLoopNestAtLevel(OpBuilder &builder,
     appendMappedValues(ValueRange(stage.levels[levelIndex].loop.getInitArgs()),
                        mappings[stageIndex], fusedInitArgs);
 
-  Value originalStep = mapValueOrSelf(firstLoop.getStep(), mappings.front());
-  Value fusedStep = originalStep;
+  Value fusedLower = mapValueOrSelf(firstLoop.getLowerBound(), mappings.front());
+  Value fusedUpper = mapValueOrSelf(firstLoop.getUpperBound(), mappings.front());
+  Value fusedStep = mapValueOrSelf(firstLoop.getStep(), mappings.front());
   if (unroll > 1) {
-    Value factor =
-        builder.create<arith::ConstantIndexOp>(firstLoop.getLoc(), unroll);
-    fusedStep = builder.create<arith::MulIOp>(firstLoop.getLoc(), originalStep,
-                                              factor);
+    std::optional<int64_t> tripCount = getStaticTripCount(firstLoop);
+    assert(tripCount && "unrolled loop must have a static trip count");
+    fusedLower = builder.create<arith::ConstantIndexOp>(firstLoop.getLoc(), 0);
+    fusedUpper = builder.create<arith::ConstantIndexOp>(
+        firstLoop.getLoc(), *tripCount / unroll);
+    fusedStep = builder.create<arith::ConstantIndexOp>(firstLoop.getLoc(), 1);
   }
 
-  auto fusedLoop = builder.create<scf::ForOp>(
-      firstLoop.getLoc(),
-      mapValueOrSelf(firstLoop.getLowerBound(), mappings.front()),
-      mapValueOrSelf(firstLoop.getUpperBound(), mappings.front()),
-      fusedStep, fusedInitArgs);
+  auto fusedLoop = builder.create<scf::ForOp>(firstLoop.getLoc(), fusedLower,
+                                              fusedUpper, fusedStep,
+                                              fusedInitArgs);
   fusedLoop->setAttrs(firstLoop->getAttrs());
 
   unsigned iterArgOffset = 0;
@@ -635,6 +649,7 @@ static scf::ForOp buildFusedLoopNestAtLevel(OpBuilder &builder,
   }
 
   OpBuilder bodyBuilder = OpBuilder::atBlockBegin(fusedLoop.getBody());
+
   auto emitLevelBody = [&](MutableArrayRef<IRMapping> bodyMappings) {
     for (auto [stageIndex, stage] : llvm::enumerate(stages))
       for (Operation *op : stage.levels[levelIndex].preludeOps)
@@ -654,20 +669,144 @@ static scf::ForOp buildFusedLoopNestAtLevel(OpBuilder &builder,
   if (unroll == 1) {
     emitLevelBody(mappings);
   } else {
+    SmallVector<SmallVector<IRMapping, 8>, 8> offsetMappings;
+    offsetMappings.reserve(unroll);
     for (int64_t offset = 0; offset < unroll; ++offset) {
-      SmallVector<IRMapping, 8> offsetMappings;
-      offsetMappings.reserve(stages.size());
+      SmallVector<IRMapping, 8> laneMappings;
+      laneMappings.reserve(stages.size());
       for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
         scf::ForOp originalLoop = stage.levels[levelIndex].loop;
         IRMapping offsetMapping = mappings[stageIndex];
-        Value offsetIv = buildOffsetInductionVar(
+        Value offsetIv = buildUnrolledInductionVar(
             bodyBuilder, originalLoop.getLoc(), fusedLoop.getInductionVar(),
+            mapValueOrSelf(originalLoop.getLowerBound(), mappings[stageIndex]),
             mapValueOrSelf(originalLoop.getStep(), mappings[stageIndex]),
-            offset);
+            unroll, offset);
         offsetMapping.map(originalLoop.getInductionVar(), offsetIv);
-        offsetMappings.push_back(std::move(offsetMapping));
+        laneMappings.push_back(std::move(offsetMapping));
       }
-      emitLevelBody(offsetMappings);
+      offsetMappings.push_back(std::move(laneMappings));
+    }
+
+    // Emit unrolled bodies in op-major order to match the VF simulator
+    // contract: A0 A1 ... B0 B1 ..., not A0 B0 ... A1 B1 ...
+    for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+      for (Operation *op : stage.levels[levelIndex].preludeOps)
+        for (int64_t offset = 0; offset < unroll; ++offset)
+          cloneOpAndMapResults(bodyBuilder, op,
+                               offsetMappings[offset][stageIndex]);
+    }
+
+    if (levelIndex + 1 < stages.front().getDepth()) {
+      unsigned childLevel = levelIndex + 1;
+      if (childLevel + 1 < stages.front().getDepth()) {
+        for (int64_t offset = 0; offset < unroll; ++offset)
+          (void)buildFusedLoopNestAtLevel(bodyBuilder, stages,
+                                          offsetMappings[offset], childLevel);
+      } else {
+        scf::ForOp firstChildLoop = stages.front().levels[childLevel].loop;
+        SmallVector<Value, 8> childInitArgs;
+        for (int64_t offset = 0; offset < unroll; ++offset) {
+          for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+            appendMappedValues(
+                ValueRange(stage.levels[childLevel].loop.getInitArgs()),
+                offsetMappings[offset][stageIndex], childInitArgs);
+          }
+        }
+
+        auto fusedChildLoop = bodyBuilder.create<scf::ForOp>(
+            firstChildLoop.getLoc(),
+            mapValueOrSelf(firstChildLoop.getLowerBound(),
+                           offsetMappings.front().front()),
+            mapValueOrSelf(firstChildLoop.getUpperBound(),
+                           offsetMappings.front().front()),
+            mapValueOrSelf(firstChildLoop.getStep(),
+                           offsetMappings.front().front()),
+            childInitArgs);
+        fusedChildLoop->setAttrs(firstChildLoop->getAttrs());
+
+        unsigned childIterArgOffset = 0;
+        for (int64_t offset = 0; offset < unroll; ++offset) {
+          for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+            scf::ForOp originalChildLoop = stage.levels[childLevel].loop;
+            IRMapping &childMapping = offsetMappings[offset][stageIndex];
+            childMapping.map(originalChildLoop.getInductionVar(),
+                             fusedChildLoop.getInductionVar());
+            for (auto [argIndex, originalArg] :
+                 llvm::enumerate(originalChildLoop.getRegionIterArgs())) {
+              childMapping.map(
+                  originalArg,
+                  fusedChildLoop
+                      .getRegionIterArgs()[childIterArgOffset + argIndex]);
+            }
+            childIterArgOffset += originalChildLoop.getRegionIterArgs().size();
+          }
+        }
+
+        OpBuilder childBodyBuilder =
+            OpBuilder::atBlockBegin(fusedChildLoop.getBody());
+        for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+          for (Operation *op : stage.levels[childLevel].preludeOps)
+            for (int64_t offset = 0; offset < unroll; ++offset)
+              cloneOpAndMapResults(childBodyBuilder, op,
+                                   offsetMappings[offset][stageIndex]);
+        }
+        for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+          for (Operation *op : stage.leafOps)
+            for (int64_t offset = 0; offset < unroll; ++offset)
+              cloneOpAndMapResults(childBodyBuilder, op,
+                                   offsetMappings[offset][stageIndex]);
+        }
+        for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+          for (Operation *op : stage.levels[childLevel].epilogueOps)
+            for (int64_t offset = 0; offset < unroll; ++offset)
+              cloneOpAndMapResults(childBodyBuilder, op,
+                                   offsetMappings[offset][stageIndex]);
+        }
+
+        SmallVector<Value, 8> childYieldOperands;
+        for (int64_t offset = 0; offset < unroll; ++offset) {
+          for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+            auto originalYield = cast<scf::YieldOp>(
+                stage.levels[childLevel].loop.getBody()->getTerminator());
+            appendMappedValues(ValueRange(originalYield.getOperands()),
+                               offsetMappings[offset][stageIndex],
+                               childYieldOperands);
+          }
+        }
+        Block *childBody = fusedChildLoop.getBody();
+        Operation *childTerminator = nullptr;
+        if (!childBody->empty() &&
+            childBody->back().hasTrait<OpTrait::IsTerminator>())
+          childTerminator = &childBody->back();
+        if (auto childYield =
+                dyn_cast_or_null<scf::YieldOp>(childTerminator)) {
+          childYield->setOperands(childYieldOperands);
+        } else {
+          OpBuilder yieldBuilder = OpBuilder::atBlockEnd(childBody);
+          yieldBuilder.create<scf::YieldOp>(firstChildLoop.getLoc(),
+                                            childYieldOperands);
+        }
+
+        unsigned childResultOffset = 0;
+        for (int64_t offset = 0; offset < unroll; ++offset) {
+          for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+            scf::ForOp originalChildLoop = stage.levels[childLevel].loop;
+            IRMapping &childMapping = offsetMappings[offset][stageIndex];
+            for (Value originalResult : originalChildLoop.getResults()) {
+              childMapping.map(originalResult,
+                               fusedChildLoop.getResults()[childResultOffset++]);
+            }
+          }
+        }
+      }
+    } else {
+      for (auto [stageIndex, stage] : llvm::enumerate(stages)) {
+        for (Operation *op : stage.leafOps)
+          for (int64_t offset = 0; offset < unroll; ++offset)
+            cloneOpAndMapResults(bodyBuilder, op,
+                                 offsetMappings[offset][stageIndex]);
+      }
     }
   }
 
