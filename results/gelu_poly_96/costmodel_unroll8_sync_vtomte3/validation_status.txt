@@ -1,0 +1,2 @@
+rc=0
+run_dir=/tmp/ptoas_gelu_poly_96_costmodel_sync_vtomte3_run/gelu-poly-96-unroll

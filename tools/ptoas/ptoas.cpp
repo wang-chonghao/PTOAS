@@ -74,6 +74,73 @@ extern char **environ;
 using namespace mlir;
 using namespace pto;
 
+namespace {
+class VPTOEnsureVecToMte3SyncPass
+    : public PassWrapper<VPTOEnsureVecToMte3SyncPass,
+                         OperationPass<func::FuncOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(VPTOEnsureVecToMte3SyncPass)
+
+  StringRef getArgument() const final { return "pto-vpto-ensure-v-to-mte3-sync"; }
+  StringRef getDescription() const final {
+    return "Ensure VPTO vector scopes are synchronized before UB-to-GM copies";
+  }
+
+  void runOnOperation() override {
+    func::FuncOp func = getOperation();
+    IRRewriter rewriter(func.getContext());
+
+    func.walk([&](Block *block) {
+      bool sawVecScope = false;
+      bool hasPendingVecToMte3Sync = false;
+      for (Operation &op : llvm::make_early_inc_range(*block)) {
+        if (isa<pto::VecScopeOp, pto::StrictVecScopeOp>(op)) {
+          sawVecScope = true;
+          hasPendingVecToMte3Sync = false;
+          continue;
+        }
+
+        if (!sawVecScope)
+          continue;
+
+        if (auto setFlag = dyn_cast<pto::SetFlagOp>(op)) {
+          if (setFlag.getSrcPipe().getPipe() == pto::PIPE::PIPE_V &&
+              setFlag.getDstPipe().getPipe() == pto::PIPE::PIPE_MTE3)
+            hasPendingVecToMte3Sync = true;
+          continue;
+        }
+        if (auto waitFlag = dyn_cast<pto::WaitFlagOp>(op)) {
+          if (waitFlag.getSrcPipe().getPipe() == pto::PIPE::PIPE_V &&
+              waitFlag.getDstPipe().getPipe() == pto::PIPE::PIPE_MTE3)
+            hasPendingVecToMte3Sync = true;
+          continue;
+        }
+
+        if (!isa<pto::CopyUbufToGmOp>(op))
+          continue;
+
+        if (!hasPendingVecToMte3Sync) {
+          rewriter.setInsertionPoint(&op);
+          auto srcPipe =
+              pto::PipeAttr::get(func.getContext(), pto::PIPE::PIPE_V);
+          auto dstPipe =
+              pto::PipeAttr::get(func.getContext(), pto::PIPE::PIPE_MTE3);
+          auto eventId =
+              pto::EventAttr::get(func.getContext(), pto::EVENT::EVENT_ID0);
+          rewriter.create<pto::SetFlagOp>(op.getLoc(), srcPipe, dstPipe,
+                                          eventId);
+          rewriter.create<pto::WaitFlagOp>(op.getLoc(), srcPipe, dstPipe,
+                                           eventId);
+        }
+
+        sawVecScope = false;
+        hasPendingVecToMte3Sync = false;
+      }
+    });
+  }
+};
+} // namespace
+
 #ifndef PTOAS_RELEASE_VERSION
 #define PTOAS_RELEASE_VERSION "unknown"
 #endif
@@ -1566,6 +1633,8 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createPTOInferVPTOVecScopePass());
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      std::make_unique<VPTOEnsureVecToMte3SyncPass>());
   kernelModulePM.addPass(createCanonicalizerPass());
   kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addPass(pto::createPTOValidateVPTOEmissionIRPass());
