@@ -1,553 +1,294 @@
-# VF CostModel External Fusion Planner Protocol
+# VF CostModel External Planner Protocol
 
-本文记录 PTOAS 与 vfsimulator 解耦后的推荐接口方案。目标是让 PTOAS 只负责 tileop 合法融合分组，vfsimulator 负责融合策略生成、costmodel 评估和策略选择。
+本文档定义 PTOAS 与外接 VfSim CostModel 的规划接口。目标是让 PTOAS 保留融合合法性判断，让 VfSim 负责生成融合策略、进行 unroll 搜索并返回最终 fusion plan。
 
-## 1. PTOAS 当前 TileOp Fusion 分层
-
-当前 PTOAS tileop fusion 路径可以理解为以下几层：
+## Data Flow
 
 ```text
-PreFusionAnalysis
-  -> FusionPlan / StrategyEngine / CostModel
-  -> PTOOpScheduling / PTOMarkLastUse / PTOFusionRegionGen
-  -> VPTO backend fusion-region local optimization and lowering
+PTOAS PreFusionAnalysis / FusionPlan legality
+  -> legal fusion group
+  -> PTOAS adapter
+  -> FusionGroupInfo
+  -> VfSim planner
+  -> template-based micro-op program generation
+  -> costmodel evaluation
+  -> FusionPlanInfo
+  -> PTOAS writes fusion attrs
+  -> scheduling / fusion region generation / VPTO backend
 ```
 
-### 1.1 PreFusionAnalysis
+## Responsibility Boundary
 
-对应 pass：
+| Component | Responsibility |
+| --- | --- |
+| PTOAS FusionPlan | 判断 tileop 是否可以融合，生成合法 fusion group |
+| PTOAS Adapter | 将 PTOAS 内部对象转换为不含 PTOAS 指针的 `FusionGroupInfo` |
+| VfSim Planner | 基于 group 生成候选 fusion 策略，扫描 unroll，调用 costmodel |
+| VfSim Template Registry | 维护和 PTOAS tileop lowering 语义一致的性能模板 |
+| PTOAS Result Consumer | 根据 `FusionPlanInfo` 给 tileop 写 metadata |
+| VPTO Backend | 消费 metadata，生成融合后的 VF / loop IR |
+
+## Input Abstraction
+
+PTOAS 传给 VfSim 的输入是一个经过合法性验证的 fusion group。该结构只描述 tileop 语义、输入输出、shape、dtype 和模板选择参数，不暴露 PTOAS 内部指针。
+
+```cpp
+struct FusionGroupInfo {
+  std::string groupId;
+  std::vector<TileOpInfo> ops;
+};
+
+struct TileOpInfo {
+  std::string opId;
+  std::string opName;
+  uint64_t originalOrder;
+
+  std::vector<ValueInfo> inputs;
+  std::vector<ValueInfo> outputs;
+
+  std::vector<TemplateParamInfo> templateParams;
+};
+
+struct ValueInfo {
+  std::string valueId;
+  ValueKind kind;
+  ShapeInfo shape;
+  DType dtype;
+  bool externalOutput;
+};
+
+struct ShapeInfo {
+  std::vector<int64_t> shape;
+  std::vector<int64_t> validShape;
+  LayoutKind layout;
+};
+
+struct TemplateParamInfo {
+  std::string key;
+  std::string value;
+};
+```
+
+### FusionGroupInfo
+
+| Field | Meaning |
+| --- | --- |
+| `groupId` | PTOAS 侧生成的 group 标识，用于结果回写和日志关联 |
+| `ops` | group 内 tileop 列表，顺序为合法性规划后的初始顺序 |
+
+### TileOpInfo
+
+| Field | Meaning |
+| --- | --- |
+| `opId` | tileop 的稳定标识，VfSim 输出结果通过它回写到 PTOAS |
+| `opName` | tileop 类型，例如 `tadd`、`tcvt`、`tdivs` |
+| `originalOrder` | tileop 在原 block 中的顺序，用于稳定排序和调试 |
+| `inputs` | tileop 输入 value 列表 |
+| `outputs` | tileop 输出 value 列表 |
+| `templateParams` | 影响模板选择或 micro-op 结构的参数 |
+
+### ValueInfo
+
+| Field | Meaning |
+| --- | --- |
+| `valueId` | value 的稳定标识，用于重建 tileop 之间的数据依赖 |
+| `kind` | value 类型，例如 vector、scalar、constant |
+| `shape` | shape、valid shape 和 layout 信息 |
+| `dtype` | 当前 value 的数据类型，支持输入输出 dtype 不同的 op，例如 `tcvt` |
+| `externalOutput` | 仅对 output 有意义，表示该输出需要保留到 fusion group 外部 |
+
+### ShapeInfo
+
+| Field | Meaning |
+| --- | --- |
+| `shape` | 逻辑 shape |
+| `validShape` | 有效计算 shape，用于推导实际循环次数和 mask |
+| `layout` | 数据布局，用于选择模板和推导访存模式 |
+
+### TemplateParamInfo
+
+`templateParams` 只传递 VfSim 生成模板需要的信息。典型字段包括：
+
+| Key | Meaning |
+| --- | --- |
+| `round_mode` | 类型转换或近似计算的 rounding 模式 |
+| `convert_mode` | `tcvt` 类 op 的转换模式 |
+| `scalar_operand_kind` | scalar/broadcast operand 的结构信息 |
+| `mask_mode` | mask 或 valid shape 无法直接表达时的补充信息 |
+| `approx_mode` | 近似计算模板选择信息 |
+
+## Dependency And Loop Inference
+
+VfSim 通过 `valueId` 建立 tileop 之间的数据依赖：
 
 ```text
-pto-pre-fusion-analysis
+producer.outputs[i].valueId == consumer.inputs[j].valueId
 ```
 
-职责：
-
-- 扫描 tile-native IR 中的 tileop。
-- 抽取 `FusionComputeNode`、tile 输入输出、SSA 数据依赖、block order、iteration domain 等信息。
-- 判断每个 tileop 是否具备可分析的 fusion semantics。
-- 给后续 planner 提供 block-local analysis result。
-
-需要注意：当前 `PreFusionAnalysis` 主要生成可复用分析状态和候选图，不直接生成最终 fusion group。
-
-### 1.2 FusionPlan / Strategy Decision
-
-对应 pass：
+VfSim 通过以下信息推导模板和循环结构：
 
 ```text
-pto-fusion-plan
+opName + inputs/outputs dtype + shape/validShape/layout + templateParams
+  -> VfSim template registry
+  -> loop count / micro-op sequence / live-out stores
 ```
 
-当前实现：
+unroll 合法性由 VfSim 根据推导出的循环次数判断。第一阶段扫描不超过 8 的循环次数因子，例如 `1, 2, 3, 4, 6, 8`。
 
-```text
-ConservativeDAGGreedyStrategyEngine
-ConservativeDAGGreedyCostModel
-```
+## Template Registry
 
-职责：
+VfSim 维护独立的性能模板库。模板语义与 PTOAS tileop lowering 保持一致，用于预测融合后 VF 的 micro-op 形式。
 
-- 基于 `PreFusionAnalysis` 的 compute graph 形成 fusion group。
-- 当前 `ConservativeDAGGreedyCostModel` 同时承担两类判断：
-  - 合法性/保守约束：op 是否支持、iteration domain 是否 proven、是否有 hard boundary、是否有数据流连接。
-  - 收益启发式：dependency benefit、loop merge benefit、live tile penalty、vf parameter penalty。
-- 对被接受的 group 打 metadata：
+| TileOp | Template Output |
+| --- | --- |
+| `tadd` / `tadds` | elementwise add micro-op |
+| `tmul` / `tmuls` | elementwise multiply micro-op |
+| `tcvt` | conversion micro-op，输入输出 dtype 可不同 |
+| `tdivs` | scalar/vector divide 模板，可展开为 `vbr` + `vdiv` 语义 |
+| `texp` | exp micro-op |
 
-```text
-pto.fusion.group_id
-pto.fusion.order
-```
+模板输出需要标记哪些中间值只在 group 内使用，哪些输出需要通过 `externalOutput` materialize 到 group 外。
 
-因此，当前 PTOAS 第二层并不只是“能否融合”，也包含了“是否值得融合”的启发式收益判断。
+## Output Abstraction
 
-### 1.3 Scheduling / Region Materialization
+VfSim 返回一个 fusion plan。PTOAS 根据该结果写 metadata，后续 pass 继续消费这些 metadata。
 
-对应 pass：
+```cpp
+struct FusionPlanInfo {
+  std::string groupId;
+  std::vector<TileOpPlanInfo> ops;
+  std::vector<StrategyCandidate> candidates;
+};
 
-```text
-pto-op-scheduling
-pto-mark-last-use
-pto-fusion-region-gen
-```
+struct TileOpPlanInfo {
+  std::string opId;
 
-职责：
+  uint64_t order;
+  int64_t unroll;
 
-- 根据 `pto.fusion.group_id` / `pto.fusion.order` 调整 group 内 op 顺序。
-- 标注 last-use 信息。
-- 将连续 fusion span 包装成 `pto.fusion_region`。
+  std::string loopFusionId;
+  bool innerLoopExpand;
+};
 
-### 1.4 VPTO Backend Consumption
-
-当前 VPTO 相关 fusion-region 后端 pass 包括：
-
-```text
-pto-low-level-loop-fusion
-pto-fusion-predicate-elision
-pto-fusion-load-store-elision
-pto-flatten-fusion-region
-```
-
-职责：
-
-- 在 `pto.fusion_region` 内做 VPTO post-lowering loop fusion。
-- 做 fusion-local predicate/load/store cleanup。
-- 最后 flatten fusion region。
-
-需要注意：从当前代码看，VPTO 后端已经会消费 `pto.fusion_region` 这一层结构做局部优化；但“由前端 metadata 直接驱动生成完整融合 VF micro-op”的能力仍需要继续明确接口和实现边界。
-
-## 2. 目标分层
-
-解耦后希望调整为：
-
-```text
-PTOAS
-  1. 判断 tileop 是否具备合法融合条件
-  2. 形成 tileop fusion candidate group
-  3. 将 group 交给 vfsimulator external planner
-  4. 消费 planner 返回的 fusion plan
-  5. 打 metadata / 生成 fusion_region / 进入 VPTO 后端
-
-vfsimulator
-  1. 接收 tileop group
-  2. 基于 tileop 模板生成融合策略
-  3. 第一阶段采用 fuse-all policy
-  4. 对 unroll candidates 做寻优
-  5. 调用 VF costmodel 评估
-  6. 返回 selected fusion plan
-```
-
-核心变化：
-
-- PTOAS 不再做融合收益判断。
-- PTOAS 不维护 costmodel 强相关的策略生成逻辑。
-- vfsimulator 成为 fusion strategy 和 costmodel 的 owner。
-- PTOAS 与 vfsimulator 之间通过稳定 planner protocol 交互。
-
-## 3. 推荐接口形态
-
-推荐正式集成形态：
-
-```text
-dynamic library plugin + stable C ABI
-```
-
-PTOAS 运行时加载 vfsimulator planner plugin：
-
-```text
-libvfsim_fusion_planner.so
-```
-
-插件暴露一个稳定 C ABI 入口：
-
-```c
-extern "C" const VfsimPluginApi *vfsimGetPluginApi(uint32_t requestedApiVersion);
-```
-
-PTOAS 只依赖一个很薄的 public header，例如：
-
-```text
-VfsimFusionPlannerCAPI.h
-```
-
-vfsimulator 内部可以用 Python、C++ 或其他实现，但对 PTOAS 暴露的 ABI 保持稳定。
-
-## 4. Plugin API
-
-### 4.1 API Table
-
-```c
-typedef struct VfsimPluginApi {
-  uint32_t apiVersion;
-
-  VfsimStatus (*planFusionGroups)(
-      const VfsimFusionPlanRequest *request,
-      VfsimFusionPlanResponse *response);
-
-  void (*freeFusionPlanResponse)(VfsimFusionPlanResponse *response);
-
-  const char *(*getVersionString)(void);
-} VfsimPluginApi;
-```
-
-### 4.2 Status
-
-```c
-typedef enum VfsimStatusCode {
-  VFSIM_STATUS_OK = 0,
-  VFSIM_STATUS_UNSUPPORTED_API_VERSION = 1,
-  VFSIM_STATUS_INVALID_REQUEST = 2,
-  VFSIM_STATUS_UNSUPPORTED_GROUP = 3,
-  VFSIM_STATUS_MODEL_ERROR = 4,
-  VFSIM_STATUS_INTERNAL_ERROR = 5,
-} VfsimStatusCode;
-
-typedef struct VfsimStatus {
-  VfsimStatusCode code;
-  const char *message;
-} VfsimStatus;
-```
-
-Top-level `VfsimStatus` 表示整个调用是否完成。单个 group 是否 supported 由 response 内的 per-group result 表达。
-
-## 5. Request Schema
-
-### 5.1 FusionPlanRequest
-
-```c
-typedef struct VfsimFusionPlanRequest {
-  uint32_t schemaVersion;
-  VfsimTargetDesc target;
-  VfsimPlanningOptions options;
-
-  const VfsimTileOpGroup *groups;
-  uint64_t numGroups;
-} VfsimFusionPlanRequest;
-```
-
-### 5.2 TargetDesc
-
-```c
-typedef struct VfsimTargetDesc {
-  const char *arch;        // example: "a5"
-  uint32_t vectorBytes;    // example: 256
-  const char *profile;     // optional, example: "default"
-} VfsimTargetDesc;
-```
-
-### 5.3 PlanningOptions
-
-```c
-typedef enum VfsimFusionPolicy {
-  VFSIM_FUSION_POLICY_FUSE_ALL = 0,
-  VFSIM_FUSION_POLICY_SEARCH = 1,
-} VfsimFusionPolicy;
-
-typedef struct VfsimPlanningOptions {
-  VfsimFusionPolicy policy;
-
-  const uint32_t *unrollCandidates;
-  uint64_t numUnrollCandidates;
-
-  bool requestAlternatives;
-  bool requestDiagnostics;
-} VfsimPlanningOptions;
-```
-
-第一阶段建议：
-
-```text
-policy = VFSIM_FUSION_POLICY_FUSE_ALL
-unrollCandidates = [1, 2, 4, 8]
-```
-
-### 5.4 TileOpGroup
-
-```c
-typedef struct VfsimTileOpGroup {
-  const char *groupId;
-  VfsimIterationDomain iterationDomain;
-
-  const VfsimTileOpDesc *ops;
-  uint64_t numOps;
-
-  const VfsimDataEdge *edges;
-  uint64_t numEdges;
-
-  const char *const *externalOutputValueIds;
-  uint64_t numExternalOutputs;
-} VfsimTileOpGroup;
-```
-
-PTOAS 应保证传入 group 已经满足前端合法性约束，例如：
-
-- group 内 tileop 位于同一个可融合范围。
-- 没有 call、region、terminator 等 hard boundary。
-- iteration domain 已 proven 或能被协议明确表达。
-- side effect 和 memory visibility 满足融合要求。
-
-### 5.5 TileOpDesc
-
-```c
-typedef struct VfsimTileOpDesc {
-  const char *opId;
-  const char *opName;      // example: "tadd", "texp", "trowexpandmul"
-  uint64_t originalOrder;  // stable order in PTOAS block
-
-  const VfsimValueDesc *inputs;
-  uint64_t numInputs;
-
-  const VfsimValueDesc *outputs;
-  uint64_t numOutputs;
-
-  const VfsimAttribute *attributes;
-  uint64_t numAttributes;
-} VfsimTileOpDesc;
-```
-
-### 5.6 ValueDesc
-
-```c
-typedef enum VfsimValueRole {
-  VFSIM_VALUE_TILE = 0,
-  VFSIM_VALUE_SCALAR = 1,
-  VFSIM_VALUE_MEMORY = 2,
-  VFSIM_VALUE_PREDICATE = 3,
-  VFSIM_VALUE_IMMEDIATE = 4,
-} VfsimValueRole;
-
-typedef enum VfsimDType {
-  VFSIM_DTYPE_FP32 = 0,
-  VFSIM_DTYPE_FP16 = 1,
-  VFSIM_DTYPE_INT32 = 2,
-  VFSIM_DTYPE_UINT32 = 3,
-  VFSIM_DTYPE_INT16 = 4,
-  VFSIM_DTYPE_UINT16 = 5,
-  VFSIM_DTYPE_INT8 = 6,
-  VFSIM_DTYPE_UINT8 = 7,
-  VFSIM_DTYPE_BOOL = 8,
-  VFSIM_DTYPE_UNKNOWN = 255,
-} VfsimDType;
-
-typedef struct VfsimValueDesc {
-  const char *valueId;
-  VfsimValueRole role;
-  VfsimDType dtype;
-  VfsimShapeDesc shape;
-} VfsimValueDesc;
-```
-
-`dtype` 跟随 value，而不是只放在 group 顶层。这样可以支持 `vcvt` 等输入输出精度不同的 tileop。
-
-### 5.7 ShapeDesc
-
-```c
-typedef struct VfsimShapeDesc {
-  const int64_t *dims;
-  uint64_t rank;
-
-  const int64_t *validDims;
-  uint64_t validRank;
-
-  const char *layout;
-} VfsimShapeDesc;
-```
-
-### 5.8 DataEdge
-
-```c
-typedef struct VfsimDataEdge {
-  const char *producerOpId;
-  const char *producerValueId;
-  const char *consumerOpId;
-  const char *consumerValueId;
-} VfsimDataEdge;
-```
-
-## 6. Response Schema
-
-### 6.1 FusionPlanResponse
-
-```c
-typedef struct VfsimFusionPlanResponse {
-  uint32_t schemaVersion;
-
-  VfsimFusionPlanResult *results;
-  uint64_t numResults;
-} VfsimFusionPlanResponse;
-```
-
-Response 内存由 vfsimulator plugin 分配，由 PTOAS 调用：
-
-```c
-freeFusionPlanResponse(response)
-```
-
-释放。
-
-### 6.2 FusionPlanResult
-
-```c
-typedef enum VfsimPlanRecommendation {
-  VFSIM_PLAN_ACCEPT = 0,
-  VFSIM_PLAN_REJECT = 1,
-  VFSIM_PLAN_FALLBACK = 2,
-} VfsimPlanRecommendation;
-
-typedef struct VfsimFusionPlanResult {
-  const char *groupId;
-  bool supported;
-
-  VfsimStatusCode statusCode;
-  const char *reason;
-
-  VfsimPlanRecommendation recommendation;
-  VfsimSelectedStrategy selectedStrategy;
-
-  VfsimStrategyCandidate *alternatives;
-  uint64_t numAlternatives;
-
-  VfsimFusionPlanMetadata metadata;
-} VfsimFusionPlanResult;
-```
-
-### 6.3 SelectedStrategy
-
-```c
-typedef struct VfsimSelectedStrategy {
-  const char *strategyName;    // example: "fuse_all"
-  uint32_t selectedUnroll;
-  int64_t estimatedCycles;
-  const char *cycleMetric;     // example: "vf_end_cycle"
-} VfsimSelectedStrategy;
-```
-
-### 6.4 StrategyCandidate
-
-```c
-typedef struct VfsimStrategyCandidate {
-  const char *strategyName;
-  uint32_t unroll;
-  int64_t estimatedCycles;
+struct StrategyCandidate {
+  std::string strategyName;
+  std::vector<TemplateParamInfo> params;
   bool valid;
-  const char *rejectReason;
-} VfsimStrategyCandidate;
+  int64_t estimatedCycles;
+  std::string rejectReason;
+};
 ```
 
-### 6.5 FusionPlanMetadata
+### FusionPlanInfo
 
-```c
-typedef struct VfsimFusionPlanMetadata {
-  int64_t assignedGroupId;
-  uint32_t selectedUnroll;
+| Field | Meaning |
+| --- | --- |
+| `groupId` | 对应输入 `FusionGroupInfo::groupId` |
+| `ops` | 每个 tileop 的规划结果 |
+| `candidates` | 候选策略的耗时和诊断信息，用于 debug dump |
 
-  const VfsimOpPlan *opPlans;
-  uint64_t numOpPlans;
-} VfsimFusionPlanMetadata;
-```
+### TileOpPlanInfo
 
-`assignedGroupId` 可以由 PTOAS 分配，也可以由 vfsimulator 返回逻辑 group id。第一阶段建议 PTOAS 保持最终 metadata id 分配权，vfsimulator 返回 group-local plan 信息即可。
+| Field | Meaning |
+| --- | --- |
+| `opId` | 对应输入 tileop |
+| `order` | VF fusion 内 tileop 的执行顺序 |
+| `unroll` | 该 tileop 主 inner loop 的 unroll 值 |
+| `loopFusionId` | 相同 ID 表示这些 tileop 融合到同一个 loop |
+| `innerLoopExpand` | 是否将 tileop 内部嵌套 inner loop 展开成单层 loop |
 
-### 6.6 OpPlan
+### StrategyCandidate
 
-```c
-typedef struct VfsimOpPlan {
-  const char *opId;
-  uint64_t fusionOrder;
-} VfsimOpPlan;
-```
+| Field | Meaning |
+| --- | --- |
+| `strategyName` | 候选策略名，例如 `fuse_all` |
+| `params` | 候选参数，例如 `unroll=1/2/4/8` |
+| `valid` | 该候选是否可评估 |
+| `estimatedCycles` | costmodel 预测 cycle |
+| `rejectReason` | 候选无效时的原因 |
 
-第一阶段 `OpPlan` 可以只返回 group 内顺序。后续可以扩展：
+## Metadata Written Back To PTOAS
 
-- strategy-specific lowering hint。
-- tile template choice。
-- materialization hint。
-- load/store elision hint。
-- predicate handling hint。
+第一阶段 PTOAS 主要写回以下 metadata：
 
-## 7. 第一阶段行为
+| Metadata | Meaning |
+| --- | --- |
+| `pto.fusion.group_id` | 哪些 tileop 属于同一个 fusion group |
+| `pto.fusion.order` | group 内 tileop 顺序 |
+| `pto.fusion.unroll` | VfSim 选出的 loop unroll 值 |
+| `pto.fusion.loop_id` | 哪些 tileop 融合到同一个 loop |
+| `pto.fusion.inner_loop_expand` | 是否展开 tileop 内部 inner loop |
 
-第一阶段只要求支持 elementwise group：
+当前阶段 elementwise case 可以让同一个 `group_id` 下的 tileop 使用相同 `loop_id`。复杂 case 中，`group_id` 表示 VF fusion 范围，`loop_id` 表示 loop fusion 范围。
+
+## First Phase Scope
+
+| Category | Scope |
+| --- | --- |
+| Supported | elementwise、scalar-elementwise、simple conversion |
+| Examples | `tadd`、`tadds`、`tmul`、`tmuls`、`tcvt`、`tdivs`、`texp` |
+| Planning | legal group 输入，VfSim 采用 fuse-all + unroll search |
+| Unroll Search | 扫描不超过 8 的循环次数因子 |
+| Diagnostics | dump 每个候选 unroll 的预测 cycle |
+| Fallback | VfSim 返回 `fallback` 时，PTOAS 使用默认策略 |
+
+## Implementation Form
+
+源码级穿刺阶段可以直接使用 C++ `struct + std::vector + std::string`。
+
+长期外挂阶段采用同一抽象模型，并机械转换为 C ABI：
 
 ```text
-tadd / tadds
-tsub / tsubs
-tmul / tmuls
-tdiv / tdivs
-tmax / tmaxs
-tmin / tmins
-texp
+std::vector<T>      -> const T *data + uint64_t size
+std::string        -> const char *
+enum class         -> stable integer enum
 ```
 
-vfsimulator 行为：
+这样 PTOAS 只依赖稳定接口，VfSim 可以独立维护 costmodel、模板库和策略搜索逻辑。
 
-1. 接收 PTOAS 传入的合法 tileop group。
-2. 检查 group 是否属于当前支持的 pattern。
-3. 采用 `fuse_all` policy。
-4. 对 unroll candidates 逐个生成内部融合策略。
-5. 每个策略生成内部 `VfSimProgram` 或等价 micro-op program。
-6. 调用 VF costmodel 预测 cycles。
-7. 返回 cycles 最小的策略。
+## Integration Form
 
-PTOAS 行为：
-
-1. 如果 result 为 `VFSIM_PLAN_ACCEPT`，使用返回的 op order / unroll / metadata hint 打标。
-2. 如果 result 为 `VFSIM_PLAN_REJECT`，不融合该 group。
-3. 如果 result 为 `VFSIM_PLAN_FALLBACK` 或 plugin 调用失败，回退到当前 PTOAS 保守策略，或按编译选项选择 fail-open / fail-closed。
-
-## 8. 与当前 PTOAS 实现的改动点
-
-当前 `ConservativeDAGGreedyCostModel` 的职责需要拆分：
+长期接入建议采用 `submodule + dynamic library` 的形式：
 
 ```text
-当前：
-  legality check + benefit heuristic
-
-目标：
-  legality check 留在 PTOAS
-  benefit heuristic / strategy search 迁到 vfsimulator
+PTOAS repo
+  -> third_party/vfsimulator      # git submodule
+  -> include/vfsim_planner_api.h  # stable protocol header
+  -> link libvfsim_planner.so
 ```
 
-建议新增或重命名一个 PTOAS 侧组件：
+| Part | Role |
+| --- | --- |
+| `third_party/vfsimulator` | 以 submodule 形式固定 VfSim 版本 |
+| `vfsim_planner_api.h` | PTOAS 与 VfSim 共享的稳定接口定义 |
+| `libvfsim_planner.so` | VfSim 编译出的动态库，提供 planner 和 costmodel 实现 |
+| PTOAS adapter | 将 PTOAS 内部 fusion group 转换为接口结构 |
+| VfSim planner | 接收接口结构，生成 `FusionPlanInfo` |
+
+推荐的调用方向：
 
 ```text
-TileFusionLegalityPlanner
+PTOAS build
+  -> build third_party/vfsimulator
+  -> generate libvfsim_planner.so
+  -> PTOAS links libvfsim_planner.so
+
+PTOAS compile pipeline
+  -> construct FusionGroupInfo
+  -> call vfsimPlanFusion(...)
+  -> receive FusionPlanInfo
+  -> write PTOAS fusion attrs
 ```
 
-职责：
+接口头文件只放协议结构和入口函数。VfSim 内部的模板库、costmodel 参数、搜索策略都留在 VfSim 仓库中维护。
 
-- 基于 `PreFusionAnalysis` 形成合法 candidate group。
-- 不计算收益。
-- 不根据 dependencyBenefit / penalty 做 accept/reject。
-- 将合法 group 发给 vfsimulator planner。
+示例入口：
 
-当前 `FusionPlanPass` 可以演进为：
-
-```text
-PreFusionAnalysis
-  -> TileFusionLegalityPlanner
-  -> VfsimExternalFusionPlannerClient
-  -> assign pto.fusion.group_id / pto.fusion.order / optional attrs
+```cpp
+extern "C" bool vfsimPlanFusion(
+    const FusionGroupInfo *input,
+    FusionPlanInfo *output,
+    VfsimDiagnosticInfo *diagnostics);
 ```
 
-## 9. Open Questions
-
-仍需 PTOAS 与 vfsimulator 双方确认的问题：
-
-1. PTOAS 侧最终是否保留 group id 分配权。
-2. vfsimulator 返回的 plan 是否只包含 metadata，还是需要返回更具体的 lowering hint。
-3. 第一阶段 fail-open 策略：
-   - plugin 不可用时继续用 ConservativeDAGGreedyCostModel。
-   - plugin 不可用时禁用 fusion。
-   - plugin 不可用时报错。
-4. `trowexpand*`、reduction、selection、conversion 等复杂 tileop 何时进入协议第一版。
-5. VPTO 后端消费的是 `pto.fusion_region`，还是未来直接消费 vfsimulator 返回的更具体 fusion plan。
-6. vfsimulator 是否需要返回用于离线复现的 opaque debug artifact id。
-
-## 10. 推荐结论
-
-推荐第一版协议边界：
-
-```text
-PTOAS -> legal tileop group
-vfsimulator -> selected fusion plan
-```
-
-推荐第一版集成方式：
-
-```text
-dynamic library plugin + stable C ABI
-```
-
-推荐第一版策略：
-
-```text
-fuse_all + unroll search
-```
-
-推荐第一版 PTOAS 改造：
-
-```text
-将 ConservativeDAGGreedyCostModel 拆成 legality planner 和收益 planner。
-PTOAS 主路径只保留 legality planner。
-收益判断、策略生成和 unroll 寻优迁到 vfsimulator。
-```
+`submodule` 用来管理源码版本，`dynamic library` 用来隔离实现细节。PTOAS 侧只需要适配协议，不直接依赖 VfSim 内部代码结构。
