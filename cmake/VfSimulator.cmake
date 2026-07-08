@@ -1,0 +1,31 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
+option(PTO_ENABLE_VFSIM_COSTMODEL
+       "Enable source-level VfSimulator cost model integration" OFF)
+
+set(PTO_VFSIM_SOURCE_DIR
+    "${PROJECT_SOURCE_DIR}/3rdparty/vfsimulator"
+    CACHE PATH "Path to the VfSimulator source tree")
+
+if(PTO_ENABLE_VFSIM_COSTMODEL)
+  if(NOT EXISTS "${PTO_VFSIM_SOURCE_DIR}/README.md")
+    message(FATAL_ERROR
+      "PTO_ENABLE_VFSIM_COSTMODEL=ON requires VfSimulator sources at "
+      "${PTO_VFSIM_SOURCE_DIR}. Run `git submodule update --init "
+      "3rdparty/vfsimulator` or set PTO_VFSIM_SOURCE_DIR.")
+  endif()
+
+  message(STATUS "VfSimulator cost model source: ${PTO_VFSIM_SOURCE_DIR}")
+  if(NOT EXISTS "${PTO_VFSIM_SOURCE_DIR}/native/CMakeLists.txt")
+    message(WARNING
+      "VfSimulator native C++ CMake entry is not available in the selected "
+      "submodule commit yet. PTOAS will only record the source location in "
+      "this phase.")
+  endif()
+endif()
