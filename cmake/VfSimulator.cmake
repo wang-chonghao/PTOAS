@@ -30,6 +30,8 @@ if(PTO_ENABLE_VFSIM_COSTMODEL)
   message(STATUS "VfSimulator cost model source: ${PTO_VFSIM_SOURCE_DIR}")
   set(VFSIM_BUILD_TESTS OFF CACHE BOOL
       "Do not build VfSimulator tests when embedded in PTOAS" FORCE)
+  set(VFSIM_ENABLE_MLIR_PLANNER ON CACHE BOOL
+      "Build VfSimulator MLIR IR planner when embedded in PTOAS" FORCE)
   if(NOT TARGET vfsim_native_core)
     add_subdirectory("${PTO_VFSIM_SOURCE_DIR}/native"
                      "${CMAKE_BINARY_DIR}/3rdparty/vfsimulator/native")

@@ -153,3 +153,8 @@ if(TARGET vfsim::native_core)
   target_link_libraries(PTOTransforms PRIVATE $<BUILD_INTERFACE:vfsim::native_core>)
   target_compile_definitions(PTOTransforms PRIVATE PTO_ENABLE_VFSIM_NATIVE=1)
 endif()
+
+if(TARGET vfsim::ir_planner)
+  target_link_libraries(PTOTransforms PRIVATE $<BUILD_INTERFACE:vfsim::ir_planner>)
+  target_compile_definitions(PTOTransforms PRIVATE PTO_ENABLE_VFSIM_IR_PLANNER=1)
+endif()
