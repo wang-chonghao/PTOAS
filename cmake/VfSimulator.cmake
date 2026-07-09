@@ -20,12 +20,18 @@ if(PTO_ENABLE_VFSIM_COSTMODEL)
       "${PTO_VFSIM_SOURCE_DIR}. Run `git submodule update --init "
       "3rdparty/vfsimulator` or set PTO_VFSIM_SOURCE_DIR.")
   endif()
+  if(NOT EXISTS "${PTO_VFSIM_SOURCE_DIR}/native/CMakeLists.txt")
+    message(FATAL_ERROR
+      "PTO_ENABLE_VFSIM_COSTMODEL=ON requires the native C++ VfSimulator "
+      "CMake entry at ${PTO_VFSIM_SOURCE_DIR}/native. Update the "
+      "3rdparty/vfsimulator submodule to vfsim-native-v0.2 or newer.")
+  endif()
 
   message(STATUS "VfSimulator cost model source: ${PTO_VFSIM_SOURCE_DIR}")
-  if(NOT EXISTS "${PTO_VFSIM_SOURCE_DIR}/native/CMakeLists.txt")
-    message(WARNING
-      "VfSimulator native C++ CMake entry is not available in the selected "
-      "submodule commit yet. PTOAS will only record the source location in "
-      "this phase.")
+  set(VFSIM_BUILD_TESTS OFF CACHE BOOL
+      "Do not build VfSimulator tests when embedded in PTOAS" FORCE)
+  if(NOT TARGET vfsim_native_core)
+    add_subdirectory("${PTO_VFSIM_SOURCE_DIR}/native"
+                     "${CMAKE_BINARY_DIR}/3rdparty/vfsimulator/native")
   endif()
 endif()

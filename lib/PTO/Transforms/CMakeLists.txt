@@ -148,3 +148,8 @@ target_include_directories(PTOTransforms INTERFACE
   $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+
+if(TARGET vfsim::native_core)
+  target_link_libraries(PTOTransforms PRIVATE $<BUILD_INTERFACE:vfsim::native_core>)
+  target_compile_definitions(PTOTransforms PRIVATE PTO_ENABLE_VFSIM_NATIVE=1)
+endif()
