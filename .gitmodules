@@ -3,4 +3,4 @@
 	url = git@github.com:PTO-ISA/PTO-Gym.git
 [submodule "3rdparty/vfsimulator"]
 	path = 3rdparty/vfsimulator
-	url = https://github.com/wang-chonghao/VfSimulator.git
+	url = git@github.com:wang-chonghao/VfSimulator.git
