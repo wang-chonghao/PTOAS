@@ -280,7 +280,11 @@ def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
            "iteration-domain inference.  Only FusionPlan consumes this option; "
            "FusionRegionGen consumes only the shared pre-fusion dataflow graph "
            "(cached by the analysis manager) and never consults iteration-domain "
-           "classes, so it does not need the option.">
+           "classes, so it does not need the option.">,
+    Option<"enableVfSimFusionPlanner", "enable-vfsim-fusion-planner",
+           "bool", /*default=*/"false",
+           "Invoke the optional VfSimulator IR planner after PTOAS has emitted "
+           "FusionPlan group/order metadata.">
   ];
 }
 

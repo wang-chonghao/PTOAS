@@ -525,6 +525,12 @@ static llvm::cl::opt<bool> enableShapeInference(
                   "to fall back to static/direct-bound inference."),
     llvm::cl::init(true));
 
+static llvm::cl::opt<bool> enableVfSimFusionPlanner(
+    "enable-vfsim-fusion-planner",
+    llvm::cl::desc("Invoke the optional VfSimulator IR planner after PTOAS "
+                   "FusionPlan emits group/order metadata."),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> disableInferLayout(
     "disable-infer-layout",
     llvm::cl::desc("Disable PTO layout inference pass (static-only)"),
@@ -2985,6 +2991,7 @@ int mlir::pto::compilePTOASModule(
   // so it takes no option here.
   pto::FusionPlanOptions fusionPlanOpts;
   fusionPlanOpts.enableShapeInference = enableShapeInference;
+  fusionPlanOpts.enableVfSimFusionPlanner = enableVfSimFusionPlanner;
   if (enableA5EmitCFusionPath) {
     pm.addNestedPass<mlir::func::FuncOp>(
         pto::createFusionPlanPass(fusionPlanOpts));
