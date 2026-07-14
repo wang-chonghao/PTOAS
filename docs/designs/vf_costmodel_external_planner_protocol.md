@@ -1,219 +1,73 @@
-# VF CostModel Planner IR Protocol
+# VF CostModel Planner Interface Design
 
-本文档定义 PTOAS 与 VfSim CostModel 的长期接入方案。当前推荐形式是：
+本文档定义 PTOAS 与 VfSimulator CostModel 的接口设计。PTOAS 负责生成
+tileop fusion group 并提供 MLIR IR；VfSim 基于该 IR 生成 costmodel 优化策略，
+并将策略结果写回同一份 IR。
 
-```text
-submodule source-level integration + IR protocol
-```
+## 1. 接入形式
 
-PTOAS 保留 tileop 融合合法性判断，VfSim 负责策略生成、costmodel 评估和优化建议。双方通过 IR 交换信息，避免额外维护一套与 MLIR 重复的结构体 ABI。
-
-## Integration Form
-
-VfSim 以 submodule 方式放在 PTOAS 仓库中，源码级参与 PTOAS 编译：
+VfSimulator 作为 PTOAS 的 git submodule 引入，并以源码级方式参与 PTOAS 编译。
 
 ```text
 PTOAS/
-  third_party/
-    vfsimulator/        # git submodule, points to a fixed VfSimulator commit
+  3rdparty/
+    vfsimulator/        # git submodule, fixed by PTOAS commit
 ```
 
-| Part | Role |
-| --- | --- |
-| `third_party/vfsimulator` | 独立 VfSimulator 仓库，PTOAS 只记录 commit hash |
-| PTOAS CMake | `add_subdirectory(third_party/vfsimulator)` |
-| VfSim planner library | 编译进 PTOAS，提供 C++ API |
-| IR protocol | PTOAS 与 VfSim 之间的输入输出载体 |
+PTOAS 侧通过 CMake 控制是否启用该接口：
 
-submodule 的隔离方式：
-
-```text
-VfSim 源码修改
-  -> commit in VfSimulator repo
-  -> PTOAS updates third_party/vfsimulator submodule pointer
+```cmake
+-DPTO_ENABLE_VFSIM_COSTMODEL=ON
 ```
 
-PTOAS 主仓不直接接管 VfSim 源码历史，只记录所依赖的 VfSim 版本。
+控制选项分为编译期和运行期两层：
 
-## Two Compiler Routes
-
-PTOAS 需要支持两条 costmodel 使用路线：
-
-| Route | Input | Output | Purpose |
+| 选项 | 类型 | 作用 | 默认行为 |
 | --- | --- | --- | --- |
-| 自动 tileop 融合 | legal tileop fusion candidate IR | planned tileop IR with fusion attrs | 由 VfSim 决定 fusion plan |
-| 手写 VF 分析 | developer-written VF IR | annotated VF IR with cost/advice attrs | 评估已有 VF 并给优化建议 |
+| `-DPTO_ENABLE_VFSIM_COSTMODEL=ON` | CMake 编译期选项 | 决定 PTOAS 是否编译、链接 VfSim planner 能力 | `OFF` 时 PTOAS 不包含 VfSim planner 代码 |
+| `--enable-vfsim-fusion-planner` | ptoas 运行期选项 | 决定当前编译任务是否调用 VfSim planner | 不加时保持 PTOAS 原有 FusionPlan 行为 |
 
-整体链路：
-
-```text
-Route A: PTOAS automatic fusion
-
-.pto source
-  -> PTOAS tileop IR
-  -> PreFusionAnalysis / legality planning
-  -> costmodel-facing tileop candidate IR
-  -> VfSim planner
-  -> tileop IR with fusion attrs
-  -> PTOAS scheduling / fusion_region / VPTO backend
-```
+启用后，PTOAS 编译并链接 VfSimulator 提供的 planner target：
 
 ```text
-Route B: developer-written VF
-
-developer VF IR
-  -> VfSim analyzer
-  -> VF IR with cycle / bottleneck / advice attrs
-  -> PTOAS VPTO backend or report
+vfsim::native_core
+vfsim::ir_planner
 ```
 
-## Responsibility Boundary
+VfSimulator 源码仍由 VfSimulator 仓库维护。PTOAS 主仓只记录 submodule commit，
+避免直接接管 VfSim 源码历史。
 
-| Component | Responsibility |
-| --- | --- |
-| PTOAS legality planner | 判断 tileop 是否可以进入 candidate group |
-| PTOAS IR adapter | 生成 costmodel-facing IR，并保留必要 attrs |
-| VfSim planner | 从 IR 中读取 tileop、shape、dtype、依赖和外部输出信息 |
-| VfSim template registry | 维护与 PTOAS lowering 语义一致的性能模板 |
-| VfSim costmodel | 生成候选策略，扫描 unroll，预测 cycle |
-| PTOAS consumer | 消费 VfSim 写回的 IR attrs，继续后端 lowering |
+## 2. 接入位置
 
-## Route A Input IR
-
-自动融合路线的输入是一段已经通过 PTOAS 合法性判断的 tileop-level IR。IR 中需要表达以下信息：
-
-| Information | Source In IR | Use In VfSim |
-| --- | --- | --- |
-| group boundary | group/candidate attrs 或 wrapper op | 确定规划范围 |
-| tileop identity | op name、stable op id、block order | 模板匹配和结果回写 |
-| data dependency | SSA use-def | 重建 tileop DAG |
-| inputs/outputs | op operands/results | 识别外部输入和内部中间值 |
-| dtype | operand/result type | 支持 `tcvt` 等输入输出 dtype 不同的 op |
-| shape | tile type、valid shape attrs、layout attrs | 推导 loop count 和 mask |
-| template params | op attrs | 选择模板变体 |
-| external output | liveness / yield / explicit attrs | 判断是否需要 materialize 到 group 外 |
-
-输入 IR 的抽象形态：
-
-```mlir
-pto.vfsim_candidate_group @G0 {
-  %a = pto.tadd ... {
-    pto.vfsim.op_id = "op0"
-  }
-  %b = pto.tcvt ... {
-    pto.vfsim.op_id = "op1",
-    rmode = ...
-  }
-  pto.vfsim.yield %b
-}
-```
-
-实际实现可以复用现有 tileop IR 和 attrs；`pto.vfsim_candidate_group` 只是协议层抽象，不要求第一版必须新增 op。
-
-## Route A Output IR
-
-VfSim 输出仍是 tileop-level IR，只是在 tileop 或 group 上写回 fusion plan attrs。
-
-第一阶段主要 attrs：
-
-| Attr | Meaning |
-| --- | --- |
-| `pto.fusion.group_id` | VF fusion group 标识 |
-| `pto.fusion.order` | group 内 tileop 执行顺序 |
-| `pto.fusion.unroll` | 当前 tileop 主 inner loop 的 unroll 值 |
-| `pto.fusion.loop_id` | 相同 ID 的 tileop 融合到同一个 loop |
-| `pto.fusion.inner_loop_expand` | 是否将 tileop 内部嵌套 inner loop 展开成单层 loop |
-
-输出 IR 抽象形态：
-
-```mlir
-%a = pto.tadd ... {
-  pto.fusion.group_id = 0,
-  pto.fusion.order = 0,
-  pto.fusion.loop_id = "L0",
-  pto.fusion.unroll = 8,
-  pto.fusion.inner_loop_expand = false
-}
-
-%b = pto.tcvt ... {
-  pto.fusion.group_id = 0,
-  pto.fusion.order = 1,
-  pto.fusion.loop_id = "L0",
-  pto.fusion.unroll = 8,
-  pto.fusion.inner_loop_expand = false
-}
-```
-
-`group_id` 表示 VF fusion 范围，`loop_id` 表示 loop fusion 范围。对于全 elementwise case，两者通常一致；对于 reduce、rowmax、嵌套 loop 等复杂 case，一个 VF group 内可以有多个 `loop_id`。
-
-## Route B VF Analysis IR
-
-手写 VF 路线的输入是开发者已经写好的 VF/micro-op IR。VfSim 不再决定哪些 tileop 融合，而是分析已有实现。
-
-输入信息：
-
-| Information | Use |
-| --- | --- |
-| VF micro-op sequence | 构建 VfSimProgram |
-| loop structure | 计算 trip count 和 unroll 效果 |
-| dtype / mask / layout | 选择 latency 参数 |
-| memory/register use | 分析 forwarding、store/load、barrier |
-| existing attrs | 识别开发者指定的 unroll、schedule、layout |
-
-输出信息：
-
-| Attr / Report | Meaning |
-| --- | --- |
-| `vfsim.estimated_cycles` | 预测 cycle |
-| `vfsim.bottleneck` | 主要瓶颈，例如 latency、barrier、store/load |
-| `vfsim.advice` | 优化建议 |
-| `vfsim.suggested_unroll` | 建议 unroll 值 |
-| `vfsim.candidate_cycles` | 候选策略耗时，用于 debug |
-
-抽象链路：
+接口接在 PTOAS `FusionPlan` pass 末尾。
 
 ```text
-VF IR
-  -> VfSim analyzer
-  -> VF IR + vfsim diagnostic attrs
+PreFusionAnalysis
+  -> FusionPlan
+       - PTOAS 生成合法 fusion group
+       - PTOAS 写入 pto.fusion.group_id / pto.fusion.order
+       - PTOAS 调用 VfSim planner
+  -> OpScheduling / FusionRegionGen / downstream backend
 ```
 
-## VfSim Template Registry
+PTOAS 侧调用形式：
 
-VfSim 维护独立的性能模板库。模板语义与 PTOAS tileop lowering 保持一致，用于从 tileop IR 预测融合后的 VF micro-op 形式。
-
-| TileOp | Template Output |
-| --- | --- |
-| `tadd` / `tadds` | elementwise add |
-| `tmul` / `tmuls` | elementwise multiply |
-| `tcvt` | conversion，输入输出 dtype 可不同 |
-| `tdivs` | scalar/vector divide，可展开为 `vbr + vdiv` 语义 |
-| `texp` | exp |
-| row/reduce ops | 后续阶段补充复杂 loop 模板 |
-
-模板输入来自 IR：
-
-```text
-op name + operand/result dtype + shape/valid shape/layout + op attrs
-  -> template registry
-  -> loop structure + micro-op sequence + external output materialization
+```cpp
+vfsim::PlannerOptions options;
+return vfsim::planTileFusionIR(func.getOperation(), options);
 ```
 
-## First Phase Scope
+VfSim planner 在运行时由 driver 选项打开：
 
-| Category | Scope |
-| --- | --- |
-| Input | legal tileop candidate IR |
-| Supported ops | elementwise、scalar-elementwise、simple conversion |
-| Examples | `tadd`、`tadds`、`tmul`、`tmuls`、`tcvt`、`tdivs`、`texp` |
-| Planning policy | fuse-all within legal group |
-| Unroll search | 扫描不超过 8 的循环次数因子 |
-| Output | `group_id`、`order`、`loop_id`、`unroll`、`inner_loop_expand` attrs |
-| Debug | dump 每个候选 unroll 的预测 cycle |
+```bash
+--enable-vfsim-fusion-planner
+```
 
-## API Shape
+该选项默认关闭。关闭时 PTOAS 保持原有 FusionPlan 行为。
 
-源码级接入下，API 可以直接接收 MLIR operation/module，不需要跨进程序列化。
+## 3. C++ API
+
+VfSimulator 向 PTOAS 暴露源码级 C++ API：
 
 ```cpp
 namespace vfsim {
@@ -223,13 +77,128 @@ struct PlannerOptions {
   unsigned maxUnroll = 8;
 };
 
-mlir::LogicalResult planTileFusionIR(mlir::Operation *candidateIR,
-                                     const PlannerOptions &options);
-
-mlir::LogicalResult analyzeVfIR(mlir::Operation *vfIR,
-                                const PlannerOptions &options);
+mlir::LogicalResult planTileFusionIR(
+    mlir::Operation *candidateIR,
+    const PlannerOptions &options = {});
 
 } // namespace vfsim
 ```
 
-`planTileFusionIR` 在输入 tileop IR 上写回 fusion attrs。`analyzeVfIR` 在 VF IR 上写回 cost/advice attrs，或生成诊断报告。
+接口约定：
+
+| Item | Contract |
+| --- | --- |
+| `candidateIR` | FusionPlan 后的 MLIR operation；自动 tileop fusion 路线使用 `func::FuncOp` |
+| Return value | `success()` 表示 planner 正常完成或无可处理 group；`failure()` 表示接口级错误 |
+| Mutation | VfSim 允许在传入 IR 上写回 `pto.fusion.*` attrs |
+| Serialization | 不使用 JSON/YAML，不跨进程序列化 |
+
+## 4. 输入 IR 形式
+
+VfSim 接收的是 FusionPlan 后的 tileop-level IR。PTOAS 必须在可融合 tileop 上写入：
+
+| Attr | Meaning |
+| --- | --- |
+| `pto.fusion.group_id` | PTOAS 已选择的 fusion group ID |
+| `pto.fusion.order` | group 内 tileop 的执行顺序 |
+
+VfSim 从 IR 中读取：
+
+| Information | IR Source |
+| --- | --- |
+| group boundary | `pto.fusion.group_id` |
+| group order | `pto.fusion.order` |
+| tileop kind | MLIR op name, e.g. `pto.tadd` |
+| data dependency | SSA operands / use-def |
+| input/output values | tileop operands |
+| dtype | operand / output type |
+| shape | tile buffer type and shape-related attrs |
+| template parameters | tileop attrs |
+
+输入示例：
+
+```mlir
+func.func @kernel(%a: !pto.tile_buf<vec, 32x32xf32>,
+                  %b: !pto.tile_buf<vec, 32x32xf32>,
+                  %c: !pto.tile_buf<vec, 32x32xf32>) {
+  pto.tadd ins(%a, %b : !pto.tile_buf<vec, 32x32xf32>,
+                        !pto.tile_buf<vec, 32x32xf32>)
+           outs(%c : !pto.tile_buf<vec, 32x32xf32>)
+           {pto.fusion.group_id = 0 : i64,
+            pto.fusion.order = 0 : i64}
+
+  pto.tmul ins(%c, %b : !pto.tile_buf<vec, 32x32xf32>,
+                        !pto.tile_buf<vec, 32x32xf32>)
+           outs(%c : !pto.tile_buf<vec, 32x32xf32>)
+           {pto.fusion.group_id = 0 : i64,
+            pto.fusion.order = 1 : i64}
+
+  return
+}
+```
+
+上例中，PTOAS 已经选择 `tadd -> tmul` 为同一个 fusion group。VfSim 不重新判断
+这两个 tileop 是否可以融合，只基于该 group 生成优化策略。
+
+## 5. 输出 IR 形式
+
+VfSim 输出仍然是同一份 tileop-level IR，通过写回 attrs 表示 planner 决策。
+
+基础输出 attrs：
+
+| Attr | Meaning |
+| --- | --- |
+| `pto.fusion.unroll` | VfSim 为该 fusion group 选择的 inner loop unroll 值 |
+
+输出示例：
+
+```mlir
+func.func @kernel(%a: !pto.tile_buf<vec, 32x32xf32>,
+                  %b: !pto.tile_buf<vec, 32x32xf32>,
+                  %c: !pto.tile_buf<vec, 32x32xf32>) {
+  pto.tadd ins(%a, %b : !pto.tile_buf<vec, 32x32xf32>,
+                        !pto.tile_buf<vec, 32x32xf32>)
+           outs(%c : !pto.tile_buf<vec, 32x32xf32>)
+           {pto.fusion.group_id = 0 : i64,
+            pto.fusion.order = 0 : i64,
+            pto.fusion.unroll = 2 : i64}
+
+  pto.tmul ins(%c, %b : !pto.tile_buf<vec, 32x32xf32>,
+                        !pto.tile_buf<vec, 32x32xf32>)
+           outs(%c : !pto.tile_buf<vec, 32x32xf32>)
+           {pto.fusion.group_id = 0 : i64,
+            pto.fusion.order = 1 : i64,
+            pto.fusion.unroll = 2 : i64}
+
+  return
+}
+```
+
+可选扩展输出 attrs：
+
+| Attr | Meaning |
+| --- | --- |
+| `pto.fusion.loop_id` | 一个 VF group 内的 loop fusion 子分组 |
+| `pto.fusion.inner_loop_expand` | 是否将 tileop 内部 loop 结构展开为 planner 指定形式 |
+| `vfsim.estimated_cycles` | 预测 cycle，用于 debug 或报告 |
+| `vfsim.candidate_cycles` | 候选策略耗时，用于 debug |
+
+## 6. 手写 VF IR 接口
+
+除自动 tileop fusion 外，接口也支持开发者直接提供 VF/micro-op IR。
+该路线复用同一源码级接入形式，但输入不再是 tileop group，而是开发者已经写好的 VF IR。
+
+```text
+developer VF IR
+  -> VfSim analyzer
+  -> VF IR with cost/advice attrs or diagnostic report
+```
+
+Route B 的输出不决定 fusion group，而是给出已有 VF 实现的评估结果：
+
+| Attr / Report | Meaning |
+| --- | --- |
+| `vfsim.estimated_cycles` | 预测 cycle |
+| `vfsim.bottleneck` | 主要瓶颈 |
+| `vfsim.advice` | 优化建议 |
+| `vfsim.suggested_unroll` | 建议 unroll 值 |
