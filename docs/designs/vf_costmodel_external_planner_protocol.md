@@ -174,15 +174,6 @@ func.func @kernel(%a: !pto.tile_buf<vec, 32x32xf32>,
 }
 ```
 
-可选扩展输出 attrs：
-
-| Attr | Meaning |
-| --- | --- |
-| `pto.fusion.loop_id` | 一个 VF group 内的 loop fusion 子分组 |
-| `pto.fusion.inner_loop_expand` | 是否将 tileop 内部 loop 结构展开为 planner 指定形式 |
-| `vfsim.estimated_cycles` | 预测 cycle，用于 debug 或报告 |
-| `vfsim.candidate_cycles` | 候选策略耗时，用于 debug |
-
 ## 6. 手写 VF IR 接口
 
 除自动 tileop fusion 外，接口也支持开发者直接提供 VF/micro-op IR。
