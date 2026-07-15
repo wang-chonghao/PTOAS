@@ -36,6 +36,7 @@ namespace {
 static constexpr llvm::StringLiteral kFusionGroupIdAttr =
     "pto.fusion.group_id";
 static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kFusionUnrollAttr = "pto.fusion.unroll";
 
 struct GroupSpanMember {
   Operation *op = nullptr;
@@ -349,7 +350,29 @@ static void clearSpanFusionMetadata(const GroupSpan &span) {
   for (const GroupSpanMember &member : span.members) {
     member.op->removeAttr(kFusionGroupIdAttr);
     member.op->removeAttr(kFusionOrderAttr);
+    member.op->removeAttr(kFusionUnrollAttr);
   }
+}
+
+static FailureOr<std::optional<int64_t>>
+getCommonSpanUnroll(const GroupSpan &span) {
+  std::optional<int64_t> commonUnroll;
+  for (const GroupSpanMember &member : span.members) {
+    auto attr = member.op->getAttrOfType<IntegerAttr>(kFusionUnrollAttr);
+    if (!attr)
+      continue;
+    int64_t unroll = attr.getInt();
+    if (!commonUnroll) {
+      commonUnroll = unroll;
+      continue;
+    }
+    if (*commonUnroll != unroll) {
+      member.op->emitError("inconsistent pto.fusion.unroll within one "
+                           "pto.fusion.group_id");
+      return failure();
+    }
+  }
+  return commonUnroll;
 }
 
 static LogicalResult
@@ -359,6 +382,9 @@ encapsulateGroupSpan(const GroupSpan &span,
     return success();
 
   GroupSpanInterface iface = buildGroupSpanInterface(span, analysisIndex);
+  FailureOr<std::optional<int64_t>> commonUnroll = getCommonSpanUnroll(span);
+  if (failed(commonUnroll))
+    return failure();
 
   SmallVector<Type, 8> outputTypes;
   outputTypes.reserve(iface.externallyVisibleValues.size());
@@ -372,6 +398,9 @@ encapsulateGroupSpan(const GroupSpan &span,
       builder.create<pto::FusionRegionOp>(loc, TypeRange(outputTypes));
   fusionRegion->setAttr(kFusionGroupIdAttr,
                         builder.getI64IntegerAttr(span.groupId));
+  if (*commonUnroll)
+    fusionRegion->setAttr(kFusionUnrollAttr,
+                          builder.getI64IntegerAttr(**commonUnroll));
 
   Block *body = new Block();
   fusionRegion.getBody().push_back(body);

@@ -140,7 +140,23 @@ func.func @kernel(%a: !pto.tile_buf<vec, 32x32xf32>,
 上例中，PTOAS 已经选择 `tadd -> tmul` 为同一个 fusion group。VfSim 不重新判断
 这两个 tileop 是否可以融合，只基于该 group 生成优化策略。
 
-## 5. 输出 IR 形式
+## 5. VfSim 模板选择
+
+VfSim 根据输入 IR 中的 tileop 信息选择 performance template。模板选择规则需要与
+VPTO 后端 tileop template 选择规则保持一致。
+
+| 信息 | 用途 |
+| --- | --- |
+| op name | 选择 tileop 模板族，例如 `tadd`、`tmul`、`trowmax` |
+| dtype | 选择 micro-op 参数和 lanes |
+| shape / valid shape | 推导 row/col loop 结构和 mask |
+| layout | 区分 row/col 展开方式 |
+| attrs | 选择模板变体 |
+
+VfSim 不重新调用 VPTO 后端展开 pass，而是在自身源码中维护同语义的 performance
+template。template 可以包含 prelude、body、epilogue、单层 loop 或嵌套 loop。
+
+## 6. 输出 IR 形式
 
 VfSim 输出仍然是同一份 tileop-level IR，通过写回 attrs 表示 planner 决策。
 
@@ -174,7 +190,7 @@ func.func @kernel(%a: !pto.tile_buf<vec, 32x32xf32>,
 }
 ```
 
-## 6. 手写 VF IR 接口
+## 7. 手写 VF IR 接口
 
 除自动 tileop fusion 外，接口也支持开发者直接提供 VF/micro-op IR。
 该路线复用同一源码级接入形式，但输入不再是 tileop group，而是开发者已经写好的 VF IR。
