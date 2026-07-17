@@ -517,6 +517,12 @@ static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
                    "annotation; VPTO uses fusion-region lifecycle."),
     llvm::cl::init(llvm::cl::BOU_UNSET));
 
+static llvm::cl::opt<bool> enableUnrollAfterLoopFusion(
+    "enable-unroll-after-loop-fusion",
+    llvm::cl::desc("Partial-unroll the innermost scf.for in pto.fusion_region by "
+                   "the cost-model factor."),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> enableShapeInference(
     "enable-shape-inference",
     llvm::cl::desc("Enable shape inference (ShapeConstraintSolver) for A5 tile "
@@ -2651,6 +2657,14 @@ lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
         pto::createPTOFusionPredicateElisionPass());
     kernelModulePM.addNestedPass<mlir::func::FuncOp>(
         pto::createPTOFusionLoadStoreElisionPass());
+    if (enableUnrollAfterLoopFusion) {
+      kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+          pto::createPTOUnrollAfterLoopFusionPass());
+      kernelModulePM.addPass(mlir::createCanonicalizerPass());
+      kernelModulePM.addPass(mlir::createCSEPass());
+      kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+          pto::createPTOFusionLoadStoreElisionPass());
+    }
     kernelModulePM.addNestedPass<mlir::func::FuncOp>(
         pto::createPTOFlattenFusionRegionPass());
     kernelModulePM.addPass(mlir::createCSEPass());
@@ -2801,6 +2815,12 @@ int mlir::pto::compilePTOASModule(
   if (requestedEnableOpFusion && effectiveLevel == PTOBuildLevel::Level1) {
     llvm::errs() << "Warning: --enable-op-fusion=true is ignored because "
                     "--pto-level=level2 or level3 is required.\n";
+  }
+
+  if (enableUnrollAfterLoopFusion && !(opFusionEnabled && arch == "a5")) {
+    llvm::errs() << "Error: --enable-unroll-after-loop-fusion requires "
+                    "--pto-arch=a5 and --enable-op-fusion.\n";
+    return 1;
   }
 
   const bool enableA5FusionPath =

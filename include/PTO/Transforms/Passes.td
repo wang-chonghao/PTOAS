@@ -976,6 +976,20 @@ def PTOFusionLoadStoreElision
                            "mlir::scf::SCFDialect"];
 }
 
+def PTOUnrollAfterLoopFusion
+    : Pass<"pto-unroll-after-loop-fusion", "func::FuncOp"> {
+  let summary = "Partial-unroll the innermost scf.for inside pto.fusion_region "
+                "after PTOLowLevelLoopFusion (divisible trip count only)";
+  let description = [{
+    Partial-unrolls the loop nests inside `pto.fusion_region` according to the
+    unroll factors supplied by the cost model.
+  }];
+  let constructor = "mlir::pto::createPTOUnrollAfterLoopFusionPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
 def PTOFlattenFusionRegion : Pass<"pto-flatten-fusion-region", "func::FuncOp"> {
   let summary = "Flatten pto.fusion_region wrappers back into the parent block";
   let description = [{

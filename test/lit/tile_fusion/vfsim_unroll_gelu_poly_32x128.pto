@@ -7,9 +7,25 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // Full GeLU_poly tileop case derived from vfsimulator/cce_code/GeLU_poly.dsl.
-// Guards VfSim IR planner col-unroll metadata when the VPTO col loop trip is 2.
+// Guards the VfSim IR planner col-unroll path end-to-end on a VPTO col-loop
+// trip of 2 (32x128 tile, col=128 -> two 64-lane inner iterations):
 //
-// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-fusion-planner --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-region-gen -o /dev/null 2>&1 | FileCheck %s
+//   (1) REGION  -- pto-fusion-region-gen lifts VfSim's col_unroll_factor = 2
+//       onto the pto.fusion_region (row_unroll_factor stays 1).
+//   (2) LLF     -- pto-low-level-loop-fusion (the unroll pass input) still has
+//       TWO scf.for inside the fusion_region (outer row to %c32 step 1, inner
+//       col to %c128 step %c64 with iter_args), and the col body carries one
+//       copy each of pto.vmins / pto.vmaxs / pto.vdiv.
+//   (3) UNROLL  -- --enable-unroll-after-loop-fusion consumes that factor and
+//       fully unrolls the inner col scf.for (trip 2 == factor 2). The
+//       fusion_region now has only ONE scf.for (the outer row), the col
+//       step-%c64 loop is gone, the col body is duplicated so pto.vmins /
+//       pto.vmaxs / pto.vdiv each appear TWICE, and both factors are reset to
+//       1 on the region (consumed).
+//
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-fusion-planner --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-region-gen -o /dev/null 2>&1 | FileCheck %s --check-prefix=REGION
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-fusion-planner --emit-vpto --enable-unroll-after-loop-fusion %s --mlir-print-ir-after=pto-low-level-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLF
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-fusion-planner --emit-vpto --enable-unroll-after-loop-fusion %s --mlir-print-ir-after=pto-unroll-after-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNROLL
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @vfsim_unroll_gelu_poly_32x128(
@@ -133,9 +149,50 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 }
 
-// CHECK: // -----// IR Dump After PTOFusionRegionGen (pto-fusion-region-gen) //----- //
-// CHECK-LABEL: func.func @vfsim_unroll_gelu_poly_32x128(
-// CHECK: pto.fusion_region {
-// CHECK: pto.tdiv
-// CHECK: pto.yield(%{{.*}}) : (!pto.tile_buf<vec, 32x128xf32>) -> ()
-// CHECK: } {pto.fusion.col_unroll_factor = 2 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
+// Each RUN line pipes exactly one pass dump, so a func.func label cleanly
+// scopes its checks to that single pass output.
+//
+// REGION-LABEL: func.func @vfsim_unroll_gelu_poly_32x128(
+// REGION: pto.fusion_region {
+// REGION: pto.tmins
+// REGION: pto.tmaxs
+// REGION: pto.tdiv
+// REGION: pto.yield(%{{.*}}) : (!pto.tile_buf<vec, 32x128xf32>) -> ()
+// REGION: } {pto.fusion.col_unroll_factor = 2 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
+
+// Before unroll: the fusion_region carries two nested scf.for -- outer row loop
+// (trip 32) and inner col loop (trip 2, step %c64, with iter_args) -- and the
+// col body holds one copy each of vmins / vmaxs / vdiv (CHECK-NOT after the
+// first vmins up to yield asserts exactly one copy). The factor is still 2.
+// LLF-LABEL: func.func @vfsim_unroll_gelu_poly_32x128(
+// LLF: pto.fusion_region {
+// LLF: scf.for %{{.*}} = %{{.*}} to %c32{{(_[0-9]+)?}} step %c1{{(_[0-9]+)?}} {
+// LLF: scf.for %{{.*}} = %{{.*}} to %c128{{(_[0-9]+)?}} step %c64{{(_[0-9]+)?}} iter_args
+// LLF: pto.vmins
+// LLF: pto.vmaxs
+// LLF: pto.vdiv
+// LLF-NOT: pto.vmins
+// LLF-NOT: pto.vmaxs
+// LLF-NOT: pto.vdiv
+// LLF: pto.yield
+// LLF: } {pto.fusion.col_unroll_factor = 2 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
+
+// After unroll: the inner col loop is gone, only the outer row scf.for survives
+// (step %c64 no longer appears); the col body is duplicated so vmins / vmaxs /
+// vdiv each appear twice (listed explicitly -- CHECK-COUNT-2 would let the
+// first vmins count consume the first vmaxs due to FileCheck cursor advance),
+// and the consumed factor is reset to 1.
+// UNROLL-LABEL: func.func @vfsim_unroll_gelu_poly_32x128(
+// UNROLL: pto.fusion_region {
+// UNROLL: scf.for %{{.*}} = %{{.*}} to %c32 step %c1
+// UNROLL-NOT: step %c64
+// UNROLL: pto.vmins
+// UNROLL: pto.vmaxs
+// UNROLL: pto.vdiv
+// UNROLL: pto.vmins
+// UNROLL: pto.vmaxs
+// UNROLL: pto.vdiv
+// UNROLL-NOT: pto.vmins
+// UNROLL-NOT: pto.vmaxs
+// UNROLL-NOT: pto.vdiv
+// UNROLL: } {pto.fusion.col_unroll_factor = 1 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
