@@ -36,7 +36,10 @@ namespace {
 static constexpr llvm::StringLiteral kFusionGroupIdAttr =
     "pto.fusion.group_id";
 static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
-static constexpr llvm::StringLiteral kFusionUnrollAttr = "pto.fusion.unroll";
+static constexpr llvm::StringLiteral kFusionRowUnrollAttr =
+    "pto.fusion.row_unroll_factor";
+static constexpr llvm::StringLiteral kFusionColUnrollAttr =
+    "pto.fusion.col_unroll_factor";
 
 struct GroupSpanMember {
   Operation *op = nullptr;
@@ -350,15 +353,16 @@ static void clearSpanFusionMetadata(const GroupSpan &span) {
   for (const GroupSpanMember &member : span.members) {
     member.op->removeAttr(kFusionGroupIdAttr);
     member.op->removeAttr(kFusionOrderAttr);
-    member.op->removeAttr(kFusionUnrollAttr);
+    member.op->removeAttr(kFusionRowUnrollAttr);
+    member.op->removeAttr(kFusionColUnrollAttr);
   }
 }
 
 static FailureOr<std::optional<int64_t>>
-getCommonSpanUnroll(const GroupSpan &span) {
+getCommonSpanI64Attr(const GroupSpan &span, StringRef attrName) {
   std::optional<int64_t> commonUnroll;
   for (const GroupSpanMember &member : span.members) {
-    auto attr = member.op->getAttrOfType<IntegerAttr>(kFusionUnrollAttr);
+    auto attr = member.op->getAttrOfType<IntegerAttr>(attrName);
     if (!attr)
       continue;
     int64_t unroll = attr.getInt();
@@ -367,8 +371,8 @@ getCommonSpanUnroll(const GroupSpan &span) {
       continue;
     }
     if (*commonUnroll != unroll) {
-      member.op->emitError("inconsistent pto.fusion.unroll within one "
-                           "pto.fusion.group_id");
+      member.op->emitError("inconsistent ")
+          << attrName << " within one pto.fusion.group_id";
       return failure();
     }
   }
@@ -382,8 +386,13 @@ encapsulateGroupSpan(const GroupSpan &span,
     return success();
 
   GroupSpanInterface iface = buildGroupSpanInterface(span, analysisIndex);
-  FailureOr<std::optional<int64_t>> commonUnroll = getCommonSpanUnroll(span);
-  if (failed(commonUnroll))
+  FailureOr<std::optional<int64_t>> commonRowUnroll =
+      getCommonSpanI64Attr(span, kFusionRowUnrollAttr);
+  if (failed(commonRowUnroll))
+    return failure();
+  FailureOr<std::optional<int64_t>> commonColUnroll =
+      getCommonSpanI64Attr(span, kFusionColUnrollAttr);
+  if (failed(commonColUnroll))
     return failure();
 
   SmallVector<Type, 8> outputTypes;
@@ -398,9 +407,12 @@ encapsulateGroupSpan(const GroupSpan &span,
       builder.create<pto::FusionRegionOp>(loc, TypeRange(outputTypes));
   fusionRegion->setAttr(kFusionGroupIdAttr,
                         builder.getI64IntegerAttr(span.groupId));
-  if (*commonUnroll)
-    fusionRegion->setAttr(kFusionUnrollAttr,
-                          builder.getI64IntegerAttr(**commonUnroll));
+  if (*commonRowUnroll)
+    fusionRegion->setAttr(kFusionRowUnrollAttr,
+                          builder.getI64IntegerAttr(**commonRowUnroll));
+  if (*commonColUnroll)
+    fusionRegion->setAttr(kFusionColUnrollAttr,
+                          builder.getI64IntegerAttr(**commonColUnroll));
 
   Block *body = new Block();
   fusionRegion.getBody().push_back(body);
