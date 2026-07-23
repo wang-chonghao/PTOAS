@@ -21,6 +21,9 @@ import os
 import sys
 from pathlib import Path
 
+if hasattr(sys, "setdlopenflags") and hasattr(os, "RTLD_NOW") and hasattr(os, "RTLD_GLOBAL"):
+    sys.setdlopenflags(os.RTLD_NOW | os.RTLD_GLOBAL)
+
 
 def _path_has(path: Path, relative: str) -> bool:
     try:

@@ -22,6 +22,10 @@
 
 #include <algorithm>
 
+#ifdef PTO_ENABLE_VFSIM_IR_PLANNER
+#include "native/IRPlanner.h"
+#endif
+
 namespace mlir {
 namespace pto {
 // Passes.h (included above) pulls in the global GEN_PASS_DECL block, which
@@ -524,6 +528,17 @@ static void clearPlanningAttrs(func::FuncOp func) {
   });
 }
 
+static LogicalResult runVfSimFusionPlanner(func::FuncOp func) {
+#ifdef PTO_ENABLE_VFSIM_IR_PLANNER
+  vfsim::PlannerOptions options;
+  return vfsim::planTileFusionIR(func.getOperation(), options);
+#else
+  return func.emitError()
+         << "--enable-vfsim-fusion-planner requires configuring PTOAS with "
+            "-DPTO_ENABLE_VFSIM_COSTMODEL=ON";
+#endif
+}
+
 struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
   using pto::impl::FusionPlanBase<FusionPlanPass>::FusionPlanBase;
 
@@ -565,6 +580,12 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
       SmallVector<PlannedFusionGroup, 8> groups =
           strategyEngine.planBlock(planningCtx, costModel);
       assignStableGroupMetadata(groups, ctx, nextGroupId);
+    }
+
+    if (enableVfSimFusionPlanner &&
+        failed(runVfSimFusionPlanner(func))) {
+      signalPassFailure();
+      return;
     }
 
     // The fusion metadata we annotate (group_id/order) is a planning *output*;

@@ -1,0 +1,190 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Full GeLU_poly tileop case derived from vfsimulator/cce_code/GeLU_poly.dsl.
+// Guards the VfSim IR planner row-unroll path end-to-end on a VPTO col-loop
+// trip of 1 (96x64 tile, col=64 -> one 64-lane inner iteration, so VfSim folds
+// the col dimension and places the > 1 factor on the row axis instead):
+//
+//   (1) REGION  -- pto-fusion-region-gen lifts VfSim's row_unroll_factor = 8
+//       onto the pto.fusion_region (col_unroll_factor stays 1).
+//   (2) LLF     -- pto-low-level-loop-fusion (the unroll pass input) still has
+//       TWO scf.for inside the fusion_region (outer row to %c96 step 1, inner
+//       col to %c64 step %c64 with iter_args, trip 1), and the col body holds
+//       one copy each of pto.vmins / pto.vmaxs / pto.vdiv.
+//   (3) UNROLL  -- --enable-unroll-after-loop-fusion consumes that factor and
+//       partial-unrolls the outer row scf.for (trip 96, factor 8, 96 % 8 == 0,
+//       step 1 -> step 8, no epilogue). The inner col scf.for (trip 1) is fully
+//       promoted away, so the fusion_region has only ONE scf.for; the col body
+//       is duplicated eight times (CHECK-COUNT-8 on pto.vmins); and the row
+//       factor is reset to 1 on the region (consumed).
+//
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-fusion-planner --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-region-gen -o /dev/null 2>&1 | FileCheck %s --check-prefix=REGION
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-fusion-planner --emit-vpto --enable-unroll-after-loop-fusion %s --mlir-print-ir-after=pto-low-level-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLF
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-fusion-planner --emit-vpto --enable-unroll-after-loop-fusion %s --mlir-print-ir-after=pto-unroll-after-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNROLL
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @vfsim_unroll_gelu_poly_96x64(
+      %x_ptr: !pto.ptr<f32>, %out_ptr: !pto.ptr<f32>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c96 = arith.constant 96 : index
+    %c64 = arith.constant 64 : index
+    %c6144 = arith.constant 6144 : index
+
+    %c_half = arith.constant 5.000000e-01 : f32
+    %c_inv_sqrt2 = arith.constant 7.071000e-01 : f32
+    %c_pos392 = arith.constant 3.920000e+00 : f32
+    %c_neg392 = arith.constant -3.920000e+00 : f32
+    %c05344 = arith.constant 5.344000e-01 : f32
+    %c75517 = arith.constant 7.551700e+00 : f32
+    %c10162809 = arith.constant 1.0162809e+02 : f32
+    %c13938015 = arith.constant 1.3938015e+03 : f32
+    %c50637915 = arith.constant 5.0637915e+03 : f32
+    %c296393848 = arith.constant 2.96393848e+04 : f32
+    %c312128582 = arith.constant 3.12128582e+01 : f32
+    %c308569641 = arith.constant 3.08569641e+02 : f32
+    %c302312476 = arith.constant 3.02312476e+03 : f32
+    %c142433662 = arith.constant 1.42433662e+04 : f32
+    %c262672246 = arith.constant 2.62672246e+04 : f32
+    %c_one = arith.constant 1.000000e+00 : f32
+
+    %x_view = pto.make_tensor_view %x_ptr,
+      shape = [%c1, %c1, %c1, %c96, %c64],
+      strides = [%c6144, %c6144, %c6144, %c64, %c1]
+      : !pto.tensor_view<1x1x1x96x64xf32>
+    %out_view = pto.make_tensor_view %out_ptr,
+      shape = [%c1, %c1, %c1, %c96, %c64],
+      strides = [%c6144, %c6144, %c6144, %c64, %c1]
+      : !pto.tensor_view<1x1x1x96x64xf32>
+
+    %x_part = pto.partition_view %x_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c96, %c64]
+      : !pto.tensor_view<1x1x1x96x64xf32> -> !pto.partition_tensor_view<1x1x1x96x64xf32>
+    %out_part = pto.partition_view %out_view,
+      offsets = [%c0, %c0, %c0, %c0, %c0],
+      sizes = [%c1, %c1, %c1, %c96, %c64]
+      : !pto.tensor_view<1x1x1x96x64xf32> -> !pto.partition_tensor_view<1x1x1x96x64xf32>
+
+    %v0 = pto.alloc_tile : !pto.tile_buf<vec, 96x64xf32>
+    %v1 = pto.alloc_tile : !pto.tile_buf<vec, 96x64xf32>
+    %v2 = pto.alloc_tile : !pto.tile_buf<vec, 96x64xf32>
+    %v3 = pto.alloc_tile : !pto.tile_buf<vec, 96x64xf32>
+    %v4 = pto.alloc_tile : !pto.tile_buf<vec, 96x64xf32>
+    %v5 = pto.alloc_tile : !pto.tile_buf<vec, 96x64xf32>
+    %v6 = pto.alloc_tile : !pto.tile_buf<vec, 96x64xf32>
+
+    pto.tload ins(%x_part : !pto.partition_tensor_view<1x1x1x96x64xf32>)
+              outs(%v0 : !pto.tile_buf<vec, 96x64xf32>)
+
+    pto.tmuls ins(%v0, %c_half : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v1 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmuls ins(%v0, %c_inv_sqrt2 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v2 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmins ins(%v2, %c_pos392 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v2 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmaxs ins(%v2, %c_neg392 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v2 : !pto.tile_buf<vec, 96x64xf32>)
+
+    pto.tmul ins(%v2, %v2 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v3 : !pto.tile_buf<vec, 96x64xf32>)
+
+    pto.tmuls ins(%v3, %c05344 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v4, %c75517 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v4, %v3 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v4, %c10162809 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v4, %v3 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v4, %c13938015 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v4, %v3 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v4, %c50637915 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v4, %v3 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v4, %c296393848 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v4, %v2 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v4 : !pto.tile_buf<vec, 96x64xf32>)
+
+    pto.tadds ins(%v3, %c312128582 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v5, %v3 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v5, %c308569641 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v5, %v3 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v5, %c302312476 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v5, %v3 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v5, %c142433662 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v5, %v3 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v5, %c262672246 : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+
+    pto.tdiv ins(%v4, %v5 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tadds ins(%v5, %c_one : !pto.tile_buf<vec, 96x64xf32>, f32)
+              outs(%v5 : !pto.tile_buf<vec, 96x64xf32>)
+    pto.tmul ins(%v5, %v1 : !pto.tile_buf<vec, 96x64xf32>, !pto.tile_buf<vec, 96x64xf32>)
+             outs(%v6 : !pto.tile_buf<vec, 96x64xf32>)
+
+    pto.tstore ins(%v6 : !pto.tile_buf<vec, 96x64xf32>)
+               outs(%out_part : !pto.partition_tensor_view<1x1x1x96x64xf32>)
+    return
+  }
+}
+
+// Each RUN line pipes exactly one pass dump, so a func.func label cleanly
+// scopes its checks to that single pass output.
+//
+// REGION-LABEL: func.func @vfsim_unroll_gelu_poly_96x64(
+// REGION: pto.fusion_region {
+// REGION: pto.tdiv
+// REGION: pto.yield(%{{.*}}) : (!pto.tile_buf<vec, 96x64xf32>) -> ()
+// REGION: } {pto.fusion.col_unroll_factor = 1 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 8 : i64} : !pto.tile_buf<vec, 96x64xf32>
+
+// Before unroll: the fusion_region carries two nested scf.for -- outer row loop
+// (trip 96, step 1) and inner col loop (trip 1, step %c64, with iter_args) --
+// and the col body holds one copy each of vmins / vmaxs / vdiv (CHECK-NOT after
+// the first vmins up to yield asserts exactly one copy). The factor is still 8.
+// LLF-LABEL: func.func @vfsim_unroll_gelu_poly_96x64(
+// LLF: pto.fusion_region {
+// LLF: scf.for %{{.*}} = %{{.*}} to %c96{{(_[0-9]+)?}} step %c1{{(_[0-9]+)?}} {
+// LLF: scf.for %{{.*}} = %{{.*}} to %c64{{(_[0-9]+)?}} step %c64{{(_[0-9]+)?}} iter_args
+// LLF: pto.vmins
+// LLF: pto.vmaxs
+// LLF: pto.vdiv
+// LLF-NOT: pto.vmins
+// LLF: pto.yield
+// LLF: } {pto.fusion.col_unroll_factor = 1 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 8 : i64} : !pto.tile_buf<vec, 96x64xf32>
+
+// After unroll: the inner col scf.for (trip 1) is promoted away and only the
+// outer row scf.for survives (step 1 -> step 8, no step %c64 remains); the col
+// body is duplicated eight times (CHECK-COUNT-8 on pto.vmins -- the count is
+// placed directly after scf.for with no prior vmins match, so FileCheck's
+// count cursor is not advanced past the first copies); and the row factor is
+// reset to 1 on the region (consumed).
+// UNROLL-LABEL: func.func @vfsim_unroll_gelu_poly_96x64(
+// UNROLL: pto.fusion_region {
+// UNROLL: scf.for %{{.*}} = %{{.*}} to %c96 step %c8
+// UNROLL-NOT: step %c64
+// UNROLL-COUNT-8: pto.vmins
+// UNROLL: pto.vmaxs
+// UNROLL: pto.vdiv
+// UNROLL: } {pto.fusion.col_unroll_factor = 1 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 96x64xf32>
