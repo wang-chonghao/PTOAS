@@ -575,7 +575,10 @@ static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
 static llvm::cl::opt<bool> enableUnrollAfterLoopFusion(
     "enable-unroll-after-loop-fusion",
     llvm::cl::desc("Partial-unroll the innermost scf.for in pto.fusion_region by "
-                   "the cost-model factor."),
+                   "the cost-model factor. VPTO backend only; consumes "
+                   "pto.fusion.row/col_unroll_factor, which is produced by "
+                   "--enable-vfsim-fusion-planner. Requires --pto-arch=a5 and "
+                   "--enable-op-fusion."),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> enableShapeInference(
@@ -2946,6 +2949,17 @@ int mlir::pto::compilePTOASModule(
     llvm::errs() << "Error: --enable-unroll-after-loop-fusion requires "
                     "--pto-arch=a5 and --enable-op-fusion.\n";
     return 1;
+  }
+  if (enableUnrollAfterLoopFusion && effectiveBackend != PTOBackend::VPTO) {
+    llvm::errs() << "Error: --enable-unroll-after-loop-fusion requires "
+                    "--pto-backend=vpto; the pass is VPTO-only and is not "
+                    "inserted under other backends.\n";
+    return 1;
+  }
+  if (enableUnrollAfterLoopFusion && !enableVfSimFusionPlanner) {
+    llvm::errs() << "Warning: --enable-unroll-after-loop-fusion consumes "
+                    "pto.fusion.row/col_unroll_factor, which is produced by "
+                    "--enable-vfsim-fusion-planner.\n";
   }
 
   const bool enableA5FusionPath =
