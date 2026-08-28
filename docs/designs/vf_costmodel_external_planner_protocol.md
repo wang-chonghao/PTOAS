@@ -4,7 +4,8 @@
 当前实现面向 A5 tile fusion 路径：PTOAS 负责生成合法 fusion group，VfSim 基于
 已选 group 对 ABCABC 和 AABBCC 两种 unroll 指令顺序共同寻优，并把最优候选的
 unroll factor 写回同一份 MLIR IR。两种顺序只存在于 costmodel 内部，PTOAS/VfSim
-接口不返回顺序模式。
+接口不返回顺序模式。VfSim adaptor 基于 `cpp-native-vfsim` 的 canonical API，
+将 tileop-level MLIR 直接转换为 `CanonicalVfInfo`，不经过旧版 `VfInfo`。
 
 ## 接入形式
 
@@ -60,7 +61,10 @@ vfsim::ir_planner
 ## 编译链路
 
 ```text
-PreFusionAnalysis
+InsertTemplateAttributes
+  - PTOAS 按优先级写入 TileLib candidates
+  - candidates[0] 是后续 ExpandTileOp 将使用的模板
+  -> PreFusionAnalysis
   -> FusionPlan
        - PTOAS 生成合法 fusion group
        - PTOAS 写入 pto.fusion.group_id / pto.fusion.order
@@ -120,7 +124,7 @@ mlir::LogicalResult planTileFusionIR(
 | 项 | 约定 |
 |---|---|
 | 输入 IR | FusionPlan 后的 MLIR operation；当前自动 tileop fusion 路线传入 `func::FuncOp`。 |
-| 输入内容 | PTOAS 已写好 `pto.fusion.group_id` 和 `pto.fusion.order` 的 tileop-level IR。 |
+| 输入内容 | PTOAS 已写好 fusion metadata 和 TileLib `candidates` 的 tileop-level IR。 |
 | 输出方式 | VfSim 原地写回 `pto.fusion.row_unroll_factor` / `pto.fusion.col_unroll_factor`。 |
 | 输出语义 | 只返回最优 unroll factor，不返回或写入 ABCABC/AABBCC 模式。 |
 | 返回值 | `success()` 表示 planner 完成、没有可处理 group，或某些 group 被 warning 降级跳过；`failure()` 表示接口级错误。 |
@@ -134,6 +138,7 @@ PTOAS 传给 VfSim 的 IR 必须已经包含：
 |---|---|
 | `pto.fusion.group_id` | PTOAS 已选择的 fusion group ID。 |
 | `pto.fusion.order` | group 内 tileop 的执行顺序。 |
+| `candidates` | PTOAS 已排序的 TileLib 模板候选；adaptor 读取 `candidates[0]`。 |
 
 VfSim 从 IR 中读取：
 
@@ -146,7 +151,7 @@ VfSim 从 IR 中读取：
 | 输入输出 value | tileop operands |
 | dtype | operand/result type |
 | shape | tile buffer type |
-| 模板参数 | tileop attrs |
+| 已选模板 | `candidates[0].name` 和 `candidates[0].loop_depth` |
 
 示例：
 
@@ -165,6 +170,31 @@ pto.tmul ins(%a, %b : !pto.tile_buf<vec, 32x128xf32>,
 ```
 
 VfSim 不重新判断这组 tileop 是否可以融合，只基于 PTOAS 已选 group 生成优化决策。
+同一 fusion group 的成员必须选择兼容的 `loop_depth`；否则该 group 会被 warning
+降级跳过。
+
+## CanonicalVfInfo 转换
+
+adaptor 按 PTOAS 已选模板构造与后续 `ExpandTileOp` 一致的循环结构：
+
+| `candidates[0].loop_depth` | CanonicalVfInfo 循环结构 | 搜索 trip count |
+|---|---|---|
+| `1` | 单个 flat loop，按连续 element range 遍历 | `ceil(rows * cols / vector_lanes)` |
+| `2`，col trip > 1 | row loop 内嵌 col loop | `ceil(cols / vector_lanes)` |
+| `2`，col trip = 1 | 单次 col loop 被折叠，只保留 row loop | `rows` |
+
+表中的 `rows/cols` 是 tile type 的 valid shape。对于带
+`rows/cols/v_row/v_col` 的 verbose type，循环范围使用 `v_row/v_col`，UB
+storage shape 和逐行地址 stride 仍使用 physical `rows/cols`；动态 valid shape
+暂不进入 costmodel。
+
+每个 tile 输入转换为 UB value 和 `VLDS`，融合组内 SSA 依赖转换为 register value
+依赖，最终外部输出转换为 `VSTS`。ABCABC/AABBCC 候选通过复制 canonical
+instruction/value definition 构造，因此两种候选使用相同依赖图，只改变展开后的
+指令顺序。
+
+合法 factor 满足 `1 <= factor <= 8` 且能整除搜索 trip count。baseline 失败时
+跳过整个 group；单个 ABCABC/AABBCC 候选失败时仅 warning 并继续评估其他候选。
 
 ## 输出 IR
 
@@ -179,8 +209,9 @@ VfSim 输出仍然是同一份 tileop-level IR，通过 attrs 表示优化计划
 
 | 情况 | VfSim 输出 |
 |---|---|
-| col trip count 为 1 | `row_unroll_factor > 1`，`col_unroll_factor = 1` |
-| col trip count 大于 1 | `row_unroll_factor = 1`，`col_unroll_factor > 1` |
+| 1D flat 模板 | `row_unroll_factor = 1`，factor 写入 `col_unroll_factor` |
+| 2D 模板且 col trip count 为 1 | factor 写入 `row_unroll_factor`，`col_unroll_factor = 1` |
+| 2D 模板且 col trip count 大于 1 | `row_unroll_factor = 1`，factor 写入 `col_unroll_factor` |
 
 VfSim 在内部保留最优候选的 ABCABC/AABBCC 模式用于调试和 cycle 对比，但该模式
 不是 external planner protocol 的一部分。PTOAS 只接收上表中的 factor attrs。

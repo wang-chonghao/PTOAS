@@ -6,30 +6,30 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// A=B+C; D=A*B elementwise fusion case.
-// Guards the VfSim IR planner col-unroll path on a small 32x128 tile.
+// A=B+C; E=exp(A); D=E*B elementwise fusion case.
+// Guards the template-aware VfSim planner on a small 32x128 tile.
 // The pinned VfSimulator commit is expected to choose col_unroll_factor = 2
-// for this case, expanding the fused inner loop to exercise the PTOAS
+// from the AABBCC candidate for this case, expanding the fused loop to exercise the PTOAS
 // planner-to-region-to-unroll plumbing. If a future VfSimulator submodule
 // update changes that costmodel decision, update this expected value together
 // with the submodule bump.
 //
-//   (1) REGION  -- PTOAS forms one fusion_region containing tadd + tmul, and
+//   (1) REGION  -- PTOAS forms one fusion_region containing tadd + texp + tmul, and
 //       VfSim writes col_unroll_factor = 2.
 //   (2) LLF     -- pto-low-level-loop-fusion lowers the group to one flat
-//       vector loop. The loop still carries one vadd and one vmul before
+//       64-iteration vector loop. The loop carries vadd, vexp, and vmul before
 //       unroll.
 //   (3) UNROLL  -- pto-unroll-after-loop-fusion consumes col_unroll_factor=2,
-//       fully unrolls the inner col loop, and leaves two vadd/vmul copies in
-//       the row loop body.
+//       and leaves two ABCABC copies for VPTOScheduler to reorder.
 //
 // REQUIRES: vfsim-costmodel
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-costmodel-optimization --dump-vfsim-unroll-test --emit-pto-ir %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=VFSIM
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-costmodel-optimization --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-region-gen -o /dev/null 2>&1 | FileCheck %s --check-prefix=REGION
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-costmodel-optimization --emit-vpto %s --mlir-print-ir-after=pto-low-level-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLF
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-costmodel-optimization --enable-unroll-after-loop-fusion --emit-vpto %s --mlir-print-ir-after=pto-unroll-after-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNROLL
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
-  func.func @vfsim_unroll_tadd_tmul_32x128(
+  func.func @vfsim_unroll_tadd_texp_tmul_32x128(
       %b_ptr: !pto.ptr<f32>,
       %c_ptr: !pto.ptr<f32>,
       %d_ptr: !pto.ptr<f32>) attributes {pto.kernel} {
@@ -60,6 +60,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     %b = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
     %c = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
     %a = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %e = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
     %d = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
 
     pto.tload ins(%b_part : !pto.partition_tensor_view<32x128xf32>)
@@ -68,7 +69,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
               outs(%c : !pto.tile_buf<vec, 32x128xf32>)
     pto.tadd ins(%b, %c : !pto.tile_buf<vec, 32x128xf32>, !pto.tile_buf<vec, 32x128xf32>)
              outs(%a : !pto.tile_buf<vec, 32x128xf32>)
-    pto.tmul ins(%a, %b : !pto.tile_buf<vec, 32x128xf32>, !pto.tile_buf<vec, 32x128xf32>)
+    pto.texp ins(%a : !pto.tile_buf<vec, 32x128xf32>)
+             outs(%e : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tmul ins(%e, %b : !pto.tile_buf<vec, 32x128xf32>, !pto.tile_buf<vec, 32x128xf32>)
              outs(%d : !pto.tile_buf<vec, 32x128xf32>)
     pto.tstore ins(%d : !pto.tile_buf<vec, 32x128xf32>)
                outs(%d_part : !pto.partition_tensor_view<32x128xf32>)
@@ -76,31 +79,43 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 }
 
-// REGION-LABEL: func.func @vfsim_unroll_tadd_tmul_32x128(
+// VFSIM: VfSim group=0 template=template_tadd_1d traversal=1D modeled_trip=64 candidate_trip=64 dtype=fp32
+// VFSIM: mode=NO_UNROLL unroll=1 trip=64 dtype=fp32 cycles=214
+// VFSIM: mode=AABBCC unroll=2 trip=64 dtype=fp32 cycles=210
+// VFSIM: selected mode=AABBCC unroll=2 cycles=210
+// VFSIM-NOT: warning: VfSim planner skipped
+
+// REGION-LABEL: func.func @vfsim_unroll_tadd_texp_tmul_32x128(
 // REGION: pto.fusion_region {
 // REGION: pto.tadd
+// REGION: pto.texp
 // REGION: pto.tmul
 // REGION: pto.yield(%{{.*}}) : (!pto.tile_buf<vec, 32x128xf32>) -> ()
 // REGION: } {pto.fusion.col_unroll_factor = 2 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
 
-// LLF-LABEL: func.func @vfsim_unroll_tadd_tmul_32x128(
+// LLF-LABEL: func.func @vfsim_unroll_tadd_texp_tmul_32x128(
 // LLF: pto.fusion_region {
 // LLF: scf.for %{{.*}} = %{{.*}} to %{{.*}} step %c64{{(_[0-9]+)?}}
 // LLF: pto.vadd
+// LLF: pto.vexp
 // LLF: pto.vmul
 // LLF-NOT: pto.vadd
+// LLF-NOT: pto.vexp
 // LLF-NOT: pto.vmul
 // LLF: pto.yield
 // LLF: } {pto.fusion.col_unroll_factor = 2 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
 
-// UNROLL-LABEL: func.func @vfsim_unroll_tadd_tmul_32x128(
+// UNROLL-LABEL: func.func @vfsim_unroll_tadd_texp_tmul_32x128(
 // UNROLL: pto.fusion_region {
 // UNROLL: scf.for %{{.*}} = %{{.*}} to %{{.*}} step %c128{{(_[0-9]+)?}}
 // UNROLL-NOT: step %c64
 // UNROLL: pto.vadd
+// UNROLL: pto.vexp
 // UNROLL: pto.vmul
 // UNROLL: pto.vadd
+// UNROLL: pto.vexp
 // UNROLL: pto.vmul
 // UNROLL-NOT: pto.vadd
+// UNROLL-NOT: pto.vexp
 // UNROLL-NOT: pto.vmul
 // UNROLL: } {pto.fusion.col_unroll_factor = 1 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
