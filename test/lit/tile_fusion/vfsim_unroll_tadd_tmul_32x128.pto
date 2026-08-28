@@ -16,9 +16,9 @@
 //
 //   (1) REGION  -- PTOAS forms one fusion_region containing tadd + tmul, and
 //       VfSim writes col_unroll_factor = 2.
-//   (2) LLF     -- pto-low-level-loop-fusion lowers the group to nested loops:
-//       row trip 32, col trip 2. The inner col loop still carries one vadd and
-//       one vmul before unroll.
+//   (2) LLF     -- pto-low-level-loop-fusion lowers the group to one flat
+//       vector loop. The loop still carries one vadd and one vmul before
+//       unroll.
 //   (3) UNROLL  -- pto-unroll-after-loop-fusion consumes col_unroll_factor=2,
 //       fully unrolls the inner col loop, and leaves two vadd/vmul copies in
 //       the row loop body.
@@ -85,8 +85,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
 // LLF-LABEL: func.func @vfsim_unroll_tadd_tmul_32x128(
 // LLF: pto.fusion_region {
-// LLF: scf.for %{{.*}} = %{{.*}} to %c32{{(_[0-9]+)?}} step %c1{{(_[0-9]+)?}} {
-// LLF: scf.for %{{.*}} = %{{.*}} to %c128{{(_[0-9]+)?}} step %c64{{(_[0-9]+)?}}
+// LLF: scf.for %{{.*}} = %{{.*}} to %{{.*}} step %c64{{(_[0-9]+)?}}
 // LLF: pto.vadd
 // LLF: pto.vmul
 // LLF-NOT: pto.vadd
@@ -96,7 +95,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
 // UNROLL-LABEL: func.func @vfsim_unroll_tadd_tmul_32x128(
 // UNROLL: pto.fusion_region {
-// UNROLL: scf.for %{{.*}} = %{{.*}} to %c32 step %c1
+// UNROLL: scf.for %{{.*}} = %{{.*}} to %{{.*}} step %c128{{(_[0-9]+)?}}
 // UNROLL-NOT: step %c64
 // UNROLL: pto.vadd
 // UNROLL: pto.vmul
